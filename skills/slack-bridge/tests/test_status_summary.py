@@ -364,7 +364,7 @@ def test_the_neutral_hold_notes_are_the_skills_own():
 def test_waiting_hand_offs_are_said_in_neutral_ink_and_quiet_rows_stay_clear():
     waiting = summarize(_quiet(inbox_retrying={"count": 2, "last_error": {"at": "2026-11-22T22:00:00Z",
                                                                           "text": "HostRetryError: capacity full"}}))
-    assert (waiting["text"], waiting["tone"]) == ("Connected · 2 Slack events wait to be passed to Ouroboros", "muted")
+    assert (waiting["text"], waiting["tone"]) == ("Connected · 2 Slack events wait for Ouroboros to confirm them", "muted")
     assert waiting["attention"][0]["error"]["text"] == "HostRetryError: capacity full"
     assert summarize(_quiet(inbox_retrying={"count": 0, "last_error": None}))["tone"] == "ok"
     # When no place was confirmed, that item already explains the wait; no second item.

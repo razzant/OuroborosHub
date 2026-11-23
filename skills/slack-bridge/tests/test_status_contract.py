@@ -167,6 +167,8 @@ def test_fresh_install_edge_reports_not_configured_zero_recent_and_null_last_err
             "uncertain_messages": 0,
             "failed_messages_partly_delivered": 0,
             "uncertain_messages_partly_delivered": 0,
+            "failed_messages_still_queued": 0,
+            "uncertain_messages_still_queued": 0,
             "last_failed_at": None,
             "last_uncertain_at": None,
             "last_error": None,
@@ -243,6 +245,8 @@ def test_dead_companion_edge_never_reports_connected_starting_or_reconnecting(tm
             "since": None,
             "error": last_err,
         }
+        # The route's first line and tone for a dead companion (also the shape every path must give).
+        assert (payload["text"], payload["tone"]) == ("Disconnected · the bridge process is not running", "error")
 
 
 def _load_daemon():
@@ -543,6 +547,8 @@ def test_recent_problems_and_old_failure_outside_window_edge(tmp_path) -> None:
             "uncertain_messages": 0,
             "failed_messages_partly_delivered": 0,
             "uncertain_messages_partly_delivered": 0,
+            "failed_messages_still_queued": 0,
+            "uncertain_messages_still_queued": 0,
             "last_failed_at": _iso_z(old_ts),
             "last_uncertain_at": None,
             "last_error": {"at": _iso_z(old_ts), "state": "failed", "text": "channel_not_found"},
@@ -640,7 +646,7 @@ def test_held_only_edge_keeps_last_error_null_and_preserves_last_delivery_error(
     assert payload["outbox_held"] == 2
     assert payload["text"] == "Connected · 1 message and 1 action held"
     assert payload["attention"] == [{"kind": "held", "tone": "muted", "headline": "1 message and 1 action held",
-                                     "messages": 1, "actions": 1,
+                                     "messages": 1, "actions": 1, "with_problem_parts": 0,
                                      "reasons": [{"reason": "Northstar Labs is paused", "count": 2}],
                                      "reason": "Northstar Labs is paused"}]
     assert payload["held_reasons"] == [{"reason": "Northstar Labs is paused", "note": "Held: Northstar Labs is paused",
@@ -995,9 +1001,10 @@ def test_a_bridge_that_never_started_has_not_checked_the_host(tmp_path) -> None:
 
 
 def test_status_route_answers_text_and_tone_on_every_path(tmp_path) -> None:
-    """The next shared card accepts a status only with string text and tone; every route path gives both."""
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    assert child.wait(timeout=10.0) == 0
+    """The next shared card accepts a status only with string text and tone; every route path gives both.
+
+    The dead-companion path is asserted in test_dead_companion_edge_never_reports_connected_starting_or_reconnecting.
+    """
     seen = {}
 
     def read(name, api):
@@ -1009,10 +1016,6 @@ def test_status_route_answers_text_and_tone_on_every_path(tmp_path) -> None:
 
     read("not configured", _TokensApi(tmp_path / "a", bot_token="", app_token=""))
     read("never started", _TokensApi(tmp_path / "a"))
-    store = BridgeStore(tmp_path / "b")
-    store.set_runtime(socket_state="connected", host_adapter_state="active", companion_pid=child.pid)
-    store.close()
-    read("companion dead", _TokensApi(tmp_path / "b"))
     (tmp_path / "c").mkdir()
     (tmp_path / "c" / "settings.json").write_bytes(b"{corrupt json")
     read("settings unreadable", _TokensApi(tmp_path / "c"))
@@ -1023,7 +1026,156 @@ def test_status_route_answers_text_and_tone_on_every_path(tmp_path) -> None:
     assert seen == {
         "not configured": ("Not set up · Slack tokens are missing", "warn"),
         "never started": ("Disconnected · the bridge has not started", "error"),
-        "companion dead": ("Disconnected · the bridge process is not running", "error"),
         "settings unreadable": ("Connection error · the bridge settings can't be read", "error"),
         "store unreadable": ("Status unknown · the bridge's queue store can't be read", "error"),
     }
+
+
+# ---------- round 6: each outcome's own window, mixed parts, unknown liveness, Host recovery ----------
+
+@pytest.mark.parametrize("old_state,new_state,new_error", [
+    ("uncertain", "failed", "channel_not_found"),  # unknown two days ago, refused today: today's refusal shows
+    ("failed", "uncertain", "ReadTimeout"),  # refused two days ago, unknown today: today's unknown shows
+])
+def test_each_outcome_of_one_message_is_windowed_by_its_own_time(tmp_path, old_state, new_state, new_error) -> None:
+    from lib.status_summary import attention_items
+    now = 1795384800.0
+    store = BridgeStore(tmp_path)
+    try:
+        store.enqueue_outbox(request_id="two-days", target="C09A", thread_ts="", chunks=("part one", "part two"))
+        first = store.claim_outbox()
+        store.fail_outbox(first.row_id, first.lease_token, "old error", state=old_state)
+        _set_row_time(store.path, "outbox", "id=?", (first.row_id,), now - 2 * 86400)
+        second = store.claim_outbox()
+        store.fail_outbox(second.row_id, second.lease_token, new_error, state=new_state)
+        _set_row_time(store.path, "outbox", "id=?", (second.row_id,), now - 60)
+        status = store.status(now=now, pid_alive=lambda _pid: True)
+    finally:
+        store.close()
+    text = status["recent_problems"]["outbound_text"]
+    # The messages agree with the parts of the window.
+    assert (text["failed"], text["uncertain"]) == ((1, 0) if new_state == "failed" else (0, 1))
+    assert (text["failed_messages"], text["uncertain_messages"]) == ((1, 0) if new_state == "failed" else (0, 1))
+    items = attention_items({**status, **_quiet_route_payload()})
+    kind = "not_delivered" if new_state == "failed" else "outcome_unknown"
+    assert [item["kind"] for item in items] == [kind]
+    assert items[0]["error"]["text"] == new_error
+
+
+def test_a_refused_part_with_another_part_still_queued_is_one_message_with_two_outcomes(tmp_path) -> None:
+    from lib.status_summary import attention_items
+    store = BridgeStore(tmp_path)
+    try:
+        store.enqueue_outbox(request_id="mixed", target="C09MIX", thread_ts="", chunks=("part one", "part two"))
+        first = store.claim_outbox()
+        store.fail_outbox(first.row_id, first.lease_token, "msg_blocked", state="failed")
+        second = store.claim_outbox()
+        store.hold_outbox(second, "Held: Ops room is paused")
+        store.enqueue_outbox(request_id="whole", target="C09ONE", thread_ts="", chunks=("only part",))
+        only = store.claim_outbox()
+        store.fail_outbox(only.row_id, only.lease_token, "channel_not_found", state="failed")
+        status = store.status()
+    finally:
+        store.close()
+    text = status["recent_problems"]["outbound_text"]
+    assert (text["failed_messages"], text["failed_messages_still_queued"]) == (2, 1)
+    assert status["outbound_messages"]["held"] == 1
+    assert status["outbound_messages_with_problem_parts"] == {"waiting": 0, "held": 1, "leased": 0}
+    items = {item["kind"]: item for item in attention_items({**status, **_quiet_route_payload()})}
+    assert items["not_delivered"]["still_queued"] == 1  # the card advises waiting for that one, not resending it
+    assert items["held"]["with_problem_parts"] == 1  # the held message is the same one, and the card says so
+
+
+def test_an_unanswered_probe_marks_the_link_item_as_its_last_record(tmp_path) -> None:
+    from lib.status_summary import attention_items
+    store = BridgeStore(tmp_path)
+    try:
+        store.set_runtime(socket_state="error", last_socket_error="ConnectError: All connection attempts failed",
+                          companion_pid=4242, host_adapter_state="active")
+        unknown = store.status(pid_alive=lambda _pid: None)
+        running = store.status(pid_alive=lambda _pid: True)
+    finally:
+        store.close()
+    assert unknown["link"]["detail"] == "socket_error" and unknown["link"]["companion_alive"] is None
+    link_item = attention_items(unknown)[0]
+    # The card's retry promise belongs to a process confirmed running; this item says the probe did not answer.
+    assert link_item["kind"] == "link" and link_item["process_unknown"] is True
+    assert "process_unknown" not in attention_items(running)[0]
+
+
+def test_an_event_whose_hand_off_reply_was_lost_waits_for_confirmation(tmp_path) -> None:
+    from lib.status_summary import summarize
+    store = BridgeStore(tmp_path)
+    try:
+        raw = _envelope(1)
+        store.ingest_envelope(raw, parse_socket_envelope(raw, bot_user_id="U_BOT"))
+        item = store.claim_inbox()
+        # The Host recorded the turn, but the reply to the POST was lost: no reference is stored here.
+        store.retry_inbox(item.row_id, item.lease_token, "ReadTimeout: reply lost after Host recorded the turn",
+                          delay_seconds=5.0)
+        status = store.status()
+    finally:
+        store.close()
+    assert status["inbox_retrying"]["count"] == 1
+    summary = summarize({**status, **_quiet_route_payload()})
+    assert summary["text"] == "Connected · 1 Slack event waits for Ouroboros to confirm it"
+    assert "not taken" not in summary["text"] and "passed to Ouroboros" not in summary["text"]
+
+
+@pytest.mark.parametrize("path", ["inbound", "outbound"])
+def test_a_later_request_that_confirms_the_host_binding_reaches_the_status(tmp_path, path) -> None:
+    """After a 503 at start, the next /identity answer from submit or a place check records the binding."""
+    import httpx
+    from lib.host_adapter import LoopbackPresenceHostAdapter
+    from lib.runtime import BridgeRuntime, _discover_reporting
+    from test_host_adapter import _item
+
+    identity_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/identity":
+            identity_calls.append(request)
+            if len(identity_calls) == 1:
+                return httpx.Response(503, json={"ok": False})
+            return httpx.Response(200, json={"ok": True, "places_version": 1, "presence_delivery_version": 1,
+                                             "presence_reaction_context": 1, "presence_explicit_completion": 1})
+        if request.url.path == "/presence/place":
+            return httpx.Response(200, json={"state": "active", "label": "Ops room"})
+        if request.url.path == "/presence/turn":
+            return httpx.Response(200, json={"status": "completed", "outcome": "silent", "text": "",
+                                             "turn_ref": "turn-synth-1", "work_ref": ""})
+        return httpx.Response(404, json={"ok": False})
+
+    async def run() -> None:
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        adapter = LoopbackPresenceHostAdapter(binding_id="", host_service_url="http://127.0.0.1:8767",
+                                              skill_token="skill-token", http_client=http)
+        store = BridgeStore(tmp_path)
+        try:
+            BridgeRuntime(store=store, slack=_Slack(), host=adapter, bot_user_id="U09OUROBOT1")
+            # What run() does at start: the 503 leaves the binding unconfirmed.
+            store.set_runtime(socket_state="connected", companion_pid=os.getpid())
+            await _discover_reporting(adapter, store)
+            store.set_runtime(host_adapter_state="active" if adapter.available else "missing_binding_id")
+            assert store.status()["link"]["detail"] == "host_adapter_inactive"
+            writes = []
+            original = store.set_runtime
+            store.set_runtime = lambda **values: (writes.append(values), original(**values))[1]
+            if path == "inbound":
+                await adapter.submit(_item())  # its own discovery confirms the binding, then the turn is taken
+            else:
+                assert await adapter.place_hold("T1", "C1") == ""  # the outbound worker's check before a send
+            store.set_runtime = original
+            assert len(writes) == 1 and writes[0]["host_adapter_state"] == "active"  # one write, at the change
+            await adapter.place_hold("T1", "C1")  # already known: no second discovery request, no write
+            assert len(identity_calls) == 2
+        finally:
+            store.close()
+            await http.aclose()
+
+    asyncio.run(run())
+    reads = len(identity_calls)
+    payload = _read_status_route(_TokensApi(tmp_path))
+    assert len(identity_calls) == reads  # a status read asks nothing of the Host
+    assert payload["host_adapter_state"] == "active" and payload["link"]["detail"] == "ok"
+    assert payload["text"] == "Connected · nothing needs attention"

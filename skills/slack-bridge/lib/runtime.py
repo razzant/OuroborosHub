@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -77,9 +78,21 @@ def _event_directory_name(item: InboxItem) -> str:
 async def _discover_reporting(host: Any, store: BridgeStore) -> int:
     discover = getattr(host, "discover_delivery_support", None)
     mode = await discover() if discover is not None else 0
-    # A recheck that finds the Host binding again (host.available turns True after a failed start-time check)
-    # updates the stored view, so the status stops saying events are not passed on. Availability never turns
-    # back off within one companion, so only that change is written here; the start value is written by run().
+    if getattr(host, "capabilities_listener", None) is None:
+        # A host without the listener (older adapters, test doubles) is recorded on every check, as before.
+        _record_capabilities(host, store, mode)
+    return mode
+
+
+def _record_capabilities(host: Any, store: BridgeStore, mode: int | None = None) -> None:
+    """Write what the Host binding offers into the status store.
+
+    Run by the adapter's listener once each time a discovery changes what it knows, from any caller (a submit, a
+    place check, a report or a recheck), so a later answer that restores the binding after a failed check clears
+    "events are not passed to Ouroboros" without an extra request or a write per status read. Availability never
+    turns back off within one companion, so only "active" is written here; the start value is written by run().
+    """
+    mode = getattr(host, "delivery_reporting_version", 0) if mode is None else mode
     adapter = {"host_adapter_state": "active"} if getattr(host, "available", None) is True else {}
     store.set_runtime(
         **adapter,
@@ -96,7 +109,6 @@ async def _discover_reporting(host: Any, store: BridgeStore) -> int:
         reaction_history_limitation="" if getattr(host, "explicit_completion", 0) == 1 else (
             "Host history for reactions needs an update: own reaction writes keep their provider receipt only."),
     )
-    return mode
 
 
 def _is_reaction_report(payload: Any) -> bool:
@@ -1017,6 +1029,8 @@ class BridgeRuntime:
         self.store = store
         self.slack = slack
         self.host = host
+        if hasattr(host, "capabilities_listener"):
+            host.capabilities_listener = functools.partial(_record_capabilities, host, store)
         self.socket = SocketModeClient(
             slack,
             store,

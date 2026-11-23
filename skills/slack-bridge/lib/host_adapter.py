@@ -8,7 +8,7 @@ import os
 import re
 from copy import Error as CopyError
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Mapping, Protocol
+from typing import Any, AsyncIterator, Callable, Mapping, Protocol
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -442,10 +442,26 @@ class LoopbackPresenceHostAdapter:
         # A Host without ``presence_wake_signals: 1`` refuses an event naming a signal.
         self.wake_signals = 0
         self.connector_identity = dict(identity or {})
+        # Called once whenever a discovery changes what the adapter knows (set by the runtime to record it in the
+        # store), whichever caller ran the discovery: a submit, a place check or a report, not only a recheck.
+        self.capabilities_listener: Callable[[], None] | None = None
+
+    def _capabilities(self) -> tuple[Any, ...]:
+        return (self.available, self.delivery_reporting_status, self.delivery_reporting_version,
+                self.continuation_version, self.places_version, self.presence_identity, self.reaction_context,
+                self.explicit_completion, self.wake_signals)
 
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
             return self.delivery_reporting_version
+        before = self._capabilities()
+        try:
+            return await self._discover_delivery_support()
+        finally:
+            if self.capabilities_listener is not None and self._capabilities() != before:
+                self.capabilities_listener()
+
+    async def _discover_delivery_support(self) -> int:
         if self._skill_token is None:
             # No owner binding means no credential: never probe Host unauthenticated.
             self.delivery_reporting_version = 0

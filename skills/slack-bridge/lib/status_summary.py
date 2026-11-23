@@ -148,6 +148,9 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 item["headline"] = "Slack refused the bridge's tokens"
         if detail == "host_adapter_inactive" and _int(payload.get("inbox_pending")):
             item["count"] = _int(payload.get("inbox_pending"))
+        if link.get("companion_alive") is None and detail != "store_unreadable":
+            # The probe did not answer: the detail is the state the bridge last recorded, not a running process's.
+            item["process_unknown"] = True
         items.append(item)
 
     recent = payload.get("recent_problems") if isinstance(payload.get("recent_problems"), Mapping) else {}
@@ -159,6 +162,7 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "kind": "outcome_unknown", "tone": "warn", "headline": f"Outcome unknown for {unknown}",
             "messages": _int(text.get("uncertain_messages")), "actions": _int(mutations.get("uncertain")),
             "partly_delivered": _int(text.get("uncertain_messages_partly_delivered")),
+            "still_queued": _int(text.get("uncertain_messages_still_queued")),
             "events": _int(inbound.get("uncertain")),
             "at": _latest(text.get("last_uncertain_at"), mutations.get("last_uncertain_at"), inbound.get("last_uncertain_at")),
             "error": _newest_error(_state_error(text, "uncertain", _int(text.get("uncertain_messages"))),
@@ -172,6 +176,8 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "kind": "not_delivered", "tone": "error", "headline": f"{failed} not delivered",
             "messages": _int(text.get("failed_messages")), "actions": _int(mutations.get("failed")),
             "partly_delivered": _int(text.get("failed_messages_partly_delivered")),
+            # Of those messages, how many still have parts waiting, held or being sent (one message, two outcomes).
+            "still_queued": _int(text.get("failed_messages_still_queued")),
             "at": _latest(text.get("last_failed_at"), mutations.get("last_failed_at")),
             "error": _newest_error(_state_error(text, "failed", _int(text.get("failed_messages"))),
                                    _state_error(mutations, "failed", _int(mutations.get("failed")))),
@@ -190,6 +196,8 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         chunks = payload.get("outbound_text_chunks") if isinstance(payload.get("outbound_text_chunks"), Mapping) else {}
         messages = payload.get("outbound_messages") if isinstance(payload.get("outbound_messages"), Mapping) else {}
         held_messages = _int(messages.get("held"))
+        problem_parts = payload.get("outbound_messages_with_problem_parts")
+        problem_parts = problem_parts if isinstance(problem_parts, Mapping) else {}
         held_actions = max(0, held - _int(chunks.get("held")))
         note = str(payload.get("last_delivery_error") or "")
         listed = [reason for reason in payload.get("held_reasons") or [] if isinstance(reason, Mapping)]
@@ -204,6 +212,8 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         item = {"kind": "held", "tone": "warn" if owner else "muted",
                 "headline": f"{_units(held_messages, held_actions) or _plural(held, 'item')} held",
                 "messages": held_messages, "actions": held_actions,
+                # Held messages that also have a part refused or with an unknown outcome (listed in their own item).
+                "with_problem_parts": _int(problem_parts.get("held")),
                 "reasons": [{"reason": str(reason.get("reason") or ""), "count": _int(reason.get("count"))}
                             for reason in listed]}
         if listed:
@@ -226,7 +236,10 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         count = _int(retrying.get("count"))
         last = retrying.get("last_error") if isinstance(retrying.get("last_error"), Mapping) else None
         items.append({"kind": "handoff_waiting", "tone": "muted", "events": count,
-                      "headline": f"{_plural(count, 'Slack event')} {'waits' if count == 1 else 'wait'} to be passed to Ouroboros",
+                      # No stored host_reference: Ouroboros has not confirmed receiving them. That is all the row
+                      # says; the Host may already have the turn (its answer was lost) or the event was never sent.
+                      "headline": f"{_plural(count, 'Slack event')} {'waits' if count == 1 else 'wait'} for Ouroboros to confirm "
+                                  f"{'it' if count == 1 else 'them'}",
                       "at": last.get("at") if last else None,
                       "error": {"text": str(last.get("text") or ""), "at": last.get("at")} if last else None})
 

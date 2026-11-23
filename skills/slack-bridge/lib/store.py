@@ -1588,10 +1588,11 @@ class BridgeStore:
                     "GROUP BY last_error ORDER BY COUNT(*) DESC, last_error"
                 ).fetchall()
             ]
-            # Events whose hand-off to the Host was tried and refused for now (they retry by themselves). Rows whose
-            # turn is running carry "Host turn state: ..." notes and are not counted; a first attempt not yet made is
-            # an ordinary wait; a row with a stored host_reference was already accepted by Ouroboros and is only
-            # being observed, so it is not waiting to be passed on.
+            # Events not yet confirmed as received by Ouroboros whose last attempt failed for now; the bridge retries
+            # them by itself. That covers a hand-off the Host refused for now or whose answer was lost, and a
+            # Slack-side intake step that failed retryably (file staging, context capture). Rows whose turn is running
+            # carry "Host turn state: ..." notes and are not counted; a first attempt not yet made is an ordinary wait;
+            # a row with a stored host_reference was already accepted by Ouroboros and is only being observed.
             retrying = db.execute(
                 "SELECT COUNT(*) FROM inbox WHERE state='pending' AND attempts>0 AND host_reference='' "
                 "AND last_error<>'' AND last_error NOT LIKE 'Host turn state:%'"
@@ -1602,7 +1603,10 @@ class BridgeStore:
             ).fetchone()
             # One pass over the text rows grouped by message: part counts, each message's state now, and the
             # messages of the recent window with a problem part (counted even while another part still waits or is
-            # held), with how many of those already had a part confirmed by Slack.
+            # held), with how many of those already had a part confirmed by Slack and how many still have parts
+            # queued. The window applies to each outcome's own time: a message whose unknown part is days old and
+            # whose refused part is from today counts as refused today, as its parts do; an unknown outcome inside
+            # the window takes precedence over a refusal, as in the queue view.
             text_row = db.execute(
                 """
                 SELECT
@@ -1622,24 +1626,40 @@ class BridgeStore:
                         AND failed_n > 0 THEN 1 ELSE 0 END), 0) AS msg_failed,
                     COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n = 0
                         AND failed_n = 0 THEN 1 ELSE 0 END), 0) AS msg_delivered,
-                    COALESCE(SUM(CASE WHEN uncertain_n > 0 AND last_problem_at >= :cutoff THEN 1 ELSE 0 END), 0)
-                        AS recent_uncertain,
-                    COALESCE(SUM(CASE WHEN uncertain_n = 0 AND failed_n > 0 AND last_problem_at >= :cutoff
-                        THEN 1 ELSE 0 END), 0) AS recent_failed,
-                    COALESCE(SUM(CASE WHEN uncertain_n > 0 AND delivered_n > 0 AND last_problem_at >= :cutoff
-                        THEN 1 ELSE 0 END), 0) AS recent_uncertain_partly,
-                    COALESCE(SUM(CASE WHEN uncertain_n = 0 AND failed_n > 0 AND delivered_n > 0
-                        AND last_problem_at >= :cutoff THEN 1 ELSE 0 END), 0) AS recent_failed_partly
+                    COALESCE(SUM(CASE WHEN leased_n > 0 AND problem_n > 0 THEN 1 ELSE 0 END), 0) AS msg_leased_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 AND problem_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_held_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n > 0 AND problem_n > 0
+                        THEN 1 ELSE 0 END), 0) AS msg_waiting_problem,
+                    COALESCE(SUM(recent_u), 0) AS recent_uncertain,
+                    COALESCE(SUM(recent_f), 0) AS recent_failed,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_partly,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_failed_partly,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_queued,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_failed_queued
                 FROM (
-                    SELECT
-                        SUM(CASE WHEN state='pending' AND last_error NOT LIKE 'Held:%' THEN 1 ELSE 0 END) AS waiting_n,
-                        SUM(CASE WHEN state='pending' AND last_error LIKE 'Held:%' THEN 1 ELSE 0 END) AS held_n,
-                        SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END) AS leased_n,
-                        SUM(CASE WHEN state='delivered' THEN 1 ELSE 0 END) AS delivered_n,
-                        SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_n,
-                        SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END) AS uncertain_n,
-                        MAX(CASE WHEN state IN ('failed', 'uncertain') THEN updated_at ELSE NULL END) AS last_problem_at
-                    FROM outbox WHERE kind <> 'mutation' GROUP BY request_id
+                    SELECT *,
+                        waiting_n + held_n + leased_n AS queued_n,
+                        failed_n + uncertain_n AS problem_n,
+                        CASE WHEN last_uncertain_at >= :cutoff THEN 1 ELSE 0 END AS recent_u,
+                        CASE WHEN last_failed_at >= :cutoff AND NOT COALESCE(last_uncertain_at >= :cutoff, 0)
+                            THEN 1 ELSE 0 END AS recent_f
+                    FROM (
+                        SELECT
+                            SUM(CASE WHEN state='pending' AND last_error NOT LIKE 'Held:%' THEN 1 ELSE 0 END) AS waiting_n,
+                            SUM(CASE WHEN state='pending' AND last_error LIKE 'Held:%' THEN 1 ELSE 0 END) AS held_n,
+                            SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END) AS leased_n,
+                            SUM(CASE WHEN state='delivered' THEN 1 ELSE 0 END) AS delivered_n,
+                            SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_n,
+                            SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END) AS uncertain_n,
+                            MAX(CASE WHEN state='failed' THEN updated_at ELSE NULL END) AS last_failed_at,
+                            MAX(CASE WHEN state='uncertain' THEN updated_at ELSE NULL END) AS last_uncertain_at
+                        FROM outbox WHERE kind <> 'mutation' GROUP BY request_id
+                    )
                 )
                 """,
                 {"cutoff": cutoff},
@@ -1852,9 +1872,12 @@ class BridgeStore:
                     "uncertain": outbox_prob.get(("text", "uncertain"), (0, None))[0],
                     "failed_messages": int(text_row["recent_failed"]),
                     "uncertain_messages": int(text_row["recent_uncertain"]),
-                    # Of those messages, how many already had a part (any part) confirmed by Slack.
+                    # Of those messages, how many already had a part (any part) confirmed by Slack, and how many
+                    # still have parts waiting, held or being sent (those parts go out by themselves).
                     "failed_messages_partly_delivered": int(text_row["recent_failed_partly"]),
                     "uncertain_messages_partly_delivered": int(text_row["recent_uncertain_partly"]),
+                    "failed_messages_still_queued": int(text_row["recent_failed_queued"]),
+                    "uncertain_messages_still_queued": int(text_row["recent_uncertain_queued"]),
                     "last_failed_at": outbox_prob.get(("text", "failed"), (0, None))[1],
                     "last_uncertain_at": outbox_prob.get(("text", "uncertain"), (0, None))[1],
                     **errors["outbound_text"],
@@ -1882,6 +1905,13 @@ class BridgeStore:
                 "delivered": int(text_row["msg_delivered"]),
                 "failed": int(text_row["msg_failed"]),
                 "uncertain": int(text_row["msg_uncertain"]),
+            },
+            # Of the waiting, held and sending messages above, those that already have a part not delivered or with
+            # an unknown outcome: one message, some parts final, others still queued.
+            "outbound_messages_with_problem_parts": {
+                "waiting": int(text_row["msg_waiting_problem"]),
+                "held": int(text_row["msg_held_problem"]),
+                "leased": int(text_row["msg_leased_problem"]),
             },
             "units": {
                 "inbox": "envelopes",

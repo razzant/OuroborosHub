@@ -102,12 +102,38 @@ def load_plugin(skill, api):
 TOKENS = {'SLACK_BOT_TOKEN': 'xoxb-synthetic', 'SLACK_APP_TOKEN': 'xapp-synthetic'}
 
 
+def dead_pid():
+    """A provably exited OS PID: a short child, spawned and reaped."""
+    import subprocess
+    child = subprocess.Popen([sys.executable, '-c', 'pass'])
+    assert child.wait(timeout=10.0) == 0
+    return child.pid
+
+
+HOST_FACTS = dict(host_adapter_state='active', workspace_name='Northstar Labs', reaction_context_state='available',
+                  history_reporting_state='supported')
+
+
 def seed(scenario, root):
-    """Synthetic store states: a healthy link, recent problems with holds, or Slack refusing the tokens."""
+    """Synthetic store states: healthy, recent problems with holds, refused tokens, and the degraded states."""
     sys.path.insert(0, str(ROOT / 'skills' / 'slack-bridge'))
+    from lib.events import parse_socket_envelope
     from lib.store import BridgeStore
+    if scenario == 'store_unreadable':
+        (root / 'slack_bridge.sqlite3').write_bytes(b'not a database, synthetic' * 64)
+        return TOKENS
     store = BridgeStore(root)
     try:
+        if scenario == 'stopped':  # a clean stop after an active adapter: the daemon leaves "disconnected", no PID
+            store.set_runtime(socket_state='disconnected', **{**HOST_FACTS, 'reaction_context_state': 'update_required'})
+            return TOKENS
+        if scenario == 'crashed':  # the companion died while its record still says connected
+            store.set_runtime(socket_state='connected', companion_pid=dead_pid(), connected_at=1795381200.0, **HOST_FACTS)
+            return TOKENS
+        if scenario == 'unknown_liveness':  # the probe is made not to answer in the fixture below
+            store.set_runtime(socket_state='error', last_socket_error='ConnectError: All connection attempts failed',
+                              companion_pid=os.getpid(), **HOST_FACTS)
+            return TOKENS
         if scenario == 'auth_refused':
             # What the daemon leaves after Slack refused the app token: the error, and no companion PID.
             store.set_runtime(socket_state='error', last_socket_error='Slack API error: invalid_auth',
@@ -116,6 +142,24 @@ def seed(scenario, root):
         store.set_runtime(socket_state='connected', host_adapter_state='active', workspace_name='Northstar Labs',
                           companion_pid=os.getpid(), connected_at=1795381200.0, reaction_context_state='available',
                           history_reporting_state='supported')
+        if scenario in ('lost_reply', 'inbound_failed'):
+            raw = {'type': 'events_api', 'envelope_id': 'env-synth-1', 'payload': {
+                'event_id': 'EvSYNTH1', 'team_id': 'T09SYNTH01', 'event': {
+                    'type': 'message', 'user': 'U09SYNTH01', 'channel': 'C09SYNTH01', 'channel_type': 'channel',
+                    'ts': '1700000001.000100', 'event_ts': '1700000001.000100', 'text': 'synthetic message'}}}
+            store.ingest_envelope(raw, parse_socket_envelope(raw, bot_user_id='U09OUROBOT1'))
+            event = store.claim_inbox()
+            if scenario == 'lost_reply':  # the Host recorded the turn; its reply to the POST was lost
+                store.retry_inbox(event.row_id, event.lease_token, 'ReadTimeout: reply lost after Host recorded the turn',
+                                  delay_seconds=30.0)
+            else:  # the reply was already delivered; a later poll was refused
+                store.fail_inbox(event.row_id, event.lease_token, 'Presence binding was rejected by Host (HTTP 404)')
+        if scenario == 'mixed':  # part 1 refused, part 2 held: one message with two outcomes
+            store.enqueue_outbox(request_id='synthetic-mixed', target='C09SYNTH01', thread_ts='',
+                                 chunks=('part one', 'part two'))
+            first = store.claim_outbox()
+            store.fail_outbox(first.row_id, first.lease_token, 'msg_blocked', state='failed')
+            store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
         if scenario == 'problems':
             store.enqueue_outbox(request_id='synthetic-refused', target='C09SYNTH01', thread_ts='', chunks=('hello',))
             refused = store.claim_outbox()
@@ -149,8 +193,14 @@ def served(request):
     assert (core / 'web/modules/widget_module.js').is_file()
     skill = 'slack-bridge'
     root = Path(tempfile.mkdtemp(prefix='slack-bridge-widget-'))
-    api = API(root, seed(getattr(request, 'param', 'healthy'), root))
-    load_plugin(skill, api)
+    scenario = getattr(request, 'param', 'healthy')
+    api = API(root, seed(scenario, root))
+    plugin = load_plugin(skill, api)
+    store_module = sys.modules[plugin.BridgeStore.__module__]
+    real_probe = store_module._pid_is_alive
+    if scenario == 'unknown_liveness':
+        # The OS does not answer the process probe (lib/store.py _pid_is_alive returns None on such a Windows query).
+        store_module._pid_is_alive = lambda _pid: None
     leases = LeaseGateway(CARDS)
     state = {'posts': [], 'errors': [], 'faults': [], 'skill': skill, 'root': root, 'api': api, 'leases': leases}
 
@@ -219,6 +269,7 @@ def served(request):
     try:
         yield state, f'http://127.0.0.1:{server.server_port}'
     finally:
+        store_module._pid_is_alive = real_probe
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
@@ -296,7 +347,7 @@ def test_recent_problems_and_holds_render_as_their_items(served, engine):
             assert [items.nth(i).get_attribute('data-kind') for i in range(3)] == ['not_delivered', 'outcome_unknown', 'held']
             assert [items.nth(i).get_attribute('data-tone') for i in range(3)] == ['error', 'warn', 'warn']
             expect(items.nth(0)).to_contain_text('not retried')
-            expect(items.nth(1)).to_contain_text('did not get Slack’s confirmation')
+            expect(items.nth(1)).to_contain_text('has no saved final result')
             expect(items.nth(1)).to_contain_text('Check in Slack whether it took effect')
             held = items.nth(2)
             expect(held).to_contain_text('Ouroboros refused this skill’s access')
@@ -339,3 +390,62 @@ def test_refused_tokens_render_the_token_advice(served, engine, theme, width):
         finally:
             browser.close()
     assert not messages, messages
+
+
+# (scenario, first line, words the card must show, words it must not show) — Details and item folds open.
+DEGRADED = [
+    ('store_unreadable', "Status unknown · the bridge's queue store can't be read",
+     ['unknown: the queue store could not be read'],
+     ['Newest queue note', 'since install', 'Since install', 'the system did not answer', 'not checked yet',
+      'Known after the bridge first signs in', 'Counts not listed are zero']),
+    ('stopped', 'Disconnected · the bridge closed its Slack connection · 1 more needs attention',
+     ['yes, at the last check', 'skipped: this Ouroboros can’t take them, at the last check',
+      'At the bridge’s last check this Ouroboros couldn’t take Slack reactions'],
+     ['Messages work as usual']),
+    ('crashed', 'Disconnected · the bridge process is not running',
+     ['yes, at the last check', 'passed to Ouroboros, at the last check'], ['Messages work as usual']),
+    ('unknown_liveness', 'Connection error · the Slack connection failed · 1 more needs attention',
+     ['it is not known whether it is still trying', 'not known: the system did not answer',
+      'ConnectError: All connection attempts failed'],
+     ['at least every 30 seconds', 'tries again by itself']),
+    ('lost_reply', 'Connected · 1 Slack event waits for Ouroboros to confirm it',
+     ['waiting for Ouroboros to confirm it received it', 'reply lost after Host recorded the turn'],
+     ['has not taken', 'to be passed to Ouroboros']),
+    ('inbound_failed', 'Connected · 1 Slack event not handled',
+     ['while handing it to Ouroboros or following the reply', 'Saved reason', 'inbound · event · not handled'],
+     ['Ouroboros’s turn', 'event · not delivered']),
+    ('mixed', 'Connected · 1 message not delivered · 1 more needs attention',
+     ['Part of it was refused and is not retried', 'send only the refused parts',
+      '1 of these messages also has a part refused', '1 of the queued ones with a part not delivered or unknown'],
+     ['send again if needed', 'send only what is missing']),
+]
+
+
+@pytest.mark.parametrize('served,line,shown,absent', DEGRADED, indirect=['served'],
+                         ids=[case[0] for case in DEGRADED])
+def test_each_state_says_only_what_the_store_recorded(served, line, shown, absent):
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    assert route_status(state, url)['text'] == line
+    messages = []
+    with sync_playwright() as pw:
+        browser, page = open_card(pw, 'webkit', url, 'dark', 335, messages)
+        try:
+            frame = page.frame_locator('iframe')
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(line, timeout=15000)
+            frame.locator('details.tc-det > summary').click()
+            folds = frame.locator('.tc-items .tc-item summary')
+            for index in range(folds.count()):
+                folds.nth(index).click()
+            inner = next(f for f in page.frames if f is not page.main_frame)
+            text = inner.evaluate('document.body.innerText')
+            for words in shown:
+                assert words in text, (words, text)
+            for words in absent:
+                assert words not in text, (words, text)
+            assert inner.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            page.evaluate('async () => { await disposeWidget(); }')
+        finally:
+            browser.close()
+    assert not messages, messages
+    assert not state['faults'], state['faults']

@@ -5,7 +5,8 @@
  * without decoding counters.
  *
  * The first line is the status route's own `text`/`tone` (the same words Places shows); the route also lists
- * the attention items in order of consequence (lib/status_summary.py). This file turns those facts into words.
+ * the attention items, worst tone first and by consequence within one tone, and the first line names the first
+ * item (lib/status_summary.py). This file turns those facts into words.
  */
 (function () {
     'use strict';
@@ -388,8 +389,9 @@ var TransportKit = (function () {
             applyTheme(query.matches ? 'light' : 'dark');
         }
 
-        function freshNode() {
-            var line = el('p', 'tc-fresh');
+        /* The freshness line: when the status was read, and Refresh. fillFresh() rewrites an existing line in place,
+         * so the button a keyboard reader is on stays the same element: replacing it blurred the reader. */
+        function fillFresh(line) {
             var now = Date.now();
             var text;
             var stale = false;
@@ -401,27 +403,23 @@ var TransportKit = (function () {
                 stale = now - state.readAt > interval * 3 + 5000;
                 text = 'Updated ' + ago(state.readAt, now);
             } else text = '';
-            var t = el('span', 'tc-fresh-t', text);
-            if (state.readAt) t.title = 'Read ' + exact(state.readAt);
-            if (state.failure && stale) t.title = state.failure;
-            if (stale) line.setAttribute('data-stale', '');
-            add(line, t, text ? el('span', 'tc-sep', '·') : null);
-            var btn = el('button', 'tc-link', state.busy ? 'Refreshing…' : (stale ? 'Try again' : 'Refresh'));
-            btn.type = 'button';
-            btn.setAttribute('data-focus', 'refresh');
-            if (state.busy) btn.setAttribute('aria-busy', 'true');
-            btn.addEventListener('click', function () { if (!state.busy) read(); });
-            add(line, btn);
+            var t = line.querySelector('.tc-fresh-t'), sep = line.querySelector('.tc-sep'), btn = line.querySelector('button');
+            t.textContent = text;
+            var title = state.failure && stale ? state.failure : state.readAt ? 'Read ' + exact(state.readAt) : '';
+            if (title) t.title = title; else t.removeAttribute('title');
+            sep.hidden = !text;
+            if (stale) line.setAttribute('data-stale', ''); else line.removeAttribute('data-stale');
+            btn.textContent = state.busy ? 'Refreshing…' : (stale ? 'Try again' : 'Refresh');
+            if (state.busy) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
             return line;
         }
 
-        /* Replace only the freshness line; a keyboard reader on Refresh stays on the new one. */
-        function swapFresh(old) {
-            var focused = old.contains(document.activeElement);
-            var line = freshNode();
-            old.replaceWith(line);
-            var button = focused ? line.querySelector('button') : null;
-            if (button) button.focus();
+        function freshNode() {
+            var btn = el('button', 'tc-link');
+            btn.type = 'button';
+            btn.setAttribute('data-focus', 'refresh');
+            btn.addEventListener('click', function () { if (!state.busy) read(); });
+            return fillFresh(add(el('p', 'tc-fresh'), el('span', 'tc-fresh-t'), el('span', 'tc-sep', '·'), btn));
         }
 
         function paint(force) {
@@ -442,7 +440,7 @@ var TransportKit = (function () {
                     var unreadSignature = 'unread:' + state.failedAt + ':' + JSON.stringify(unread);
                     if (!force && unreadSignature === state.signature) {
                         var stale = root.querySelector('.tc-fresh');
-                        if (stale) swapFresh(stale);
+                        if (stale) fillFresh(stale);
                         return;
                     }
                     state.signature = unreadSignature;
@@ -458,7 +456,7 @@ var TransportKit = (function () {
                 // Never rebuild under the reader's press; the next paint after they let go catches up.
                 if (state.pointerDown) state.signature = '';
                 var old = state.pointerDown ? null : root.querySelector('.tc-fresh');
-                if (old) swapFresh(old);
+                if (old) fillFresh(old);
                 return;
             }
             state.signature = signature;
@@ -518,17 +516,14 @@ var TransportKit = (function () {
             read();
         }
         document.addEventListener('visibilitychange', onVisibility);
-        function onFocusOut() { setTimeout(function () { if (!state.busy) paint(); }, 0); }
         function onPointerDown() { state.pointerDown = true; }
         function onPointerUp() {
             setTimeout(function () { state.pointerDown = false; if (!state.busy) paint(); }, 0);
         }
-        root.addEventListener('focusout', onFocusOut);
         root.addEventListener('pointerdown', onPointerDown, true);
         window.addEventListener('pointerup', onPointerUp, true);
         window.addEventListener('pointercancel', onPointerUp, true);
         disposers.push(function () {
-            root.removeEventListener('focusout', onFocusOut);
             root.removeEventListener('pointerdown', onPointerDown, true);
             window.removeEventListener('pointerup', onPointerUp, true);
             window.removeEventListener('pointercancel', onPointerUp, true);
@@ -612,10 +607,30 @@ var TransportKit = (function () {
             { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
         ]
     };
-    // Only when Slack refused the tokens (the rule's `auth`, from the skill's own refusal codes). A refusal ends the
-    // bridge's process (the daemon records it after its cleanup), so one set of lines serves both error details.
+    // The system did not answer whether the bridge's process runs: the detail is the state it last recorded, so no
+    // line promises what a running process does (retrying, keeping messages).
+    var UNKNOWN_PROCESS_LINES = {
+        host_adapter_inactive: [
+            'When the bridge last started, Ouroboros did not confirm a place for it, so messages from Slack were kept here and not passed on. The system did not answer whether the bridge’s process is still running.',
+            { strong: 'Connect Slack in Circles,', text: 'then in Extensions turn Slack Bridge off and on.' }
+        ],
+        disconnected: [
+            'The bridge last recorded that it closed its connection. The system did not answer whether its process is running.',
+            { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
+        ],
+        not_started: [
+            'Both tokens are set, but the bridge has not recorded a start. The system did not answer whether its process is running.',
+            { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on to start it.' }
+        ],
+        socket_error: [
+            'The bridge’s last connection attempt failed with the error below. The system did not answer whether the bridge’s process is running, so it is not known whether it is still trying.',
+            { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
+        ]
+    };
+    // Only when Slack refused the tokens (the rule's `auth`, from the skill's own refusal codes). One set of lines
+    // serves both error details; it says nothing about whether the process still runs.
     var AUTH_LINES = [
-        'Slack did not accept the bridge’s tokens, so the bridge stopped and cannot connect.',
+        'Slack did not accept the bridge’s tokens, so the bridge cannot connect.',
         { strong: 'Check SLACK_BOT_TOKEN and SLACK_APP_TOKEN', text: 'in Settings → Accounts and keys and the Slack app’s scopes, then in Extensions turn Slack Bridge off and on.' }
     ];
 
@@ -625,7 +640,8 @@ var TransportKit = (function () {
         var one = count(item.messages) + count(item.actions) + count(item.events) === 1;
         var them = one ? 'it' : 'them', are = one ? 'is' : 'are';
         if (item.kind === 'link') {
-            out.lines = (item.auth ? AUTH_LINES : LINK_LINES[item.detail] || []).slice();
+            out.lines = (item.auth ? AUTH_LINES
+                : (item.process_unknown && UNKNOWN_PROCESS_LINES[item.detail]) || LINK_LINES[item.detail] || []).slice();
             if (item.detail === 'host_adapter_inactive' && count(item.count)) {
                 out.lines.splice(1, 0, plural(count(item.count), 'Slack event') + ' wait here.');
             }
@@ -633,28 +649,37 @@ var TransportKit = (function () {
         } else if (item.kind === 'outcome_unknown') {
             out.atLabel = 'last';
             out.lines = [
-                'The bridge started ' + them + ' but did not get Slack’s confirmation (the link broke, or the send, edit or deletion was cancelled once it had begun), so nobody knows whether ' + (one ? 'it' : 'they') + ' took effect. Nothing repeats ' + them + ' by itself.',
+                'The bridge has no saved final result for ' + them + ', so nobody knows whether ' + (one ? 'it' : 'they') + ' took effect. Nothing repeats ' + them + ' by itself.',
                 { strong: 'Check in Slack whether ' + (one ? 'it' : 'they') + ' took effect', text: '(the message is there, the edit or deletion is done) before asking Ouroboros to repeat ' + them + '.' },
+                queuedLine(item.still_queued, 'check only after they are sent'),
                 partsLine(item.partly_delivered)
             ];
             if (error) out.error = { label: 'What happened' + actionWord(error.operation), text: error.text, at: error.at };
         } else if (item.kind === 'not_delivered') {
             out.atLabel = 'last';
-            out.lines = [
+            // A message with a part refused while its other parts still wait, are held or are being sent: those parts
+            // go out by themselves, so "send it again" would post them twice.
+            var queued = count(item.still_queued);
+            var allQueued = queued > 0 && queued === count(item.messages) && !count(item.actions);
+            out.lines = allQueued ? [
+                one ? 'Part of it was refused and is not retried; its other parts are still queued and go out by themselves.'
+                    : 'Part of each was refused and is not retried; their other parts are still queued and go out by themselves.',
+                { strong: 'Fix the cause, wait until the queued parts are sent,', text: 'then ask Ouroboros to check slack_receipt for which parts arrived and send only the refused parts.' }
+            ] : [
                 (one ? 'It' : 'They') + ' could not be delivered and ' + (one ? 'is' : 'are') + ' not retried.',
-                count(item.partly_delivered)
-                    ? { strong: 'Fix the cause,', text: 'then ask Ouroboros to send only what is missing.' }
-                    : { strong: 'Fix the cause,', text: 'then ask Ouroboros to send again if needed.' },
-                partsLine(item.partly_delivered)
+                queuedLine(queued, 'wait until they are sent, then ask Ouroboros to check slack_receipt for which parts arrived and send only the refused parts'),
+                { strong: queued ? 'For the others, fix the cause,' : 'Fix the cause,',
+                  text: count(item.partly_delivered) && !queued ? 'then ask Ouroboros to send only what is missing.' : 'then ask Ouroboros to send again if needed.' },
+                queued ? null : partsLine(item.partly_delivered)
             ];
             if (error) out.error = { label: 'Error text' + actionWord(error.operation), text: error.text, at: error.at };
         } else if (item.kind === 'not_handled') {
             out.atLabel = 'last';
             out.lines = [
-                'Ouroboros’s turn for ' + them + ' failed or was refused; ' + (one ? 'it is' : 'they are') + ' not retried.',
-                { strong: 'If this repeats,', text: 'check the task history in Ouroboros.' }
+                'The bridge stopped handling ' + them + ' while handing ' + them + ' to Ouroboros or following the reply; ' + (one ? 'it is' : 'they are') + ' not retried.',
+                { strong: 'If this repeats,', text: 'check the saved reason below and the task history in Ouroboros.' }
             ];
-            if (error) out.error = { label: 'Error text', text: error.text, at: error.at };
+            if (error) out.error = { label: 'Saved reason', text: error.text, at: error.at };
         } else if (item.kind === 'held') {
             var reasons = Array.isArray(item.reasons) && item.reasons.length ? item.reasons
                 : (item.reason ? [{ reason: item.reason, count: 0 }] : []);
@@ -664,10 +689,15 @@ var TransportKit = (function () {
             });
             if (reasons.length > 4) out.lines.push('…and ' + plural(reasons.length - 4, 'more reason') + '.');
             out.lines.push('Kept back until the reason clears, then sent by ' + (one ? 'itself.' : 'themselves.'));
+            var mixed = count(item.with_problem_parts);
+            if (mixed) out.lines.push((mixed === 1 ? '1 of these messages also has' : num(mixed) + ' of these messages also have')
+                + ' a part refused or with an unknown outcome (listed above); only the held parts go out by themselves.');
         } else if (item.kind === 'reactions') {
+            var skipped = count(item.count) ? ' (' + num(count(item.count)) + ' so far)' : '';
             out.lines = [
-                'This Ouroboros can’t take Slack reactions as context, so they are skipped'
-                    + (count(item.count) ? ' (' + num(count(item.count)) + ' so far)' : '') + '. Messages work as usual.',
+                running(data)
+                    ? 'This Ouroboros can’t take Slack reactions as context, so they are skipped' + skipped + '. Messages work as usual.'
+                    : 'At the bridge’s last check this Ouroboros couldn’t take Slack reactions as context, so they were skipped' + skipped + '.',
                 { strong: 'Update Ouroboros,', text: 'then in Extensions turn Slack Bridge off and on (that also rechecks a current one).' }
             ];
         } else if (item.kind === 'new_root_channels') {
@@ -678,7 +708,7 @@ var TransportKit = (function () {
             if (error) out.error = { label: 'Error text', text: error.text };
         } else if (item.kind === 'handoff_waiting') {
             out.atLabel = 'last try';
-            out.lines = ['Ouroboros has not taken ' + them + ' yet; the bridge keeps trying by itself.'];
+            out.lines = ['The bridge is waiting for Ouroboros to confirm it received ' + them + ' and keeps trying by itself, with the same event id each time.'];
             if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
         } else if (item.kind === 'partial') {
             out.lines = (item.gaps || []).map(function (gap) { return PARTIAL_LINES[gap]; }).filter(Boolean);
@@ -687,6 +717,18 @@ var TransportKit = (function () {
         out.lines = out.lines.filter(Boolean);
         return out;
     }
+
+    /* Messages of a problem item that still have parts waiting, held or being sent: those parts go out by themselves. */
+    function queuedLine(queued, then) {
+        var n = count(queued);
+        if (!n) return null;
+        return (n === 1 ? '1 of them still has' : num(n) + ' of them still have') + ' parts waiting, held or being sent;'
+            + ' those go out by themselves. For ' + (n === 1 ? 'it' : 'them') + ', ' + then + '.';
+    }
+
+    /* Whether the system confirmed the bridge's process runs; otherwise Host facts are its last check. */
+    function running(data) { return !!(data.link && data.link.companion_alive === true); }
+    var STORE_UNKNOWN = 'unknown: the queue store could not be read';
 
     /* Long messages go out in parts; parts Slack already confirmed must not be sent twice. */
     function partsLine(partly) {
@@ -746,6 +788,8 @@ var TransportKit = (function () {
         var link = data.link || {};
         var items = (Array.isArray(data.attention) ? data.attention : []).map(function (item) { return itemFor(item, data); });
         var messages = data.outbound_messages || {};
+        var withProblems = data.outbound_messages_with_problem_parts || {};
+        var mixedQueued = count(withProblems.waiting) + count(withProblems.held) + count(withProblems.leased);
         var recent = data.recent_problems || {};
         var inbound = recent.inbound || {}, text = recent.outbound_text || {}, mutations = recent.mutations || {};
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as.label : '';
@@ -759,7 +803,7 @@ var TransportKit = (function () {
         var anyTraffic = count(data.inbox_delivered) + count(data.inbox_pending) + count(data.inbox_leased)
             + count(data.inbox_failed) + count(data.inbox_ignored) + count(data.outbox_delivered) + count(data.outbox_pending)
             + count(data.outbox_leased) + count(data.outbox_failed) + count(data.outbox_uncertain);
-        if (!countsKnown) facts.push(['Totals', 'unknown: the queue counts were not read']);
+        if (!countsKnown) facts.push(['Totals', link.detail === 'store_unreadable' ? STORE_UNKNOWN : 'unknown: the queue counts were not read']);
         if (countsKnown && anyTraffic) {
             var inProgress = count(data.inbox_pending) + count(data.inbox_leased);
             facts.push(['Incoming', parts([
@@ -773,6 +817,8 @@ var TransportKit = (function () {
                 { text: count(messages.leased) ? num(count(messages.leased)) + ' sending' : '' },
                 { text: count(messages.waiting) ? num(count(messages.waiting)) + ' waiting' : '' },
                 { text: count(messages.held) ? num(count(messages.held)) + ' held' : '' },
+                // One message can be queued and already have a refused or unknown part (its own item says which).
+                { text: mixedQueued ? num(mixedQueued) + ' of the queued ones with a part not delivered or unknown' : '', dim: true },
                 { text: count(messages.failed) ? num(count(messages.failed)) + ' not delivered'
                     + (text.last_failed_at ? ', last ' + K.clock(text.last_failed_at, now) : '') : '', dim: true },
                 { text: count(messages.uncertain) ? num(count(messages.uncertain)) + ' outcome unknown'
@@ -818,6 +864,9 @@ var TransportKit = (function () {
 
     function detailGroups(data, now) {
         var link = data.link || {};
+        if (link.detail === 'store_unreadable') return unreadableGroups(data);
+        // Host facts are the bridge's last check unless the system confirmed its process runs now.
+        var atLast = running(data) ? '' : ', at the last check';
         // Ouroboros did not answer the capability check: what it supports is not known (status_summary's signal).
         var unanswered = data.history_reporting_state === 'unavailable';
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as : null;
@@ -851,12 +900,16 @@ var TransportKit = (function () {
             title: 'Ouroboros',
             rows: [
                 row('Events passed on', !data.host_adapter_checked ? 'not checked yet'
-                    : data.host_adapter_state === 'active' ? 'yes' : 'no: no place was confirmed when the bridge started'),
+                    : data.host_adapter_state === 'active' ? 'yes' + atLast : 'no' + atLast + ': no place was confirmed when the bridge started'),
                 row('Place binding', BINDING_WORD[data.binding_state] || data.binding_state),
                 row('Reactions', unanswered && data.reaction_context_state !== 'available' ? 'not known: Ouroboros didn’t answer'
-                    : REACTION_WORD[data.reaction_context_state] || data.reaction_context_state),
+                    : REACTION_WORD[data.reaction_context_state] ? REACTION_WORD[data.reaction_context_state]
+                        + (data.reaction_context_state === 'unknown' ? '' : atLast) : data.reaction_context_state),
                 row('Reactions skipped', count(data.reactions_withheld) ? num(count(data.reactions_withheld)) : ''),
-                row('Delivery history', HISTORY_WORD[data.history_reporting_state] || data.history_reporting_state),
+                row('Delivery history', HISTORY_WORD[data.history_reporting_state]
+                    ? (data.history_reporting_state === 'unavailable' && atLast ? 'not recorded at the last check: Ouroboros didn’t answer'
+                        : HISTORY_WORD[data.history_reporting_state] + atLast)
+                    : data.history_reporting_state),
                 row('Delivery reports', !K.known(data.delivery_reports_acked) ? '—' : num(count(data.delivery_reports_acked)) + ' recorded'
                     + (count(data.delivery_reports_pending) ? ' · ' + num(count(data.delivery_reports_pending)) + ' waiting' : '')),
                 row('Last report note', data.last_report_error ? rawText(data.last_report_error) : '')
@@ -897,7 +950,8 @@ var TransportKit = (function () {
         if (lastError) {
             problemRows.push(row('When', K.clock(lastError.at, now), K.exact(lastError.at)));
             problemRows.push(row('What', [lastError.direction, lastError.kind, lastError.operation].filter(Boolean).join(' · ')
-                + (lastError.state === 'uncertain' ? ' · outcome unknown' : lastError.state === 'failed' ? ' · not delivered' : '')));
+                + (lastError.state === 'uncertain' ? ' · outcome unknown' : lastError.state !== 'failed' ? ''
+                    : lastError.direction === 'inbound' ? ' · not handled' : ' · not delivered')));
             problemRows.push(row('Text', rawText(lastError.text)));
         }
         if (!lastError || data.last_delivery_error !== lastError.text) {
@@ -908,6 +962,29 @@ var TransportKit = (function () {
             rows: problemRows.filter(Boolean),
             note: lastError ? '' : 'No delivery has failed or ended with an unknown outcome since install.'
         });
+        return groups;
+    }
+
+    /* The queue store could not be read: only the settings facts are known; nothing rests on the store. */
+    function unreadableGroups(data) {
+        var groups = [
+            { title: 'Connection', rows: [
+                row('Link', LINK_WORD[(data.link || {}).state] || '—'),
+                row('Socket Mode', STORE_UNKNOWN),
+                row('Bridge process', STORE_UNKNOWN),
+                row('Tokens', (data.has_bot_token ? 'bot token set' : 'bot token missing') + ' · ' + (data.has_app_token ? 'app token set' : 'app token missing'))
+            ].filter(Boolean) },
+            { title: 'Slack app', rows: [row('Workspace', STORE_UNKNOWN)] },
+            { title: 'Ouroboros', rows: [
+                row('Events passed on', STORE_UNKNOWN),
+                row('Place binding', BINDING_WORD[data.binding_state] || data.binding_state),
+                row('Reactions', STORE_UNKNOWN),
+                row('Delivery history', STORE_UNKNOWN)
+            ].filter(Boolean) },
+            { title: 'Queues', rows: [row('Incoming and outgoing', STORE_UNKNOWN)] }
+        ];
+        if (data.local_settings_error) groups.push({ title: 'Settings', rows: [row('Settings file problem', rawText(data.local_settings_error))] });
+        groups.push({ title: 'Last problem', rows: [row('Recorded problems', STORE_UNKNOWN)] });
         return groups;
     }
 
