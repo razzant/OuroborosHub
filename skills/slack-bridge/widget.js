@@ -124,6 +124,7 @@ var TransportKit = (function () {
         '@media (prefers-reduced-motion:reduce){.sk{animation:none}.tc-fold>summary::before{transition:none}}'
     ].join('\n');
 
+    var NO_BRIDGE = 'The widget bridge is unavailable, so this card can’t reach Ouroboros';
     var NUMBER = new Intl.NumberFormat('en-US');
     var F_TIME = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' });
     var F_DAY = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
@@ -303,7 +304,9 @@ var TransportKit = (function () {
             if (model.factsNote) add(block, el('p', 'tc-note', model.factsNote));
             add(tc, block);
         }
-        if (model.extra) add(tc, model.extra);
+        // The editor is one persistent node: it keeps its place in the next card (see below).
+        var slot = model.extra ? document.createComment('extra') : null;
+        if (slot) add(tc, slot);
         if (model.details && model.details.groups.length) {
             var inner = el('div', 'tc-det-body');
             model.details.groups.forEach(function (group) {
@@ -319,10 +322,25 @@ var TransportKit = (function () {
         }
         var focused = document.activeElement && document.activeElement.getAttribute
             ? document.activeElement.getAttribute('data-focus') : null;
-        root.replaceChildren(tc);
+        var current = root.firstElementChild;
+        if (slot && current && current.classList.contains('tc') && model.extra.parentNode === current) {
+            // Repaint around the editor without moving it: a moved node loses focus, selection and composition, so
+            // the status and attention change under the reader's typing while their input stays exactly as it is.
+            Array.prototype.slice.call(current.childNodes).forEach(function (child) {
+                if (child !== model.extra) current.removeChild(child);
+            });
+            var after = false;
+            Array.prototype.slice.call(tc.childNodes).forEach(function (child) {
+                if (child === slot) { after = true; return; }
+                if (after) current.appendChild(child); else current.insertBefore(child, model.extra);
+            });
+        } else {
+            if (slot) slot.replaceWith(model.extra);
+            root.replaceChildren(tc);
+        }
         if (focused) {
             var again = root.querySelector('[data-focus="' + focused + '"]');
-            if (again) again.focus();
+            if (again && again !== document.activeElement) again.focus();
         }
     }
 
@@ -353,7 +371,9 @@ var TransportKit = (function () {
     function mount(options) {
         var root = document.getElementById('root') || document.body;
         var bridge = window.OuroborosWidget && typeof window.OuroborosWidget === 'object' ? window.OuroborosWidget : null;
-        var request = bridge && typeof bridge.fetch === 'function' ? bridge.fetch.bind(bridge) : window.fetch.bind(window);
+        // Requests go only through the host bridge; without it the card says so rather than reaching out itself.
+        var request = bridge && typeof bridge.fetch === 'function' ? bridge.fetch.bind(bridge) : null;
+        var send = request || function () { return Promise.reject(new Error(NO_BRIDGE)); };
         var disposers = [];
         var state = { open: Object.create(null), data: null, readAt: 0, failedAt: 0, failure: '', busy: false, signature: '' };
         var timer = null, ticker = null, inflight = null, disposed = false;
@@ -399,21 +419,35 @@ var TransportKit = (function () {
             if (disposed) return;
             if (!state.data) {
                 if (state.failedAt) {
-                    render(root, state, {
-                        status: { text: options.unreadable || 'Can’t read the status', tone: 'error' },
+                    // The status is unreadable; what the card can still offer without it (an editor, explanations)
+                    // stays: options.unread(state) adds it to the model.
+                    var unread = {
+                        status: { text: request ? options.unreadable || 'Can’t read the status' : NO_BRIDGE, tone: 'error' },
                         items: [], facts: []
-                    }, freshNode());
+                    };
+                    if (typeof options.unread === 'function') {
+                        var more = options.unread(state) || {};
+                        unread.extra = more.extra || null;
+                        unread.details = more.details || null;
+                    }
+                    var unreadSignature = 'unread:' + state.failedAt + ':' + JSON.stringify(unread);
+                    if (!force && unreadSignature === state.signature) {
+                        var stale = root.querySelector('.tc-fresh');
+                        if (stale) stale.replaceWith(freshNode());
+                        return;
+                    }
+                    state.signature = unreadSignature;
+                    render(root, state, unread, freshNode());
                 } else loading(root);
                 return;
             }
             var model = options.toModel(state.data, state);
             // Only the model decides a rebuild; a read in flight or a failed read changes the freshness line alone.
+            // Typing does not hold a rebuild back: render() keeps the editor node in place.
             var signature = JSON.stringify(model);
-            var typing = document.activeElement && root.contains(document.activeElement)
-                && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-            if (!force && (signature === state.signature || typing || state.pointerDown)) {
-                // Never rebuild under the reader's typing or press; the next paint after they let go catches up.
-                if (typing || state.pointerDown) state.signature = '';
+            if (!force && (signature === state.signature || state.pointerDown)) {
+                // Never rebuild under the reader's press; the next paint after they let go catches up.
+                if (state.pointerDown) state.signature = '';
                 var old = state.pointerDown ? null : root.querySelector('.tc-fresh');
                 if (old) old.replaceWith(freshNode());
                 return;
@@ -435,7 +469,7 @@ var TransportKit = (function () {
             inflight = controller;
             state.busy = true;
             paint();
-            request(options.url, { method: 'GET', headers: { Accept: 'application/json' }, signal: controller ? controller.signal : undefined, timeoutMs: 20000 })
+            send(options.url, { method: 'GET', headers: { Accept: 'application/json' }, signal: controller ? controller.signal : undefined, timeoutMs: 20000 })
                 .then(function (response) {
                     if (!response.ok) throw new Error('HTTP ' + response.status);
                     return response.json();
@@ -492,7 +526,7 @@ var TransportKit = (function () {
         }
         loading(root);
         read();
-        return { repaint: function () { paint(true); }, read: read, state: state, request: request };
+        return { repaint: function () { paint(true); }, read: read, state: state, request: send, bridged: !!request };
     }
 
     return {
