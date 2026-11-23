@@ -294,11 +294,17 @@ dependencies live in `scripts/ci_checks.py`. Main pushes and manual runs select
 every suite. Require the single `checks` job in branch protection: it fails on any
 failed or cancelled dependency and accepts skipped suites. Slack and Telegram run
 in separate jobs so their `test_retained_custody.py` modules and sibling-test
-imports can coexist:
+imports can coexist. The slack-bridge job also runs `tests/test_slack_bridge_widget_browser.py`,
+which mounts the Slack Bridge card through the core's module bridge in Chromium and WebKit; the job
+installs Playwright 1.62.0 and both browsers first, and `scripts/ci_checks.py` sets `TRANSPORT_WIDGET_REQUIRE_BROWSERS=1`
+so a missing browser fails the test instead of skipping it:
 
 ```bash
 python -m pip install pytest httpx starlette websockets
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/slack-bridge/tests
+python -m pip install 'playwright==1.62.0' && python -m playwright install chromium webkit
+TRANSPORT_WIDGET_REQUIRE_BROWSERS=1 OUROBOROS_PRESENCE_CORE_ROOT=/path/to/ouroboros \
+  PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/test_slack_bridge_widget_browser.py
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
@@ -408,11 +414,14 @@ Module widgets can declare `render.appearance: host` and feature-detect
 on disposal, and retain a usable palette on older hosts. The real-bridge
 browser suites require a local core checkout with git history, Playwright,
 Chromium and WebKit. CI gives the `widgets`, `calendar-skill`, `smart-lists` and
-`telegram-user-session` jobs the pinned core, its runtime and both browsers; only
-the dashboard suite (`widgets`) reads the core's history:
+`telegram-user-session` jobs the pinned core, its runtime and both browsers. The `slack-bridge` job
+checks out the same pinned core without installing its runtime: it installs the suite's own
+dependencies, Playwright 1.62.0, Chromium and WebKit. Only the dashboard suite (`widgets`) reads the
+core's history:
 
 ```bash
-OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py tests/test_telegram_participant_widget_browser.py
+OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py tests/test_telegram_participant_widget_browser.py \
+  tests/test_slack_bridge_widget_browser.py
 ```
 
 These standalone invocations are local opt-ins; the selected Calendar and Smart Lists

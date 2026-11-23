@@ -6,7 +6,7 @@
     "Slack"
   ],
   "description": "Slack connector for workspace places, with typed conversation facts, durable replies, files, and live place-state delivery holds.",
-  "digest": "88ae42a8980b3ed4b28b7dde9484e14c54d8cb4aa0a7c4b08916dad56dbfc938",
+  "digest": "9d3b3e7f12370414dc996cfa03a05a78a7a5ab4dcbe6e18d24a924b86e23b8d5",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -24,7 +24,7 @@
   },
   "title": "Slack",
   "type": "extension",
-  "version": "1.12.2",
+  "version": "1.13.0",
   "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages.",
   "withdrawn": null
 }

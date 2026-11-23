@@ -10,6 +10,7 @@ from typing import Any
 import websockets
 
 from .events import parse_socket_envelope
+from .redaction import error_text
 from .slack_api import SlackApiError, SlackClient
 from .store import BridgeStore
 
@@ -146,7 +147,7 @@ class SocketModeClient:
                 )
             except Exception as exc:
                 self.store.set_runtime(
-                    socket_state="error", last_socket_error=str(exc)[:500]
+                    socket_state="error", last_socket_error=error_text(exc)
                 )
                 log.warning("Slack Socket Mode connection failed: %s", exc)
             finally:

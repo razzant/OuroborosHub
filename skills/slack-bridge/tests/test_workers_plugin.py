@@ -315,12 +315,8 @@ def test_plugin_registers_companion_operational_widget_and_durable_send(
     assert format_schema["enum"] == ["markdown", "mrkdwn", "plain"]
     assert format_schema["default"] == "markdown"
     assert "status" in api.routes
-    assert api.tabs["slack_presence"][1]["render"]["kind"] == "declarative"
-    metrics = api.tabs["slack_presence"][1]["render"]["components"][2]["components"]
-    assert {item.get("path") for item in metrics} >= {
-        "inbox_failed",
-        "outbox_failed",
-    }
+    assert api.tabs["slack_presence"][1]["render"] == {
+        "kind": "module", "entry": "widget.js", "appearance": "host", "start": "auto", "span": 1}
 
     handler, _metadata = api.tools["slack_send"]
     result = tool_json(handler(channel_or_user="C1", text="hello", request_id="dedupe-1"))

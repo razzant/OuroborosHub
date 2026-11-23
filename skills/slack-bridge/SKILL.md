@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.12.2
+version: 1.13.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -162,6 +162,16 @@ contributes:
       - from_bot
       - {id: signal.new_root, label: "New top-level post in a listed channel (connector setting)"}
     wakes: [direct_message, group_dm, mention, my_thread]
+ui_tab:
+  tab_id: slack_presence
+  title: Slack Bridge
+  icon: message
+  render:
+    kind: module
+    entry: widget.js
+    appearance: host
+    start: auto
+    span: 1
 ---
 
 # Slack Bridge
@@ -767,8 +777,9 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
   lease, send marker and bytes stay the same.
 - Long outbound text is split into Slack-safe chunks before it enters the
   durable outbox.
-- The Widgets tab reports connection state, queue depth, failures, and recent
-  activity without exposing tokens or message contents.
+- The Widgets card says first whether the link works and what needs attention, then
+  totals since install and folded details; it shows when the status was read and keeps
+  refreshing. It never shows tokens or message contents.
 
 Save settings before enabling the skill, or toggle it after a settings change.
 An absent settings file simply means "not configured yet". A settings file that
@@ -1010,9 +1021,15 @@ history callback. The existing outbound workers submit that report through
 the existing provider receipt in the same outbox. Each existing outbound worker
 keeps at most one tracked report task in flight while continuing provider sends;
 stopping the worker cancels and awaits that task. A slow or failed report never
-requeues the provider send or holds later sends waiting for a report ACK. A restart
-or lost ACK retries exactly the same report; the Host owns idempotent history
-acceptance. The status route exposes pending/acknowledged report counts and
+requeues the provider send or holds later sends waiting for a report ACK. Reports
+leave cleaned of credentials: their identity and routing (delivery, part, account,
+conversation and thread IDs, state) are never changed, and their `text` stays exact
+only for delivered or accepted parts, the ones the Host matches against the turn's
+reply. A restart or lost ACK retries the same cleaned report, and the Host owns
+idempotent history acceptance. A report queued by 1.12.x is dispatched again as a
+cleaned copy; a 409 `presence_receipt_conflict` for that copy means the Host already
+holds a receipt for the same part and state, so it counts as recorded. Any other
+409 stays pending. The status route exposes pending/acknowledged report counts and
 the last report error separately from provider delivery state.
 
 Reports identify tool versus automatic origin explicitly. Successful chunks

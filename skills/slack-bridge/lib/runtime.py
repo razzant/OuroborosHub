@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -12,7 +13,9 @@ import httpx
 from typing import Any, Awaitable, Sequence
 
 from .events import REACTION_EVENTS
-from .host_adapter import HostBindingTerminalError, HostOutput, HostRetryError, HostTurnStatus, PresenceHostAdapter
+from .host_adapter import (
+    HostBindingTerminalError, HostOutput, HostReceiptConflict, HostRetryError, HostTurnStatus, PresenceHostAdapter,
+)
 from .provider_context import capture_context
 from .slack_api import (
     SlackApiError, SlackClient, SlackConfigurationError, SlackMutationUncertain, UploadInput, chunk_message,
@@ -77,12 +80,31 @@ def _event_directory_name(item: InboxItem) -> str:
 async def _discover_reporting(host: Any, store: BridgeStore) -> int:
     discover = getattr(host, "discover_delivery_support", None)
     mode = await discover() if discover is not None else 0
+    if getattr(host, "capabilities_listener", None) is None:
+        # A host without the listener (older adapters, test doubles) is recorded on every check, as before.
+        _record_capabilities(host, store, mode)
+    return mode
+
+
+def _record_capabilities(host: Any, store: BridgeStore, mode: int | None = None) -> None:
+    """Write what the Host binding offers into the status store.
+
+    Run by the adapter's listener once each time a discovery changes what it knows, from any caller (a submit, a
+    place check, a report or a recheck), so a later answer that restores the binding after a failed check clears
+    "events are not passed to Ouroboros" without an extra request or a write per status read. Availability never
+    turns back off within one companion, so only "active" is written here; the start value is written by run().
+    """
+    mode = getattr(host, "delivery_reporting_version", 0) if mode is None else mode
+    adapter = {"host_adapter_state": "active"} if getattr(host, "available", None) is True else {}
     store.set_runtime(
+        **adapter,
         presence_delivery_version=mode,
         presence_continuation_version=getattr(host, "continuation_version", 0),
         presence_identity=getattr(host, "presence_identity", 0),
         connector_identity=getattr(host, "connector_identity", {}),
         history_reporting_state=getattr(host, "delivery_reporting_status", "unsupported"),
+        # Why "unavailable": no Host credential (nothing is asked) or a request without an answer (asked again).
+        host_check_cause=getattr(host, "delivery_reporting_cause", ""),
         history_reporting_limitation="" if mode else "Host delivery reporting unavailable; provider sending remains enabled.",
         reaction_context_state="available" if _reactions_live(host) else "update_required",
         reaction_context_limitation="" if _reactions_live(host) else (
@@ -91,7 +113,6 @@ async def _discover_reporting(host: Any, store: BridgeStore) -> int:
         reaction_history_limitation="" if getattr(host, "explicit_completion", 0) == 1 else (
             "Host history for reactions needs an update: own reaction writes keep their provider receipt only."),
     )
-    return mode
 
 
 def _is_reaction_report(payload: Any) -> bool:
@@ -490,6 +511,14 @@ class OutboundWorker:
             await self.host.report_delivery(report["payload"])
         except asyncio.CancelledError:
             raise
+        except HostReceiptConflict as exc:
+            if report.get("cleaned"):
+                # An older version's report, cleaned of a credential on the way out, whose original the Host
+                # recorded before its answer was lost: the Host holds this part's receipt, so it is done.
+                log.warning("Slack history report %s: the Host already holds this part's receipt", report["row_id"])
+                self.store.finish_report(report)
+            else:
+                self.store.finish_report(report, error=str(exc))
         except Exception as exc:
             self.store.finish_report(report, error=str(exc) or type(exc).__name__)
         else:
@@ -1012,6 +1041,8 @@ class BridgeRuntime:
         self.store = store
         self.slack = slack
         self.host = host
+        if hasattr(host, "capabilities_listener"):
+            host.capabilities_listener = functools.partial(_record_capabilities, host, store)
         self.socket = SocketModeClient(
             slack,
             store,

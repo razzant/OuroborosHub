@@ -43,10 +43,11 @@ def normalize_channel_ids(value: Any) -> list[str]:
         tokens = [token for item in value for token in item.replace(",", " ").split()]
     else:
         raise ValueError(f"{NEW_ROOT_CHANNELS} must be text or a list of Slack channel IDs")
-    for token in tokens:
+    for position, token in enumerate(tokens, 1):
         if not _CHANNEL_ID.fullmatch(token):
+            # Value-free: the field and the entry's position, never what was typed (it may be a pasted secret).
             hint = "use its channel ID, not its name" if token.startswith("#") else "names are not accepted"
-            raise ValueError(f"{NEW_ROOT_CHANNELS}: {token[:80]!r} is not a Slack channel ID "
+            raise ValueError(f"{NEW_ROOT_CHANNELS}: entry {position} is not a Slack channel ID "
                              f"such as C0123456789 ({hint})")
     channels = list(dict.fromkeys(tokens))
     if len(channels) > NEW_ROOT_CHANNELS_MAX:

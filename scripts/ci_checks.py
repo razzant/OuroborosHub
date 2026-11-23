@@ -79,9 +79,13 @@ SUITES = {
     # the check skip or return.
     'slack-bridge': {'skills': ['slack-bridge'],
                      'tests': ['skills/slack-bridge/tests', 'tests/test_slack_conversation_core_consumer.py',
-                               'tests/test_reaction_core_consumer.py', 'tests/test_gesture_core_consumer.py'],
-                     'dependencies': ['httpx', 'starlette', 'websockets'],
-                     'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT',
+                               'tests/test_reaction_core_consumer.py', 'tests/test_gesture_core_consumer.py',
+                               # The card mounts through that core's real module bridge in Chromium and WebKit.
+                               'tests/test_slack_bridge_widget_browser.py', 'tests/test_widget_theme_contracts.py'],
+                     # The browser test answers the card's route lease as the core's controls do.
+                     'shared': ['tests/widget_lease_gateway.py'],
+                     'dependencies': ['httpx', 'starlette', 'websockets', 'playwright==1.62.0'],
+                     'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT', 'env': {'TRANSPORT_WIDGET_REQUIRE_BROWSERS': '1'},
                      'core_imports': ['ouroboros.place_intake:reaction_refusal', 'ouroboros.presence_delivery:validate_delivery',
                                       'ouroboros.contracts.skill_manifest:parse_skill_manifest_text',
                                       'ouroboros.extension_ui_validation:validate_contributions',

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sqlite3
 import threading
@@ -9,14 +10,41 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .events import REACTION_EVENTS, ParsedEnvelope, conversation_thread, provider_facts
+from .redaction import redact, redact_report
 from .slack_api import normalize_text_format
 
 
 # An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
 REACTION_WITHHELD = "reaction_host_context_unavailable"
+RECENT_PROBLEM_WINDOW_SECONDS = 86400
+_REDACTED_RUNTIME_KEYS = frozenset({"last_socket_error", "new_root_channels_error"})
+OUTBOX_CHUNK_MAX_CHARS = 3900
+LINK_STATES = frozenset({"connected", "starting", "reconnecting", "disconnected", "not_configured", "error"})
+LINK_DETAILS = frozenset({
+    "ok",
+    "store_unreadable",
+    "host_adapter_inactive",
+    "starting",
+    "authorized",
+    "connecting",
+    "refresh_requested",
+    "connection_closed",
+    "reconnecting",
+    "companion_not_running",
+    "disconnected",
+    "not_started",
+    "missing_tokens",
+    "missing_bot_token",
+    "missing_app_token",
+    "unreadable_settings",
+    "invalid_binding_id",
+    "corrupt_runtime_state",
+    "socket_error",
+    "companion_exited_error",
+})
 _REACTION_OPERATIONS = {"reaction_add": ("add", "new", "reactions.add"),
                         "reaction_remove": ("remove", "old", "reactions.remove")}
 
@@ -213,13 +241,13 @@ class OutboxItem:
             message["output_ref"] = self.output_ref
         if error:
             message["error"] = error
-        return {
+        return redact_report({
             "schema_version": 1, "delivery_id": self.request_id, "part_id": str(self.chunk_index),
             "state": state, "provider": "slack", "account_id": self.provider_account_id,
             "conversation_id": str(result.get("channel") or self.resolved_channel or self.target),
             "thread_id": thread, "text": self.text, "format": self.text_format,
             "message": message, "origin": self.origin,
-        }
+        })
 
 
     def reaction_report(self, state: str, *, retained: Mapping[str, Any] | None = None, effect: str = "",
@@ -235,17 +263,215 @@ class OutboxItem:
                                "resolution": "resolved" if retained else "unresolved"},
                     **({"effect": effect} if effect else {})}
         message = {"kind": "operation", "method": method, "reaction": reaction, **({"error": error} if error else {})}
-        return {
+        return redact_report({
             "schema_version": 1, "delivery_id": self.request_id, "part_id": "0", "state": state,
             "provider": "slack", "account_id": self.provider_account_id,
             "conversation_id": str(self.payload.get("channel") or self.target),
             "thread_id": str(retained["thread_ts"]) if retained else "",
             "text": "", "format": "", "message": message, "origin": self.origin,
-        }
+        })
 
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
+
+
+def _iso_z(epoch: float) -> str:
+    dt = datetime.fromtimestamp(float(epoch), timezone.utc)
+    if dt.microsecond:
+        return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+_IS_WINDOWS = os.name == "nt"
+_WINDOWS_STILL_ACTIVE = 259
+_WINDOWS_ACCESS_DENIED = 5
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _windows_kernel32(ctypes_module: Any, wintypes_module: Any) -> Any:
+    """kernel32 with the three signatures this probe calls declared, so HANDLE is not truncated to a C int."""
+    kernel32 = ctypes_module.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes_module.DWORD, wintypes_module.BOOL, wintypes_module.DWORD)
+    kernel32.OpenProcess.restype = wintypes_module.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes_module.HANDLE, ctypes_module.POINTER(wintypes_module.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes_module.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes_module.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes_module.BOOL
+    return kernel32
+
+
+def _pid_is_alive(pid: Any) -> bool | None:
+    """True when ``pid`` names a live OS process, False when it does not, None when the OS did not say.
+
+    Never sends signal 0 on Windows; a failed ``GetExitCodeProcess`` is None, not alive. A PID the OS has reused for
+    another process also reads as alive (the store keeps no heartbeat), and on POSIX a child that exited but was not
+    yet reaped (a zombie) reads as alive until its parent waits for it.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    if _IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = _windows_kernel32(ctypes, wintypes)
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == _WINDOWS_ACCESS_DENIED
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return None
+            return exit_code.value == _WINDOWS_STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def derive_link_state(payload: Mapping[str, Any], *, companion_alive: bool | None) -> dict[str, Any]:
+    """Derive an honest transport link summary from stored runtime facts, settings, and PID liveness.
+
+    Never reports ``connected``, ``starting``, or ``reconnecting`` when the companion process is known not to run.
+    ``companion_alive`` None means the OS did not answer the probe: the stored state is reported as recorded and
+    the link's ``companion_alive`` stays None, so the summary says the state is only partly known.
+    ``since`` is populated only when ``state == 'connected'`` and ``connected_at`` was recorded for that session.
+    """
+    probe = _derive_known_link(payload, companion_alive=True if companion_alive is None else bool(companion_alive))
+    if companion_alive is None:
+        probe["companion_alive"] = None
+    return probe
+
+
+def _derive_known_link(payload: Mapping[str, Any], *, companion_alive: bool) -> dict[str, Any]:
+    """``derive_link_state`` for a probe that answered."""
+    alive = bool(companion_alive)
+    binding_state = str(payload.get("binding_state") or "")
+    if binding_state == "unreadable":
+        return {
+            "state": "error",
+            "detail": "unreadable_settings",
+            "companion_alive": alive,
+            "since": None,
+            "error": str(payload.get("local_settings_error") or ""),
+        }
+    if binding_state == "invalid":
+        return {
+            "state": "error",
+            "detail": "invalid_binding_id",
+            "companion_alive": alive,
+            "since": None,
+            "error": "",
+        }
+
+    socket_state = payload.get("socket_state", "stopped")
+    last_socket_error = str(payload.get("last_socket_error") or "")
+    active_socket_states = {"connected", "starting", "authorized", "connecting", "reconnecting"}
+
+    if "has_bot_token" in payload and "has_app_token" in payload:
+        has_bot = bool(payload.get("has_bot_token"))
+        has_app = bool(payload.get("has_app_token"))
+        if (not has_bot or not has_app) and not (alive and socket_state in active_socket_states):
+            detail = (
+                "missing_tokens"
+                if not has_bot and not has_app
+                else ("missing_bot_token" if not has_bot else "missing_app_token")
+            )
+            return {
+                "state": "not_configured",
+                "detail": detail,
+                "companion_alive": alive,
+                "since": None,
+                "error": last_socket_error if socket_state == "error" else "",
+            }
+
+    if socket_state is None:
+        return {
+            "state": "error",
+            "detail": "corrupt_runtime_state",
+            "companion_alive": alive,
+            "since": None,
+            "error": "",
+        }
+
+    socket_str = str(socket_state or "stopped")
+    if socket_str == "error":
+        return {
+            "state": "error",
+            "detail": "socket_error" if alive else "companion_exited_error",
+            "companion_alive": alive,
+            "since": None,
+            "error": last_socket_error,
+        }
+
+    if not alive:
+        if socket_str == "stopped":
+            detail = "not_started"
+            err = ""
+        elif socket_str == "disconnected":
+            detail = "disconnected"
+            err = ""
+        else:
+            detail = "companion_not_running"
+            err = last_socket_error
+        return {
+            "state": "disconnected",
+            "detail": detail,
+            "companion_alive": False,
+            "since": None,
+            "error": err,
+        }
+
+    if socket_str == "connected":
+        connected_at = payload.get("connected_at")
+        since = (
+            _iso_z(float(connected_at))
+            if isinstance(connected_at, (int, float)) and not isinstance(connected_at, bool) and float(connected_at) > 0
+            else None
+        )
+        adapter_ok = str(payload.get("host_adapter_state") or "") == "active"
+        return {
+            "state": "connected",
+            "detail": "ok" if adapter_ok else "host_adapter_inactive",
+            "companion_alive": True,
+            "since": since,
+            "error": "",
+        }
+
+    if socket_str in {"starting", "authorized", "connecting"}:
+        return {
+            "state": "starting",
+            "detail": socket_str,
+            "companion_alive": True,
+            "since": None,
+            "error": "",
+        }
+
+    if socket_str == "reconnecting":
+        if last_socket_error == "refresh_requested":
+            detail = "refresh_requested"
+        elif last_socket_error.startswith("connection_closed:"):
+            detail = "connection_closed"
+        else:
+            detail = "reconnecting"
+        return {
+            "state": "reconnecting",
+            "detail": detail,
+            "companion_alive": True,
+            "since": None,
+            "error": last_socket_error,
+        }
+
+    return {
+        "state": "disconnected",
+        "detail": "not_started" if socket_str == "stopped" else "disconnected",
+        "companion_alive": True,
+        "since": None,
+        "error": "",
+    }
 
 
 def _message_revision(row: Mapping[str, Any] | sqlite3.Row) -> str:
@@ -856,7 +1082,7 @@ class BridgeStore:
                 """,
                 (
                     now + max(0.0, delay_seconds),
-                    str(error)[:1000],
+                    redact(error, limit=1000),
                     now,
                     row_id,
                     lease_token,
@@ -1152,7 +1378,7 @@ class BridgeStore:
             row_id, lease_token,
             ("state=?", "lease_token=''", "lease_until=0", "send_started=0", "last_error=?",
              "report_payload_json=?", "report_state=?", "result_json=?"),
-            (state, str(error)[:1000], json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
+            (state, redact(error, limit=1000), json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
              "pending" if report_payload else "", json.dumps(dict(result or {}), ensure_ascii=False)),
             upload_attempt=upload_attempt,
         )
@@ -1169,16 +1395,19 @@ class BridgeStore:
             db.execute("""UPDATE outbox SET report_state='reporting',report_lease_token=?,
                           report_lease_until=?,report_attempts=report_attempts+1 WHERE id=?""",
                        (token, now + 30, row["id"]))
+        stored = json.loads(row["report_payload_json"])
+        # A report queued by an older version may still hold a credential in its error: it leaves clean.
+        payload = redact_report(stored)
         return {"row_id": int(row["id"]), "lease_token": token,
                 "attempts": int(row["report_attempts"]) + 1,
-                "payload": json.loads(row["report_payload_json"])}
+                "payload": payload, "cleaned": payload != stored}
 
     def finish_report(self, report: Mapping[str, Any], *, error: str = "") -> None:
         delay = min(60, 2 ** min(int(report["attempts"]), 5)) if error else 0
         with self._connect() as db:
             db.execute("""UPDATE outbox SET report_state=?,report_lease_token='',report_lease_until=0,
                           report_available_at=?,report_error=? WHERE id=? AND report_lease_token=?""",
-                       ("pending" if error else "acked", time.time() + delay, error[:1000],
+                       ("pending" if error else "acked", time.time() + delay, redact(error, limit=1000),
                         report["row_id"], report["lease_token"]))
 
     def runtime_value(self, key: str, default: Any = None) -> Any:
@@ -1251,7 +1480,7 @@ class BridgeStore:
             row_id, lease_token,
             ("state='pending'", "lease_token=''", "lease_until=0", "available_at=?", "last_error=?",
              "send_started=0", "report_payload_json=''", "report_state=''"),
-            (time.time() + max(0.0, delay_seconds), str(error)[:1000]),
+            (time.time() + max(0.0, delay_seconds), redact(error, limit=1000)),
             upload_attempt=upload_attempt,
         )
 
@@ -1266,7 +1495,7 @@ class BridgeStore:
             item.row_id, item.lease_token,
             ("state='pending'", "lease_token=''", "lease_until=0", "send_started=0", "available_at=?",
              *(() if spend_attempt else ("attempts=MAX(0,attempts-1)",)), "last_error=?"),
-            (time.time() + 5, reason),
+            (time.time() + 5, redact(reason)),
             upload_attempt=upload_attempt,
         )
 
@@ -1307,7 +1536,7 @@ class BridgeStore:
                 SET state=?, lease_token='', lease_until=0, last_error=?, updated_at=?
                 WHERE id=? AND state='leased' AND lease_token=?
                 """,
-                (state, str(error)[:1000], now, row_id, lease_token),
+                (state, redact(error, limit=1000), now, row_id, lease_token),
             )
             if updated.rowcount != 1:
                 error_type = InboxLeaseLost if table == "inbox" else OutboxLeaseLost
@@ -1317,6 +1546,9 @@ class BridgeStore:
 
     def set_runtime(self, **values: Any) -> None:
         now = time.time()
+        # Error text from exceptions (the daemon, the Socket Mode loop) is stored without credentials.
+        values = {key: redact(value) if key in _REDACTED_RUNTIME_KEYS and isinstance(value, str) else value
+                  for key, value in values.items()}
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for key, value in values.items():
@@ -1330,11 +1562,182 @@ class BridgeStore:
                 )
             db.commit()
 
-    def status(self) -> dict[str, Any]:
+    def finish_companion(self, pid: int, **values: Any) -> bool:
+        """An exiting companion's last write: ``values`` (its final socket state and error) and clearing its PID, in
+        one transaction and only while the stored PID is still its own (one keyed lookup). A successor that already
+        wrote its PID keeps its state; nothing is written then."""
+        values = {key: redact(value) if key in _REDACTED_RUNTIME_KEYS and isinstance(value, str) else value
+                  for key, value in values.items()}
+        now = time.time()
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value_json FROM runtime_state WHERE key='companion_pid'").fetchone()
+            if row is None or row[0] != json.dumps(pid, ensure_ascii=False):
+                db.commit()
+                return False
+            for key, value in {**values, "companion_pid": None}.items():
+                db.execute(
+                    """
+                    INSERT INTO runtime_state(key, value_json, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
+                    """,
+                    (str(key), json.dumps(value, ensure_ascii=False), now),
+                )
+            db.commit()
+        return True
+
+    def clear_runtime_if_equal(self, key: str, expected: Any) -> bool:
+        """Clear ``key`` only while it still holds ``expected``; an exiting daemon never erases a newer one's PID."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE runtime_state SET value_json='null', updated_at=? WHERE key=? AND value_json=?",
+                (time.time(), str(key), json.dumps(expected, ensure_ascii=False)),
+            )
+            db.commit()
+        return cursor.rowcount == 1
+
+    def status(
+        self,
+        *,
+        now: float | None = None,
+        pid_alive: Callable[[Any], bool] | None = None,
+    ) -> dict[str, Any]:
+        observed_epoch = float(time.time() if now is None else now)
+        cutoff = observed_epoch - RECENT_PROBLEM_WINDOW_SECONDS
+        with self._connect() as db:
+            # One read transaction: every counter and recent problem below comes from the same snapshot.
+            if not db.in_transaction:
+                db.execute("BEGIN")
             runtime_rows = db.execute(
                 "SELECT key, value_json, updated_at FROM runtime_state"
             ).fetchall()
+            # Every reason holding outbound rows, with its count (the newest note alone can hide the owner's move).
+            held_reasons = [
+                {"reason": str(row[0])[len("Held:"):].strip(), "note": str(row[0]), "count": int(row[1])}
+                for row in db.execute(
+                    "SELECT last_error, COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%' "
+                    "GROUP BY last_error ORDER BY COUNT(*) DESC, last_error"
+                ).fetchall()
+            ]
+            # Events not yet confirmed as received by Ouroboros whose last attempt failed for now; the bridge retries
+            # them by itself. That covers a hand-off the Host refused for now or whose answer was lost, and a
+            # Slack-side intake step that failed retryably (file staging, context capture). Rows whose turn is running
+            # carry "Host turn state: ..." notes and are not counted; a first attempt not yet made is an ordinary wait;
+            # a row with a stored host_reference was already accepted by Ouroboros and is only being observed.
+            retrying = db.execute(
+                "SELECT COUNT(*) FROM inbox WHERE state='pending' AND attempts>0 AND host_reference='' "
+                "AND last_error<>'' AND last_error NOT LIKE 'Host turn state:%'"
+            ).fetchone()
+            retrying_last = db.execute(
+                "SELECT last_error, updated_at FROM inbox WHERE state='pending' AND attempts>0 AND host_reference='' "
+                "AND last_error<>'' AND last_error NOT LIKE 'Host turn state:%' ORDER BY updated_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+            # One pass over the text rows grouped by message: part counts, each message's state now, and the
+            # messages of the recent window with a problem part (counted even while another part still waits or is
+            # held), with how many of those already had a part confirmed by Slack and how many still have parts
+            # queued. The window applies to each outcome's own time: a message whose unknown part is days old and
+            # whose refused part is from today counts as refused today, as its parts do; an unknown outcome inside
+            # the window takes precedence over a refusal, as in the queue view.
+            text_row = db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(waiting_n), 0) AS chunks_waiting,
+                    COALESCE(SUM(held_n), 0) AS chunks_held,
+                    COALESCE(SUM(leased_n), 0) AS chunks_leased,
+                    COALESCE(SUM(delivered_n), 0) AS chunks_delivered,
+                    COALESCE(SUM(failed_n), 0) AS chunks_failed,
+                    COALESCE(SUM(uncertain_n), 0) AS chunks_uncertain,
+                    COALESCE(SUM(CASE WHEN leased_n > 0 THEN 1 ELSE 0 END), 0) AS msg_leased,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 THEN 1 ELSE 0 END), 0) AS msg_held,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_waiting,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n > 0
+                        THEN 1 ELSE 0 END), 0) AS msg_uncertain,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n = 0
+                        AND failed_n > 0 THEN 1 ELSE 0 END), 0) AS msg_failed,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n = 0
+                        AND failed_n = 0 THEN 1 ELSE 0 END), 0) AS msg_delivered,
+                    -- The newest outcome time among the messages each class above counts (not of any part).
+                    MAX(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n > 0
+                        THEN last_uncertain_at ELSE NULL END) AS msg_uncertain_last_at,
+                    MAX(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n = 0 AND failed_n > 0
+                        THEN last_failed_at ELSE NULL END) AS msg_failed_last_at,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n > 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_failed_queued_partly,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n > 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_queued_partly,
+                    COALESCE(SUM(CASE WHEN leased_n > 0 AND problem_n > 0 THEN 1 ELSE 0 END), 0) AS msg_leased_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 AND problem_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_held_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n > 0 AND problem_n > 0
+                        THEN 1 ELSE 0 END), 0) AS msg_waiting_problem,
+                    COALESCE(SUM(recent_u), 0) AS recent_uncertain,
+                    COALESCE(SUM(recent_f), 0) AS recent_failed,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_partly,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_failed_partly,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_queued,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_failed_queued,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n = 0 AND delivered_n + uncertain_n > 0
+                        THEN 1 ELSE 0 END), 0) AS recent_failed_settled,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n = 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_partly_settled,
+                    -- Messages sent in several parts: resending one whole could post a part twice.
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND parts_n > 1 THEN 1 ELSE 0 END), 0) AS recent_failed_in_parts,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND parts_n > 1 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_in_parts,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND failed_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_with_failed,
+                    COALESCE(SUM(CASE WHEN leased_n > 0 AND recent_f + recent_u > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_leased_recent_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 AND recent_f + recent_u > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_held_recent_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n > 0 AND recent_f + recent_u > 0
+                        THEN 1 ELSE 0 END), 0) AS msg_waiting_recent_problem,
+                    MAX(CASE WHEN recent_f = 1 THEN failed_key ELSE NULL END) AS recent_failed_key,
+                    MAX(CASE WHEN recent_u = 1 THEN uncertain_key ELSE NULL END) AS recent_uncertain_key
+                FROM (
+                    SELECT *,
+                        waiting_n + held_n + leased_n AS queued_n,
+                        failed_n + uncertain_n AS problem_n,
+                        CASE WHEN last_uncertain_at >= :cutoff THEN 1 ELSE 0 END AS recent_u,
+                        CASE WHEN last_failed_at >= :cutoff AND NOT COALESCE(last_uncertain_at >= :cutoff, 0)
+                            THEN 1 ELSE 0 END AS recent_f
+                    FROM (
+                        SELECT
+                            COUNT(*) AS parts_n,
+                            SUM(CASE WHEN state='pending' AND last_error NOT LIKE 'Held:%' THEN 1 ELSE 0 END) AS waiting_n,
+                            SUM(CASE WHEN state='pending' AND last_error LIKE 'Held:%' THEN 1 ELSE 0 END) AS held_n,
+                            SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END) AS leased_n,
+                            SUM(CASE WHEN state='delivered' THEN 1 ELSE 0 END) AS delivered_n,
+                            SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_n,
+                            SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END) AS uncertain_n,
+                            MAX(CASE WHEN state='failed' THEN updated_at ELSE NULL END) AS last_failed_at,
+                            MAX(CASE WHEN state='uncertain' THEN updated_at ELSE NULL END) AS last_uncertain_at,
+                            -- The newest part of each outcome as one sortable key (time, then id): the item's time
+                            -- and error come from the messages it counts, not from another message's part.
+                            MAX(CASE WHEN state='failed' THEN printf('%020.6f|%012d', updated_at, id) ELSE NULL END)
+                                AS failed_key,
+                            MAX(CASE WHEN state='uncertain' THEN printf('%020.6f|%012d', updated_at, id) ELSE NULL END)
+                                AS uncertain_key
+                        FROM outbox WHERE kind <> 'mutation' GROUP BY request_id
+                    )
+                )
+                """,
+                {"cutoff": cutoff},
+            ).fetchone()
+            # The newest refused and unknown part of the messages counted above, by primary key.
+            counted_keys = [key for key in (text_row["recent_failed_key"], text_row["recent_uncertain_key"]) if key]
+            counted_rows = {
+                int(row["id"]): row for row in db.execute(
+                    f"SELECT id, state, last_error, updated_at FROM outbox WHERE id IN ({','.join('?' * len(counted_keys))})",
+                    [int(key.split("|")[1]) for key in counted_keys],
+                ).fetchall()
+            } if counted_keys else {}
             inbox = {
                 str(row["state"]): int(row["count"])
                 for row in db.execute(
@@ -1374,6 +1777,60 @@ class BridgeStore:
                 ) ORDER BY updated_at DESC LIMIT 1
                 """
             ).fetchone()
+            inbox_problem_rows = db.execute(
+                """
+                SELECT
+                    state,
+                    COALESCE(SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count,
+                    MAX(updated_at) AS last_at
+                FROM inbox
+                WHERE state IN ('failed', 'uncertain')
+                GROUP BY state
+                """,
+                (cutoff,),
+            ).fetchall()
+            outbox_problem_rows = db.execute(
+                """
+                SELECT
+                    CASE WHEN kind='mutation' THEN 'mutation' ELSE 'text' END AS bucket,
+                    state,
+                    COALESCE(SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count,
+                    MAX(updated_at) AS last_at
+                FROM outbox
+                WHERE state IN ('failed', 'uncertain')
+                GROUP BY bucket, state
+                """,
+                (cutoff,),
+            ).fetchall()
+            # The newest real error per queue and per state (failed, uncertain). Holds and routine turn notes are
+            # notes, not errors. Whether it belongs to the recent window is decided below from its time.
+            inbox_err_rows = db.execute(
+                """
+                SELECT id, state, last_error, updated_at FROM (
+                    SELECT id, state, last_error, updated_at,
+                        ROW_NUMBER() OVER (PARTITION BY state ORDER BY updated_at DESC, id DESC) AS newest
+                    FROM inbox
+                    WHERE state IN ('failed', 'uncertain')
+                      AND last_error NOT LIKE 'Held:%'
+                      AND last_error NOT LIKE 'Host turn state:%'
+                ) WHERE newest = 1
+                """
+            ).fetchall()
+            outbox_err_rows = db.execute(
+                """
+                SELECT id, bucket, state, operation, last_error, updated_at FROM (
+                    SELECT id, CASE WHEN kind='mutation' THEN 'mutation' ELSE 'text' END AS bucket, state, operation,
+                        last_error, updated_at,
+                        ROW_NUMBER() OVER (PARTITION BY CASE WHEN kind='mutation' THEN 'mutation' ELSE 'text' END, state
+                                           ORDER BY updated_at DESC, id DESC) AS newest
+                    FROM outbox
+                    WHERE state IN ('failed', 'uncertain')
+                      AND last_error NOT LIKE 'Held:%'
+                      AND last_error NOT LIKE 'Host turn state:%'
+                ) WHERE newest = 1
+                """
+            ).fetchall()
+
         runtime: dict[str, Any] = {}
         runtime_updated_at = 0.0
         for row in runtime_rows:
@@ -1382,16 +1839,79 @@ class BridgeStore:
             except json.JSONDecodeError:
                 runtime[str(row["key"])] = None
             runtime_updated_at = max(runtime_updated_at, float(row["updated_at"]))
-        return {
-            "outbox_held": held,
+
+        inbox_prob = {
+            str(r["state"]): (int(r["recent_count"]), _iso_z(float(r["last_at"])) if r["last_at"] is not None else None)
+            for r in inbox_problem_rows
+        }
+        outbox_prob = {
+            (str(r["bucket"]), str(r["state"])): (
+                int(r["recent_count"]),
+                _iso_z(float(r["last_at"])) if r["last_at"] is not None else None,
+            )
+            for r in outbox_problem_rows
+        }
+
+        # (queue, state) -> the newest error row of that state; per queue the newer of the two is ``last_error``.
+        newest_err: dict[tuple[str, str], dict[str, Any]] = {}
+        order: dict[tuple[str, str], tuple[float, int, int]] = {}
+        for rank, queue, row in (
+            *((1, "inbound", r) for r in inbox_err_rows),
+            *((2 if r["bucket"] == "text" else 3, "outbound_text" if r["bucket"] == "text" else "mutations", r)
+              for r in outbox_err_rows),
+        ):
+            error = {"at": _iso_z(float(row["updated_at"])), "state": str(row["state"]), "text": str(row["last_error"])}
+            if queue == "mutations":
+                error = {"at": error["at"], "state": error["state"], "operation": str(row["operation"] or ""),
+                         "text": error["text"]}
+            newest_err[(queue, str(row["state"]))] = error
+            order[(queue, str(row["state"]))] = (float(row["updated_at"]), rank, int(row["id"]))
+
+        def queue_errors(queue: str) -> dict[str, Any]:
+            """``last_error`` (newest of either state, all time) and the newest error of each state in the window."""
+            known = [key for key in ((queue, "failed"), (queue, "uncertain")) if key in newest_err]
+            newest = max(known, key=lambda key: order[key]) if known else None
+            in_window = {state: (newest_err[(queue, state)] if (queue, state) in newest_err
+                                 and order[(queue, state)][0] >= cutoff else None)
+                         for state in ("failed", "uncertain")}
+            return {"last_error": newest_err[newest] if newest else None,
+                    "last_failed_error": in_window["failed"], "last_uncertain_error": in_window["uncertain"]}
+
+        errors = {queue: queue_errors(queue) for queue in ("inbound", "outbound_text", "mutations")}
+        # Outbound text counts messages: a message with a recent unknown part counts as unknown, not refused, so its
+        # refused part's error must not stand for another message. Each item's error is its own messages' newest.
+        for state, key in (("failed", text_row["recent_failed_key"]), ("uncertain", text_row["recent_uncertain_key"])):
+            row = counted_rows.get(int(key.split("|")[1])) if key else None
+            note = str(row["last_error"]) if row is not None else ""
+            errors["outbound_text"][f"last_{state}_error"] = (
+                {"at": _iso_z(float(row["updated_at"])), "state": state,
+                 "text": "" if note.startswith(("Held:", "Host turn state:")) else note}
+                if row is not None else None
+            )
+        direction = {"inbound": ("inbound", "event"), "outbound_text": ("outbound", "text"),
+                     "mutations": ("outbound", "mutation")}
+        structured_last_error = None
+        if order:
+            queue, state = max(order, key=lambda key: order[key])
+            newest = newest_err[(queue, state)]
+            structured_last_error = {"at": newest["at"], "direction": direction[queue][0], "kind": direction[queue][1],
+                                     "operation": newest.get("operation", ""), "state": newest["state"],
+                                     "text": newest["text"]}
+
+        payload: dict[str, Any] = {
+            "outbox_held": int(held),
             "socket_state": "stopped",
             "host_adapter_state": "missing_binding_id",
             "reaction_context_state": "unknown",
             "workspace_name": "",
+            # Why the Host's capabilities are not confirmed ("credential_missing", "request_failed"); "" otherwise.
+            "host_check_cause": "",
             "workspace_id": "",
             "bot_user_id": "",
             **runtime,
             "runtime_updated_at": runtime_updated_at,
+            # Whether a companion ever wrote its view of the Host binding (absent on a bridge that never started).
+            "host_adapter_checked": "host_adapter_state" in runtime,
             "inbox_pending": inbox.get("pending", 0),
             "inbox_retained": int(retained),
             "inbox_leased": inbox.get("leased", 0),
@@ -1406,10 +1926,125 @@ class BridgeStore:
             "outbox_uncertain": outbox.get("uncertain", 0),
             "mutations_pending": mutations.get("pending", 0),
             "mutations_delivered": mutations.get("delivered", 0),
+            "mutations_leased": mutations.get("leased", 0),
             "mutations_failed": mutations.get("failed", 0),
             "mutations_uncertain": mutations.get("uncertain", 0),
             "delivery_reports_pending": reports.get("pending", 0) + reports.get("reporting", 0),
             "delivery_reports_acked": reports.get("acked", 0),
             "last_report_error": str(report_error[0]) if report_error else "",
             "last_delivery_error": str(last_error["last_error"]) if last_error else "",
+            "observed_at": _iso_z(observed_epoch),
+            "last_error": structured_last_error,
+            "held_reasons": held_reasons,
+            "inbox_retrying": {
+                "count": int(retrying[0] or 0),
+                "last_error": (
+                    {"at": _iso_z(float(retrying_last["updated_at"])), "text": str(retrying_last["last_error"])}
+                    if retrying_last is not None
+                    else None
+                ),
+            },
+            "recent_problems": {
+                "window_seconds": RECENT_PROBLEM_WINDOW_SECONDS,
+                "inbound": {
+                    "failed": inbox_prob.get("failed", (0, None))[0],
+                    "uncertain": inbox_prob.get("uncertain", (0, None))[0],
+                    "last_failed_at": inbox_prob.get("failed", (0, None))[1],
+                    "last_uncertain_at": inbox_prob.get("uncertain", (0, None))[1],
+                    **errors["inbound"],
+                },
+                "outbound_text": {
+                    "failed": outbox_prob.get(("text", "failed"), (0, None))[0],
+                    "uncertain": outbox_prob.get(("text", "uncertain"), (0, None))[0],
+                    "failed_messages": int(text_row["recent_failed"]),
+                    "uncertain_messages": int(text_row["recent_uncertain"]),
+                    # Of those messages, how many already had a part (any part) confirmed by Slack, and how many
+                    # still have parts waiting, held or being sent (those parts go out by themselves).
+                    "failed_messages_partly_delivered": int(text_row["recent_failed_partly"]),
+                    "uncertain_messages_partly_delivered": int(text_row["recent_uncertain_partly"]),
+                    "failed_messages_still_queued": int(text_row["recent_failed_queued"]),
+                    "uncertain_messages_still_queued": int(text_row["recent_uncertain_queued"]),
+                    # Refused messages by their other parts: none queued, but some delivered or with an unknown
+                    # outcome (send only the refused parts); and every part refused (send again). With
+                    # failed_messages_still_queued they add up to failed_messages.
+                    "failed_messages_others_delivered_or_unknown": int(text_row["recent_failed_settled"]),
+                    "failed_messages_every_part_refused": int(text_row["recent_failed"]) - int(text_row["recent_failed_queued"])
+                    - int(text_row["recent_failed_settled"]),
+                    # Unknown-outcome messages partly delivered with nothing left queued.
+                    "uncertain_messages_partly_delivered_none_queued": int(text_row["recent_uncertain_partly_settled"]),
+                    # Of the counted messages, those sent in several parts (each gets per-part advice, never a
+                    # whole resend), and the unknown-outcome ones that also have a refused part.
+                    "failed_messages_in_parts": int(text_row["recent_failed_in_parts"]),
+                    "uncertain_messages_in_parts": int(text_row["recent_uncertain_in_parts"]),
+                    "uncertain_messages_with_refused_part": int(text_row["recent_uncertain_with_failed"]),
+                    # Of the still-queued ones, those that also already have a part in the conversation.
+                    "failed_messages_still_queued_partly_delivered": int(text_row["recent_failed_queued_partly"]),
+                    "uncertain_messages_still_queued_partly_delivered": int(text_row["recent_uncertain_queued_partly"]),
+                    "last_failed_at": outbox_prob.get(("text", "failed"), (0, None))[1],
+                    "last_uncertain_at": outbox_prob.get(("text", "uncertain"), (0, None))[1],
+                    **errors["outbound_text"],
+                },
+                "mutations": {
+                    "failed": outbox_prob.get(("mutation", "failed"), (0, None))[0],
+                    "uncertain": outbox_prob.get(("mutation", "uncertain"), (0, None))[0],
+                    "last_failed_at": outbox_prob.get(("mutation", "failed"), (0, None))[1],
+                    "last_uncertain_at": outbox_prob.get(("mutation", "uncertain"), (0, None))[1],
+                    **errors["mutations"],
+                },
+            },
+            "outbound_text_chunks": {
+                "waiting": int(text_row["chunks_waiting"]),
+                "held": int(text_row["chunks_held"]),
+                "leased": int(text_row["chunks_leased"]),
+                "delivered": int(text_row["chunks_delivered"]),
+                "failed": int(text_row["chunks_failed"]),
+                "uncertain": int(text_row["chunks_uncertain"]),
+            },
+            "outbound_messages": {
+                "waiting": int(text_row["msg_waiting"]),
+                "held": int(text_row["msg_held"]),
+                "leased": int(text_row["msg_leased"]),
+                "delivered": int(text_row["msg_delivered"]),
+                "failed": int(text_row["msg_failed"]),
+                "uncertain": int(text_row["msg_uncertain"]),
+            },
+            # When the newest message of each final class got its outcome: the totals' "last" belongs to the class.
+            "outbound_messages_last_at": {
+                "failed": _iso_z(float(text_row["msg_failed_last_at"])) if text_row["msg_failed_last_at"] else None,
+                "uncertain": (_iso_z(float(text_row["msg_uncertain_last_at"]))
+                              if text_row["msg_uncertain_last_at"] else None),
+            },
+            # Of the waiting, held and sending messages above, those that already have a part not delivered or with
+            # an unknown outcome: one message, some parts final, others still queued.
+            "outbound_messages_with_problem_parts": {
+                "waiting": int(text_row["msg_waiting_problem"]),
+                "held": int(text_row["msg_held_problem"]),
+                "leased": int(text_row["msg_leased_problem"]),
+            },
+            # Of those, the ones whose problem part is in the recent window, so its own item lists the message.
+            "outbound_messages_with_recent_problem_parts": {
+                "waiting": int(text_row["msg_waiting_recent_problem"]),
+                "held": int(text_row["msg_held_recent_problem"]),
+                "leased": int(text_row["msg_leased_recent_problem"]),
+            },
+            "units": {
+                "inbox": "envelopes",
+                "outbox": "text_chunks_3900_chars_plus_mutations",
+                "outbox_chunk_max_chars": OUTBOX_CHUNK_MAX_CHARS,
+                "outbound_text_chunks": "text_chunks_3900_chars",
+                "outbound_messages": "logical_text_requests",
+                "mutations": "outbox_subset_operations",
+                "note": (
+                    "outbox_* counters count 3,900-char text chunks (kind='text') plus mutations "
+                    "(kind='mutation'), not logical messages, and include mutations_* and outbox_held "
+                    "as subsets. outbound_text_chunks counts 3,900-char text chunks only; "
+                    "outbound_messages counts distinct kind='text' request_ids; generic slack_api "
+                    "writes are queued as mutations."
+                ),
+            },
         }
+        check_alive = _pid_is_alive if pid_alive is None else pid_alive
+        probed = check_alive(payload.get("companion_pid"))
+        companion_alive = None if probed is None else bool(probed)
+        payload["link"] = derive_link_state(payload, companion_alive=companion_alive)
+        return payload
