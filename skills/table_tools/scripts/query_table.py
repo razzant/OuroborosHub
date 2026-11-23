@@ -175,6 +175,7 @@ def validate_columns(names: list[str], columns: list[str], label: str) -> None:
 
 
 def main() -> int:
+    common.use_utf8_streams()
     args = build_parser().parse_args()
     path = common.resolve_path(args.path, must_exist=True)
     if args.max_rows <= 0 or args.limit <= 0:

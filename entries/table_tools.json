@@ -3,7 +3,7 @@
     "documents"
   ],
   "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
-  "digest": "4e24776e52cbde4fcac39f03733881019b4b09f656f4f2dc7531ad39c80a0efd",
+  "digest": "9ef02e5ae8314cea354208797f670920fc165e6226e89b8a19f265a66ac9995b",
   "install_specs": [
     {
       "kind": "pip",
@@ -22,7 +22,7 @@
   },
   "title": "Spreadsheets",
   "type": "script",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data.",
   "withdrawn": null
 }

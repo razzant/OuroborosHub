@@ -19,8 +19,29 @@ import tempfile
 MAX_ROWS_DEFAULT = 20000
 
 
+def use_utf8_streams() -> None:
+    """Pin stdout and stderr to UTF-8 so output survives any host code page.
+
+    On Windows a piped child encodes its streams with the ANSI code page of
+    the host locale (cp1251 on Russian Windows, cp1252 on Western ones), while
+    the Ouroboros host decodes them as UTF-8: Cyrillic turns into U+FFFD, and
+    a code page without the character raises UnicodeEncodeError instead.
+    ``backslashreplace`` keeps even a lone surrogate (an undecodable file
+    name) as a ``\\udcXX`` escape — still valid JSON text — instead of
+    crashing. A replaced stream without ``reconfigure`` is left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def emit(payload: dict) -> None:
-    """Print one JSON object on stdout (the skill's only output channel)."""
+    """Print one JSON object on stdout, encoded as UTF-8.
+
+    The output is valid UTF-8 once :func:`use_utf8_streams` has run; both
+    entry points call it before doing anything else, on every host locale.
+    """
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2, default=str)
     sys.stdout.write("\n")
 
