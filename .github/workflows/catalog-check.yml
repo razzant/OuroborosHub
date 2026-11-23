@@ -85,7 +85,7 @@ jobs:
       # OUROBOROS_CORE_SHA above. Without it those suites fail; their real-core tests never skip. The widgets suite
       # also reads the core's historical theme bridge with git show, so its checkout carries the history (about 130 MB).
       - name: Check out the pinned core
-        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session", "widgets"]'), matrix.suite)
+        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session", "telephony", "widgets"]'), matrix.suite)
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
@@ -122,6 +122,13 @@ jobs:
         run: |
           echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
           echo "OUROBOROS_IDENTITY_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+      # The phone line's call bridge drives that same pinned core's real live-call doors (LiveCallHub and the peer
+      # socket pump) and parses its Presence events with the core's own parser, which its protocol pins need. The
+      # suite imports nothing beyond its dependencies, so the checkout above is all it needs; TELEPHONY_REQUIRE_CORE
+      # in scripts/ci_checks.py turns a skip for want of the core or of its doors into a failure.
+      - name: Name that core for telephony
+        if: matrix.suite == 'telephony'
+        run: echo "TELEPHONY_CORE_REPO=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
       # The Telegram Transport card's browser test mounts it through the same core's module bridge in Chromium and
       # WebKit. Without the browsers it fails (TRANSPORT_WIDGET_REQUIRE_BROWSERS in scripts/ci_checks.py); it never skips.
       - name: Install Playwright's browsers for the Telegram Transport card

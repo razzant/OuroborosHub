@@ -409,13 +409,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('LEGACY_REF = "', (ROOT / 'tests/test_dashboard_theme_browser.py').read_text(encoding='utf-8'))
         install = next(step for step in steps if step.get('name') == "Install the core's runtime and the browsers, and name the core")
         source = next(step for step in steps if step.get('name') == 'Name the core for the Presence consumers and GitHub')
+        phone = next(step for step in steps if step.get('name') == 'Name that core for telephony')
         # The suites whose tests drive browsers through the core install its runtime and both browsers, and get 30
-        # minutes; the Presence consumers and GitHub read its source.
+        # minutes; the Presence consumers and GitHub read its source, and telephony reads it under its own name.
         runtime = ['calendar-skill', 'email-presence', 'memory-atlas', 'smart-lists', 'telegram-user-session', 'widgets']
         consumer_suites = [name for name in needs_core if 'OUROBOROS_PRESENCE_CORE_ROOT' in ci_checks.core_envs(ci_checks.SUITES[name])]
         readers = sorted(consumer_suites + ['github'])
-        self.assertEqual((install['if'], source['if']), (selecting(runtime), selecting(readers)))
-        self.assertEqual(sorted(set(runtime) | set(readers)), needs_core)
+        telephony = ['telephony']
+        self.assertEqual((install['if'], source['if'], phone['if']),
+                         (selecting(runtime), selecting(readers), "matrix.suite == 'telephony'"))
+        self.assertEqual(sorted(set(runtime) | set(readers) | set(telephony)), needs_core)
         longer = re.fullmatch(r"\$\{\{ contains\(fromJSON\('(\[.*\])'\), matrix\.suite\) && 30 \|\| 15 \}\}",
                               hosted['timeout-minutes'])
         self.assertEqual(sorted(json.loads(longer.group(1))), runtime)
@@ -432,11 +435,11 @@ class WorkflowTests(unittest.TestCase):
         python = next(step for step in steps if step.get('uses') == 'actions/setup-python@v5')
         self.assertEqual(python['with']['python-version'],
                          '${{ contains(fromJSON(\'["memory-atlas", "calendar-skill", "email-presence"]\'), matrix.suite) && \'3.10\' || \'3.11\' }}')
-        # Execute both shell steps as written on either runner; substitute only the downloads. Each names the one
+        # Execute each naming step as written on either runner; substitute only the downloads. Each names the one
         # checkout, and every suite is given the variable its tests read (core_env) by the step that runs for it.
         named = {}
         for step, expected in [(install, ['-m pip install -r core/requirements.txt', '-m playwright install {}chromium webkit']),
-                               (source, [])]:
+                               (source, []), (phone, [])]:
             for runner in ('Linux', 'macOS'):
                 with self.subTest(step=step['name'], runner=runner), tempfile.TemporaryDirectory(prefix='hub core workflow ') as tmp:
                     root = Path(tmp)
@@ -454,13 +457,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(named[install['name']], {'ATLAS_CORE', 'OUROBOROS_SOURCE_DIR', 'OUROBOROS_THEME_CORE_ROOT',
                                                   'OUROBOROS_CORE_ROOT'})
         self.assertEqual(named[source['name']], {'OUROBOROS_PRESENCE_CORE_ROOT', 'OUROBOROS_IDENTITY_CORE_ROOT'})
+        self.assertEqual(named[phone['name']], {'TELEPHONY_CORE_REPO'})
         for suite in needs_core:
-            given = set().union(*(named[step['name']] for step, chosen in ((install, runtime), (source, readers))
-                                  if suite in chosen))
+            given = set().union(*(named[step['name']] for step, chosen in ((install, runtime), (source, readers),
+                                                                           (phone, telephony)) if suite in chosen))
             self.assertLessEqual(set(ci_checks.core_envs(ci_checks.SUITES[suite])), given, suite)
-        for step in (install, source):
+        for step in (install, source, phone):
             self.assertLess(steps.index(checkout), steps.index(step))
             self.assertLess(steps.index(step), len(steps) - 1)  # it precedes the suite run
+
+    def test_telephony_runs_on_the_one_pinned_core_and_never_skips_for_want_of_it(self):
+        steps = self.workflow('catalog-check.yml')['jobs']['hosted-skills']['steps']
+        # No checkout of its own: the one checkout of the core runs for telephony, and its own step names that checkout
+        # (test_every_suite_that_needs_a_core_runs_on_the_one_checkout executes it). Its tests drive no browser, so it
+        # installs neither the core's runtime nor the browsers.
+        def selects(step):
+            return 'telephony' in json.loads(re.fullmatch(r"contains\(fromJSON\('(\[.*\])'\), matrix\.suite\)",
+                                                          step['if']).group(1))
+        [checkout] = [step for step in steps if step.get('with', {}).get('repository') == CORE_REPOSITORY]
+        install = next(step for step in steps if step.get('name') == "Install the core's runtime and the browsers, and name the core")
+        self.assertEqual((selects(checkout), selects(install)), (True, False))
+        # The suite names that core, and a skip for want of it or of its doors is a failure.
+        suite = ci_checks.SUITES['telephony']
+        self.assertEqual((suite['core_env'], suite['env']), ('TELEPHONY_CORE_REPO', {'TELEPHONY_REQUIRE_CORE': '1'}))
 
     def test_chrome_browser_workflow_installs_node_and_the_npm_closure_its_pins_record(self):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']

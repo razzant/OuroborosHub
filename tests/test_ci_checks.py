@@ -110,6 +110,7 @@ class SelectionTests(unittest.TestCase):
             'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'}, 'whisper-voice': {'whisper-voice'},
             'amberkeep': {'amberkeep'},
             'table_tools': {'table-tools'},
+            'telephony': {'telephony'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
@@ -219,7 +220,8 @@ class SelectionTests(unittest.TestCase):
                                  ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('github', 'OUROBOROS_IDENTITY_CORE_ROOT'),
                                  ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                                  ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
-                                 ('telegram-user-session', 'OUROBOROS_THEME_CORE_ROOT')])
+                                 ('telegram-user-session', 'OUROBOROS_THEME_CORE_ROOT'),
+                                 ('telephony', 'TELEPHONY_CORE_REPO')])
         for name, key in pairs:
             with self.subTest(suite=name, key=key), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
                 for value in ('', str(core / 'missing')):

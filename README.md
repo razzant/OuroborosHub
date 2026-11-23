@@ -303,7 +303,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/tel
 ```
 
 Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
-mail, Calendar, Smart Lists, the dashboard widgets, GitHub and the Presence consumers of
+mail, Calendar, Smart Lists, the dashboard widgets, GitHub, the phone line and the Presence consumers of
 Freshdesk, Slack and Telegram) runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA`
 at the top of `.github/workflows/catalog-check.yml`, checked out once per job; the catalog job
 checks every hosted release and connector against the same commit. With one pin every seam
@@ -391,6 +391,16 @@ ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:c
 `python tests/memory_atlas/dev/realhost.py --core /path/to/ouroboros --root /tmp/<new directory>`
 starts the same host to look at and prints `READY <url>`; open `<url>/#widgets` and press Start on
 Memory Atlas.
+
+The `telephony` job runs the phone line's call bridge against the real live-call doors (`LiveCallHub` and
+the peer socket pump) of the one core pinned in `catalog-check.yml`, named for it by `TELEPHONY_CORE_REPO`.
+`TELEPHONY_REQUIRE_CORE=1` turns a missing core, or a missing starlette, uvicorn or websockets, into a
+failure instead of a skip. Locally:
+
+```bash
+python -m pip install pytest starlette uvicorn websockets
+TELEPHONY_CORE_REPO=/path/to/ouroboros TELEPHONY_REQUIRE_CORE=1 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telephony/tests
+```
 
 The hub tests include mocked GitHub APIs for owner authorization, signals and
 catalog-to-mirror sequencing. The release-identity test compares all hosted skills
