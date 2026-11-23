@@ -58,8 +58,10 @@
 - A token could reach the card through error text (an HTTP library prints the `Authorization`
   value of a token with an illegal character); stored error text and every free-text error field
   of `GET status`, records of older versions included, now leave without Slack token shapes, values
-  after `Bearer`/`Authorization` and the configured tokens. This covers what the card shows; the
-  earlier bridge-hardening findings stay as they were.
+  after `Bearer`/`Authorization` and the configured tokens. Error text in the bridge's logs
+  (formatted messages and tracebacks) and delivery/reaction reports is cleaned the same way
+  before it is logged, stored as a report or sent to the Host. The earlier 1.12.x bridge-hardening
+  findings stay as they were.
 - `GET status` answers with string `text` and `tone` on every path, including a queue store that
   can't be read ("Status unknown · the bridge's queue store can't be read").
 - 1.13.0 introduces the companion liveness probe (POSIX signal 0; on Windows `OpenProcess` and

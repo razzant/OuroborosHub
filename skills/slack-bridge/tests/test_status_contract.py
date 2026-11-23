@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -1204,14 +1205,11 @@ def _fragments(token: str) -> set[str]:
     return {run[i:i + 6] for run in runs for i in range(len(run) - 5)}
 
 
-@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
-def test_a_token_in_a_real_http_error_never_reaches_the_store_or_the_status(tmp_path, monkeypatch, illegal) -> None:
-    """The real SlackClient's request fails in httpx on the token's illegal character; the daemon stores the error."""
+@asynccontextmanager
+async def _local_header_client():
+    """Real httpx/h11 against a local listener, shared by the store and log regressions."""
     import httpx
     from lib.slack_api import SlackClient
-
-    token = _synthetic_token(_ILLEGAL[illegal])
-    daemon = _load_daemon()
 
     class _Local(httpx.AsyncHTTPTransport):
         # The real transport, pointed at a local listener: h11 refuses the header before anything is sent.
@@ -1223,19 +1221,32 @@ def test_a_token_in_a_real_http_error_never_reaches_the_store_or_the_status(tmp_
         def __init__(self, bot, app):
             super().__init__(bot, app, http_client=httpx.AsyncClient(transport=_Local(), trust_env=False))
 
+    server = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", 0)
+    _Local.port = server.sockets[0].getsockname()[1]
+    try:
+        yield _RealClient
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
+def test_a_token_in_a_real_http_error_never_reaches_the_store_or_the_status(tmp_path, monkeypatch, illegal) -> None:
+    """The real SlackClient's request fails in httpx on the token's illegal character; the daemon stores the error."""
+    import httpx
+
+    token = _synthetic_token(_ILLEGAL[illegal])
+    daemon = _load_daemon()
+
     async def run() -> None:
-        server = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", 0)
-        _Local.port = server.sockets[0].getsockname()[1]
-        try:
+        async with _local_header_client() as client:
+            monkeypatch.setattr(daemon, "SlackClient", client)
             monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *_a: None)
             await daemon._run()
-        finally:
-            server.close()
 
     monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("SLACK_BOT_TOKEN", token)
     monkeypatch.setenv("SLACK_APP_TOKEN", "xapp" + "-1-A09SYNTH-0000000000-abcdefabcdef")
-    monkeypatch.setattr(daemon, "SlackClient", _RealClient)
     with pytest.raises(httpx.LocalProtocolError) as raised:
         asyncio.run(run())
     assert any(piece in str(raised.value) for piece in _fragments(token))  # the library did print the token
@@ -1250,6 +1261,101 @@ def test_a_token_in_a_real_http_error_never_reaches_the_store_or_the_status(tmp_
         assert leaked == [], (leaked, text)
     assert stored.startswith("Illegal header value b'Bearer [redacted]")
     assert payload["link"]["error"] == stored and payload["attention"][0]["error"] == {"text": stored}
+
+
+@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
+def test_real_http_error_is_clean_in_all_bridge_logs_and_exception_text(monkeypatch, caplog, illegal) -> None:
+    import logging
+    import httpx
+
+    token = _synthetic_token(_ILLEGAL[illegal])
+    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
+    # A non-shaped configured value proves logs use the same configured-secrets source too.
+    app = "fixture-configured-app\rOtherFixtureSecret"
+    monkeypatch.setenv("SLACK_APP_TOKEN", app)
+    caplog.set_level(logging.DEBUG)
+    daemon = _load_daemon()
+
+    async def run():
+        async with _local_header_client() as client:
+            slack = client(token, "xapp" + "-fixture")
+            try:
+                await slack.auth_test()
+            except httpx.LocalProtocolError as exc:
+                assert any(piece in str(exc) for piece in _fragments(token))
+                for name in ("lib.runtime", "lib.socket_mode", "slack_bridge"):
+                    logger = logging.getLogger(name)
+                    logger.warning("Request failed: %s; app=%r", exc, app)
+                    logger.debug("Request traceback", exc_info=True)
+                    logger.exception("Request failed with traceback: %s", exc)
+                logging.getLogger("lib.socket_mode").warning("channel_not_found")
+            finally:
+                await slack._http.aclose()
+
+    monkeypatch.setattr(daemon, "_run", run)
+    # Use the actual daemon entry point: its configured handlers also serve httpcore DEBUG records.
+    filters_before = {h: list(h.filters) for h in logging.getLogger().handlers}
+    try:
+        daemon.main()
+        output = caplog.text
+        assert "LocalProtocolError" in output and "Traceback" in output
+        assert "channel_not_found" in output
+        assert {"lib.runtime", "lib.socket_mode", "slack_bridge"} <= {r.name for r in caplog.records}
+        for secret in (token, app):
+            assert not sorted(piece for piece in _fragments(secret) if piece in output)
+        for record in caplog.records:
+            rendered = logging.Formatter("%(message)s").format(record)
+            assert not any(piece in rendered for piece in _fragments(token) | _fragments(app))
+    finally:
+        for handler, filters in filters_before.items():
+            handler.filters[:] = filters
+
+
+@pytest.mark.parametrize("kind", ("delivery", "reaction"))
+def test_report_error_is_clean_when_stored_and_handed_to_host(tmp_path, monkeypatch, kind) -> None:
+    import dataclasses
+
+    token = _synthetic_token("\n")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
+    app = "fixture-configured-app\rOtherFixtureSecret"
+    monkeypatch.setenv("SLACK_APP_TOKEN", app)
+
+    class Host:
+        explicit_completion = 1
+
+        def __init__(self):
+            self.payloads = []
+
+        async def report_delivery(self, payload):
+            self.payloads.append(payload)
+
+    async def run():
+        host = Host()
+        with closing(BridgeStore(tmp_path)) as store:
+            for index, error in enumerate((f"Illegal header value {f'Bearer {token}'.encode()!r}; {app!r}",
+                                           "channel_not_found")):
+                if kind == "delivery":
+                    store.enqueue_outbox(request_id=f"r{index}", target="C09SYNTH01", thread_ts="",
+                                         chunks=("Synthetic reply",), delivery_reporting_version=1)
+                else:
+                    store.enqueue_mutation(request_id=f"r{index}", operation="reaction_add",
+                                           payload={"channel": "C09SYNTH01", "ts": "1.0", "name": "eyes"},
+                                           delivery_reporting_version=1)
+                item = dataclasses.replace(store.claim_outbox(), provider_account_id="T09SYNTH01")
+                report = (item.delivery_report if kind == "delivery" else item.reaction_report)("failed", error=error)
+                store.fail_outbox(item.row_id, item.lease_token, error, report_payload=report)
+                with sqlite3.connect(tmp_path / "slack_bridge.sqlite3") as conn:
+                    saved = json.loads(conn.execute("SELECT report_payload_json FROM outbox WHERE id=?",
+                                                    (item.row_id,)).fetchone()[0])
+                await OutboundWorker(store, _Slack(), host)._report(store.claim_report())
+                assert saved == host.payloads[-1] == report
+                for payload in (saved, host.payloads[-1]):
+                    for text in (json.dumps(payload), json.dumps(payload, ensure_ascii=False)):
+                        assert not any(piece in text for piece in _fragments(token) | _fragments(app))
+                assert saved["message"]["error"] == ("channel_not_found" if index else
+                                                       "Illegal header value b'Bearer [redacted]'; '[redacted]'")
+
+    asyncio.run(run())
 
 
 def test_records_of_an_older_version_holding_a_token_come_out_clean(tmp_path) -> None:

@@ -240,7 +240,7 @@ class OutboxItem:
         if self.output_ref:
             message["output_ref"] = self.output_ref
         if error:
-            message["error"] = error
+            message["error"] = redact(error)
         return {
             "schema_version": 1, "delivery_id": self.request_id, "part_id": str(self.chunk_index),
             "state": state, "provider": "slack", "account_id": self.provider_account_id,
@@ -262,7 +262,7 @@ class OutboxItem:
                     "target": {"message_id": str(self.payload.get("ts") or ""),
                                "resolution": "resolved" if retained else "unresolved"},
                     **({"effect": effect} if effect else {})}
-        message = {"kind": "operation", "method": method, "reaction": reaction, **({"error": error} if error else {})}
+        message = {"kind": "operation", "method": method, "reaction": reaction, **({"error": redact(error)} if error else {})}
         return {
             "schema_version": 1, "delivery_id": self.request_id, "part_id": "0", "state": state,
             "provider": "slack", "account_id": self.provider_account_id,

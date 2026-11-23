@@ -18,7 +18,7 @@ from lib.local_settings import (  # noqa: E402
     NEW_ROOT_CHANNELS, LocalSettingsError, load_local_settings, normalize_channel_ids,
 )
 from lib.presence import slack_identity  # noqa: E402
-from lib.redaction import error_text  # noqa: E402
+from lib.redaction import error_text, install_log_redaction  # noqa: E402
 from lib.runtime import BridgeRuntime  # noqa: E402
 from lib.slack_api import SlackClient  # noqa: E402
 from lib.store import BridgeStore  # noqa: E402
@@ -150,6 +150,7 @@ def main() -> None:
         level=os.environ.get("SLACK_BRIDGE_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    install_log_redaction()
     asyncio.run(_run())
 
 

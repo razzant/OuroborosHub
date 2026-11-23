@@ -1,4 +1,4 @@
-"""Credentials never reach stored error text or the status route.
+"""Credentials never reach stored error text, status, logs or delivery-report errors.
 
 An exception can carry a request header: an HTTP library that refuses a token with an illegal character prints
 the whole ``Authorization`` value. ``redact`` removes Slack token shapes, any value after ``Bearer`` or
@@ -6,9 +6,11 @@ the whole ``Authorization`` value. ``redact`` removes Slack token shapes, any va
 and each printable run of them, so a token printed with ``\\n`` in place of a newline leaves no fragment). Ordinary
 text (channel names, Slack error codes, words) is unchanged. The store applies it when it writes error text; the
 status route applies it again to every free-text error field, so records written by an older version are clean too.
+The daemon's log handlers clean messages and tracebacks; reports clean errors when their payload is built.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any, Iterable, MutableMapping
@@ -68,6 +70,33 @@ def redact(text: Any, secrets: Iterable[str] = (), *, limit: int | None = None) 
 def error_text(exc: BaseException, secrets: Iterable[str] = (), *, limit: int = 500) -> str:
     """What an exception may say in stored state: its message without credentials, or its class name."""
     return redact(str(exc), secrets, limit=limit) or type(exc).__name__
+
+
+class _RedactLogErrors(logging.Filter):
+    """Clean the formatted record before any handler can write it, including cached traceback text."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact(record.getMessage())
+        record.args = ()
+        if record.exc_info:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+            record.exc_info = None  # A later formatter must not rebuild the raw traceback.
+        if record.exc_text:
+            record.exc_text = redact(record.exc_text)
+        if record.stack_info:
+            record.stack_info = redact(record.stack_info)
+        return True
+
+
+def install_log_redaction() -> None:
+    """Install once after the daemon configures logging, using the same live environment as ``redact``.
+
+    Handler filters cover every bridge logger and HTTP-library child logger (logger filters do not propagate
+    to children). This is scoped to the companion process; importing the module changes no logging settings.
+    """
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(item, _RedactLogErrors) for item in handler.filters):
+            handler.addFilter(_RedactLogErrors())
 
 
 # Free-text error fields of ``GET status`` (top level, and the ``text`` of structured errors).
