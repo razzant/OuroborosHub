@@ -415,6 +415,15 @@ var TransportKit = (function () {
             return line;
         }
 
+        /* Replace only the freshness line; a keyboard reader on Refresh stays on the new one. */
+        function swapFresh(old) {
+            var focused = old.contains(document.activeElement);
+            var line = freshNode();
+            old.replaceWith(line);
+            var button = focused ? line.querySelector('button') : null;
+            if (button) button.focus();
+        }
+
         function paint(force) {
             if (disposed) return;
             if (!state.data) {
@@ -433,7 +442,7 @@ var TransportKit = (function () {
                     var unreadSignature = 'unread:' + state.failedAt + ':' + JSON.stringify(unread);
                     if (!force && unreadSignature === state.signature) {
                         var stale = root.querySelector('.tc-fresh');
-                        if (stale) stale.replaceWith(freshNode());
+                        if (stale) swapFresh(stale);
                         return;
                     }
                     state.signature = unreadSignature;
@@ -449,7 +458,7 @@ var TransportKit = (function () {
                 // Never rebuild under the reader's press; the next paint after they let go catches up.
                 if (state.pointerDown) state.signature = '';
                 var old = state.pointerDown ? null : root.querySelector('.tc-fresh');
-                if (old) old.replaceWith(freshNode());
+                if (old) swapFresh(old);
                 return;
             }
             state.signature = signature;
@@ -466,6 +475,7 @@ var TransportKit = (function () {
             if (disposed) return;
             if (inflight) inflight.abort();
             var controller = typeof AbortController === 'function' ? new AbortController() : null;
+            var started = Date.now();
             inflight = controller;
             state.busy = true;
             paint();
@@ -476,8 +486,17 @@ var TransportKit = (function () {
                 })
                 .then(function (data) {
                     if (disposed || inflight !== controller) return;
+                    // A status answer counts as read only when it is one: an object with the string text and tone
+                    // every transport status carries for Places. Anything else (null, [], {}) is a failed read, so
+                    // the last readable snapshot and the editor stay and the card says the read failed.
+                    if (!data || typeof data !== 'object' || Array.isArray(data)
+                        || typeof data.text !== 'string' || typeof data.tone !== 'string') {
+                        throw new Error('The status answer was not a readable status');
+                    }
                     state.data = data;
                     state.readAt = Date.now();
+                    // When the read that produced this data started: a card can tell data older than its own save.
+                    state.dataStartedAt = started;
                     state.failure = '';
                 })
                 .catch(function (error) {
