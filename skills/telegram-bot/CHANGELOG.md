@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.13.1
+
+- The Telegram Transport card on the Widgets page is rebuilt. Its first line answers whether the link works and
+  whether anything needs attention: "Connected · nothing needs attention", "Starting…", "Connecting…", "Not set up ·
+  the bot token is missing", "Connection error · new messages are not being received" with the time of Telegram's last
+  successful answer and the side the last attempt failed on (token, network or Telegram; a token with a space or
+  another character a token cannot have is named as such, with advice to correct it, since no request leaves this
+  computer), "Error on this computer · new messages are not being processed" when this computer failed (recording
+  Telegram's answer, or the bot getMe confirmed), or "Stopped · the bot is not running". The link is judged for the
+  token set now: it is green only after a completed successful request for that token, a refusal counts for the token
+  that request actually used, and "Connecting…" means no request has completed for it yet (a new token reads so even
+  while the runtime still waits out an earlier token's refusal). When several things need attention the first line
+  names the worst and counts the rest, for example "Connection error · new messages are not being received · 2 more
+  need attention". The Places line for this connector uses the same words and colour.
+- Below it, only what needs the owner now, each item saying what it means and what to do: sends that failed or
+  whose outcome is unknown, Telegram updates not passed to Ouroboros or still being retried (saying whether passing
+  them to Ouroboros or downloading an attachment from Telegram failed, or, when neither was recorded, that it is not
+  confirmed here whether they were handled), messages waiting for a place binding, held
+  messages with their hold reason, chats Places cannot offer, and reactions that need an Ouroboros update. A hold only
+  the owner can end (the skill's access was refused, or the place is not connected) leads the reasons and turns the
+  card amber. Failed sends, unknown outcomes and updates Ouroboros refused are listed while they ended within the
+  last day; older ones stay in the totals with the date of the last one. Holds, retried updates and the link are
+  listed while they last. A held send says what the worker does with it in the link's state, never that it will
+  go: it is retried while it waits; without a token, or while Telegram cannot be reached, each retry uses one of its
+  5 attempts and after the last it is not sent; nothing is retried while the bot is stopped; its receipt
+  (`telegram_receipt`) shows what became of it. The latest error opens inside its item (for waiting updates, the
+  latest failed attempt's, or an example when, after a rollback, which failure is the latest was not recorded; a
+  note 0.13.0 left on a row that recorded no stage is shown as that note, never as the last error).
+  When Telegram confirmed part of a send the card says so; when it confirmed nothing, that delivery could not be
+  established. Either way it advises checking the chat and the receipt's `confirmed_messages` before asking
+  Ouroboros to send only what is missing; this is advice, nothing is sent again by itself.
+- Quiet totals follow: the bot, the last update and delivery, incoming and outgoing counts since install, and the
+  current queue (waiting, sending, held). Counts not listed are zero.
+- The management group ID and the details are folded. The field and its hint are kept; the button now reads "Save"
+  (was "Save transport settings") and the placeholder "e.g. -1001234567890" (was "Optional numeric Telegram group
+  ID"). The card checks the value by the server's rule and says "Saved." or "Not saved:" with the reason, naming the
+  value sent when the field was changed while it was saving; a saved value stays shown until a newer status read
+  confirms it. Details keep every earlier fact: the bot-account explanation word for word, the exact queue counts, the
+  Telegram offset, the last error with when and in which loop, and what Ouroboros reported, now worded as the check it
+  was, with its time (an unanswered check says so on every row that depends on it; a check that made no request,
+  because this skill's Ouroboros access token is unavailable, says that instead). Details › State words the same link
+  judgement as the first line, and a bot named while the current token's bot is not confirmed (or the bot is stopped)
+  is marked as the last confirmed one. While the custody counts are unknown no row reads as zero or as a total.
+- The card says when the status was read and refreshes every 10 seconds while the page is visible, with no limit on
+  refreshes; Refresh works at any moment and keeps keyboard focus. The previous card stopped silently after 100
+  refreshes. A failed read keeps the last data, says so and offers "Try again". The status and attention repaint
+  while the group ID field is being edited, keeping its text, selection and open folds. When the status cannot be
+  read at all, the group ID field (with its saved value, read once from `settings/save`) and the bot explanation stay
+  available.
+- `GET status` gains fields and changes none: `observed_at`, `last_error_at`, `last_error_source`, `provider_ok_at`,
+  `poll_result`, `poll_at`, `poll_error`, `poll_failure`, `poll_stage`, `host_checked`, `host_checked_at`,
+  `host_unasked`, `places_version`, `bot_unconfirmed`, `link`, `recent_problems` (null when the custody store was not
+  read), `handoff_retrying`, `held_reasons` (with `kind` for a hold only the owner can end) and `attention`. Its
+  `text` and `tone` now follow the card's first line. The bot, its poll result and the chats offered come from one
+  read of the runtime, the last error's text, time and loop from one record, and Ouroboros's capabilities from one
+  completed check: a caller that arrives while a check runs waits for it and gets its whole answer (no second
+  request), a supported or unsupported answer is kept until restart as before, and a check without an answer, or one
+  that could not be asked (`host_unasked`), publishes a fresh record that carries nothing from an earlier one.
+  Telegram's refusal of a token stays the link's outcome even when forgetting that token's bot fails on this computer.
+- Error texts never carry the bot token. A description Telegram's side returns that repeats the request path has
+  the token, as written or URL-quoted, replaced by `<token>`. A token with a space, a tab or another character a
+  request line cannot hold is refused before any connection: its error is the type name only (`InvalidURL`, or
+  `UnicodeEncodeError` for a non-ASCII character), it chains no exception quoting the URL (which every printed
+  traceback would show), and `poll_failure` is `token_format`.
+- The custody store gains read-only `card_snapshot()` and `read_status()` (the totals and the card's facts in one
+  SQLite read transaction, with one shared pass over failed sends; a stored answer of any shape reads as confirming
+  or not, never as an error), and additive changes, made when it opens: `inbox.last_stage` (where a waiting update's
+  last attempt stopped) with `last_stage_at` and `last_stage_due`, `outbox.hold_kind` (the Host answer a hold came
+  from) with `hold_kind_due`, and the index `outbox_failed_idx`. A mark counts only while its row keeps the
+  `available_at` written with it, so rows written before, or by 0.13.0 after a rollback, read as "not recorded"
+  (plain waiting, an ordinary hold), never by a stale mark.
+- File uploads and sending are unchanged from 0.13.0, apart from keeping the token out of error text. Rolling back to
+  0.13.0 restores the previous card; it reads none of the new fields and ignores the new columns.
+
 ## 0.13.0
 
 - A file or album send streams its multipart body from disk instead of reading it whole into memory. Framing and

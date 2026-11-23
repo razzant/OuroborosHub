@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import pathlib
 import re
 import sqlite3
@@ -14,7 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Seq
 
 from . import outbox_files
 from .api import (MEDIA_METHODS, TelegramClient, TelegramApiError, TelegramFileTooLarge, TelegramFileUnavailable,
-                  TelegramRequestNotSent, _split_text)
+                  TelegramRequestNotSent, TelegramTokenMalformed, _split_text)
 from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
                        is_reaction_report, names_message, reaction_receipt, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
@@ -66,6 +67,11 @@ class PlaceHeld(RuntimeError):
     """Unsent custody waits for the current place policy, without a provider failure."""
 
 
+def _hold_kind(exc: PlaceHeld) -> str:
+    """The Host answer's type a hold came from (host.HoldNote.kind), "" for an ordinary pause."""
+    return str(getattr(exc.args[0], "kind", "") or "") if exc.args else ""
+
+
 class AlbumIncomplete(TelegramApiError):
     """Telegram accepted an album (ok) but its answer does not name one message per item: never sent again."""
 
@@ -99,7 +105,76 @@ class PresenceSubmitter(Protocol):
     async def poll(self, work_ref: str, binding_id: str) -> PresenceWorkResult: ...
 
 
+# Why confirmed_bot() offers no bot; the status summary reads the same fixed words (status_summary.py).
+BOT_NOT_RUNNING = "Telegram bot not running"
+BOT_TOKEN_MISSING = "Bot token missing"
+BOT_UNCONFIRMED = "Bot identity is unconfirmed; check the transport status"
+
+
+# Where a poll attempt stopped (``poll_stage``): confirming the bot (getMe, and recording the bot it names), asking
+# Telegram for new updates, or recording Telegram's answer on this computer.
+POLL_STAGES = ("identity", "updates", "record")
+
+
+def _poll_failure(exc: Exception, stage: str) -> str:
+    """Which side a failed poll attempt stopped on: ``token``, ``token_format``, ``network``, ``telegram``, ``local``
+    or ``""``.
+
+    ``local``: this computer failed, so neither the token nor the network is the cause: anything after Telegram's
+    answer was received (``stage`` "record"), or the custody store (SQLite) at any stage, such as recording the bot
+    getMe confirmed. ``token_format``: the configured token cannot be written in a request (a space, a tab or another
+    character a token cannot have), so no request left this computer. TelegramClient wraps every failure of its own
+    requests in TelegramApiError; any other error leaves the side unknown.
+    """
+    if stage == "record" or isinstance(exc, sqlite3.Error):
+        return "local"
+    if isinstance(exc, TelegramTokenMalformed):
+        return "token_format"
+    if isinstance(exc, TelegramApiError):
+        if exc.error_code in _TOKEN_REFUSED:
+            return "token"
+        return "telegram" if exc.error_code else "network"
+    return ""
+
+
+# Which loop recorded the newest error, by the name this runtime gives its asyncio tasks (see run()).
+_ERROR_SOURCES = (
+    ("telegram-presence-outbox", "outbound"),
+    ("telegram-presence-typing", "outbound"),
+    ("telegram-presence-inbox-", "inbound"),
+    ("telegram-presence-work", "inbound"),
+)
+
+
+def _error_source() -> str:
+    """``outbound``, ``inbound`` or ``polling`` (the getUpdates loop runs in run() itself); ``""`` off the loop."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return ""
+    if task is None:
+        return ""
+    name = task.get_name()
+    for prefix, source in _ERROR_SOURCES:
+        if name.startswith(prefix):
+            return source
+    return "polling"
+
+
 class TelegramTransportRuntime:
+    # Every assignment of ``self._last_error`` also records when and from which loop, without touching its writers:
+    # one immutable (text, time, loop) record, built first and then swapped in whole. The status route reads it from
+    # another thread; it reads the record once, so it never pairs one loop's text with another loop's source or time.
+    _last_error_record: Tuple[str, float, str] = ("", 0.0, "")
+
+    @property
+    def _last_error(self) -> str:
+        return self._last_error_record[0]
+
+    @_last_error.setter
+    def _last_error(self, value: str) -> None:
+        self._last_error_record = (value, time.time(), _error_source()) if value else ("", 0.0, "")
+
     def __init__(
         self,
         *,
@@ -132,6 +207,12 @@ class TelegramTransportRuntime:
         self._unrecorded_reactions: Dict[str, Dict[str, Any]] = {}
         # When getUpdates last answered: evidence that a download failing meanwhile is that file's own trouble.
         self._provider_ok_at = 0.0
+        # The last COMPLETED poll attempt and the token it ran with: "ok" only once its answer was recorded. The card
+        # is green only after such an answer for the token configured now; an attempt still waiting proves nothing.
+        self._poll_attempt: Dict[str, Any] = {}
+        # Guards the link facts the status reads together (bot identity, its token, runtime state, poll attempt):
+        # the status route reads them off the event loop thread, so one answer never mixes two bots.
+        self._facts_lock = threading.Lock()
         # Per conversation (chat_id, topic_id): the last "typing…" sent, and the last message this process delivered.
         self._typing_sent_at: Dict[Tuple[str, str], float] = {}
         self._delivered_at: Dict[Tuple[str, str], float] = {}
@@ -189,14 +270,9 @@ class TelegramTransportRuntime:
         Local and without network. A token changed while getUpdates is held is
         another bot until getMe answers for it, so the earlier identity is not reused.
         """
-        if self._run_task is None:
-            return "", "Telegram bot not running"
         token = str(self.token_provider() or "").strip()
-        if not token:
-            return "", "Bot token missing"
-        if token != self._client_token or not _BOT_ID.fullmatch(self._bot_id):
-            return "", "Bot identity is unconfirmed; check the transport status"
-        return self._bot_id, ""
+        with self._facts_lock:
+            return _confirmed(self._run_task is not None, token, self._client_token, self._bot_id)
 
     def recorded_bot(self) -> str:
         """The bot getMe last confirmed for the token configured now, whichever process's runtime asked.
@@ -207,33 +283,67 @@ class TelegramTransportRuntime:
         return self.store.confirmed_account(str(self.token_provider() or "").strip())
 
     def status_snapshot(self, custody: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """The runtime's status facts. The token is read once; the bot, its state, the poll attempt and the
+        confirmed account (``confirmed_account``/``confirmed_reason``, as confirmed_bot() answers) come from one
+        consistent read of the runtime, so the route never pairs one bot's name or result with another's chats."""
         custody = self.store.status_snapshot() if custody is None else custody
+        try:
+            token = str(self.token_provider() or "").strip()
+        except Exception:
+            token = ""
+        with self._facts_lock:
+            state, label, attempt = self._runtime_state, self._bot_label, self._poll_attempt
+            account, reason = _confirmed(self._run_task is not None, token, self._client_token, self._bot_id)
+            identity = getattr(self.submitter, "connector_identity", {})
+        error_text, error_at, error_source = self._last_error_record  # one record, read once
+        host = _host_record(self.submitter)  # one completed /identity check, read once
         return {
-            "runtime_state": self._runtime_state,
-            "bot_label": self._bot_label,
-            **({"identity": self.submitter.connector_identity}
-               if getattr(self.submitter, "presence_identity", 0) == 1
-               and getattr(self.submitter, "connector_identity", {}) else {}),
-            "last_error": self._last_error,
-            "delivery_reporting": getattr(self.submitter, "delivery_reporting_status", "unsupported"),
+            "runtime_state": state,
+            "bot_label": label,
+            "confirmed_account": account,
+            "confirmed_reason": reason,
+            **({"identity": identity} if host["identity"] == 1 and identity else {}),
+            "last_error": error_text,
+            "delivery_reporting": host["status"] or "unsupported",
             # 2: early custody answers; 0: each turn waits for its terminal (older Host).
-            "presence_continuation_version": getattr(self.submitter, "continuation_version", 0),
-            "reaction_context": ("available" if getattr(self.submitter, "presence_reaction_context", 0) == 1
-                                 else "update_required"),
-            "reaction_history": ("available" if getattr(self.submitter, "presence_explicit_completion", 0) == 1
-                                 else "update_required"),
+            "presence_continuation_version": host["continuation_version"],
+            "reaction_context": "available" if host["reaction_context"] == 1 else "update_required",
+            "reaction_history": "available" if host["explicit_completion"] == 1 else "update_required",
             "last_event_at": custody.get("last_event_at", ""),
             "last_delivery_at": custody.get("last_delivery_at", ""),
+            # Additive card facts: when the newest error was recorded and by which loop, the last getUpdates answer,
+            # and whether Ouroboros answered /identity yet (until then capabilities are unknown, not missing).
+            "last_error_at": _iso(error_at),
+            "last_error_source": error_source,
+            "provider_ok_at": _iso(self._provider_ok_at),
+            "host_checked": host["status"] in {"supported", "unsupported"},
+            # When that check last ended, answered or not ("" before any): its facts are a past check, not live.
+            "host_checked_at": _iso(host["checked_at"] or 0.0),
+            # Why that check made no request ("" when it made one): Ouroboros was not asked, not silent.
+            "host_unasked": host["unasked"],
+            "places_version": host["places_version"],
+            **_poll_facts(attempt, token),
         }
+
+    def _poll_done(self, token: str, result: str, error: str = "", failure: str = "", stage: str = "") -> None:
+        with self._facts_lock:
+            if result == "failed":
+                self._runtime_state = "provider_error"
+            self._poll_attempt = {"token": token, "result": result, "at": time.time(), "error": error,
+                                  "failure": failure, "stage": stage if result == "failed" else ""}
 
     async def _poll_loop(self) -> None:
         backoff = 2.0
         while not self._stopping:
+            # The token this attempt runs with is the one _ready_client picks under the client lock (``picked``);
+            # its result counts only while that token stays configured. ``stage`` says where a failure stopped.
+            token, picked, stage = str(self.token_provider() or "").strip(), {}, "identity"
             try:
-                client = await self._ready_client()
+                client = await self._ready_client(picked)
                 if client is None:
                     await self._pause(5.0)
                     continue
+                token, stage = picked.get("token", self._client_token), "updates"
                 # The bot this client answers for, even if another worker confirms a new token meanwhile.
                 account, username = self._bot_id, self._bot_username
                 self._runtime_state = "polling"
@@ -244,6 +354,7 @@ class TelegramTransportRuntime:
                     offset=self.store.telegram_offset(), timeout_sec=25
                 )
                 self._provider_ok_at = time.time()
+                stage = "record"
                 for update in updates:
                     update_id = _update_id(update)
                     if update_id is None:
@@ -260,28 +371,39 @@ class TelegramTransportRuntime:
                     )
                     # A membership or service update notes its group and moves the offset only.
                     self.store.commit_update(update_id, event, group_sightings(update, account))
+                self._poll_done(token, "ok")
                 backoff = 2.0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._runtime_state = "provider_error"
+                token = picked.get("token", token)  # a refusal of the token picked under the lock is that token's
                 self._last_error = _error(exc)
+                # The state and this attempt's result change together (one read of them never splits).
+                self._poll_done(token, "failed", self._last_error, _poll_failure(exc, stage), stage)
                 self._log(
                     "warning", f"telegram-bot: provider poll failed: {self._last_error}"
                 )
                 await self._pause(backoff)
                 backoff = min(60.0, backoff * 1.7)
 
-    async def _ready_client(self) -> Optional[TelegramClient]:
+    async def _ready_client(self, picked: Optional[Dict[str, Any]] = None) -> Optional[TelegramClient]:
+        """The client for the token configured now, confirming it with getMe once per token.
+
+        ``picked`` (the poll loop's) receives the token read here, under the lock, before any request: a result or a
+        refusal of this call belongs to that token, whatever the caller read before it waited for the lock.
+        """
         if self._client_lock is None:
             self._client_lock = asyncio.Lock()
         async with self._client_lock:
             token = str(self.token_provider() or "").strip()
+            if picked is not None and token:
+                picked["token"] = token
             if not token:
-                self._runtime_state = "waiting_for_token"
-                self._bot_label = "not configured"
-                self._client = None
-                self._client_token = ""
+                with self._facts_lock:
+                    self._runtime_state = "waiting_for_token"
+                    self._bot_label = "not configured"
+                    self._client = None
+                    self._client_token = ""
                 return None
             if self._client is not None and token == self._client_token:
                 return self._client
@@ -291,7 +413,13 @@ class TelegramTransportRuntime:
                 identity = await client.get_me()
             except TelegramApiError as exc:
                 if exc.error_code in _TOKEN_REFUSED:
-                    self.store.forget_confirmed_bot(token)
+                    # Telegram's refusal is this attempt's outcome. Failing to forget the bot recorded for the token
+                    # here (a locked store) is recorded apart and never replaces what Telegram said.
+                    try:
+                        self.store.forget_confirmed_bot(token)
+                    except sqlite3.Error as cleanup:
+                        self._log("warning", "telegram-bot: could not forget the bot recorded for a refused token: "
+                                  f"{_error(cleanup)}")
                 raise
             bot_id = str(identity.get("id") or "unknown")
             # Before anything in memory changes: if the store refuses, the next call asks getMe again.
@@ -299,14 +427,15 @@ class TelegramTransportRuntime:
                 self.store.record_confirmed_bot(token, bot_id)
             else:
                 self.store.forget_confirmed_bot(token)
-            self._bot_id = bot_id
             username = str(identity.get("username") or "").strip()
-            self._bot_username = username
-            self._bot_label = f"@{username}" if username else self._bot_id
-            self.submitter.connector_identity = {"sends_as": {
-                "id": self._bot_id, "label": self._bot_label, "kind": "bot"}}
-            self._client = client
-            self._client_token = token
+            with self._facts_lock:  # the new bot's id, name and token become visible together
+                self._bot_id = bot_id
+                self._bot_username = username
+                self._bot_label = f"@{username}" if username else self._bot_id
+                self.submitter.connector_identity = {"sends_as": {
+                    "id": self._bot_id, "label": self._bot_label, "kind": "bot"}}
+                self._client = client
+                self._client_token = token
             self._last_error = ""
             return client
 
@@ -329,8 +458,12 @@ class TelegramTransportRuntime:
                 self.store.mark_inbox_failed(lease.event_id, reason=REACTION_WITHHELD)
                 return True
         staged: List[pathlib.Path] = []
+        # Where this attempt stops if it fails, recorded with the row (CustodyStore.release_inbox): the status says
+        # what the update waits for, never a failed handoff when Telegram's download failed.
+        stage = "download"
         try:
             staged = await self._stage_attachments(lease)
+            stage = "submit"
             try:
                 result = await self.submitter.submit(lease.payload, staged)
             except PresenceHostHTTPError as refusal:
@@ -344,6 +477,7 @@ class TelegramTransportRuntime:
                 if not self._settle_refusal(lease, refusal):
                     raise
             else:
+                stage = ""  # Ouroboros answered; a failure from here on is this computer's
                 self.store.record_submission(
                     lease.event_id,
                     binding_id=result.binding_id,
@@ -372,6 +506,7 @@ class TelegramTransportRuntime:
                 lease.event_id,
                 reason=_error(exc),
                 retry_after_sec=max(_retry_delay(lease.attempts), wait),
+                stage=stage,
             )
             self._last_error = _error(exc)
             return True
@@ -634,7 +769,7 @@ class TelegramTransportRuntime:
             self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence)
             return True
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence)
+            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence, kind=_hold_kind(exc))
             return True
         except asyncio.CancelledError:
             # A send call already stored as started keeps its marker, so the next claim ends the row uncertain. An
@@ -871,7 +1006,7 @@ class TelegramTransportRuntime:
                 raise TelegramApiError(REACTION_METHOD, "Telegram did not confirm the reaction")
             known["_operation_result"] = result
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc))
+            self.store.hold_outbox(lease.delivery_id, str(exc), kind=_hold_kind(exc))
         except asyncio.CancelledError:
             self.store.release_outbox(lease.delivery_id, reason="worker_cancelled", retry_after_sec=0)
             raise
@@ -1371,6 +1506,50 @@ def _safe_filename(value: str) -> str:
 
 def _retry_delay(attempts: int) -> float:
     return min(300.0, 2.0 ** min(max(1, attempts), 8))
+
+
+def _host_record(submitter: Any) -> Dict[str, Any]:
+    """The Host's capabilities as one completed /identity check published them (PresenceHostClient.capabilities, read
+    once); a submitter without that record (a test's) is read field by field, as before."""
+    record = getattr(submitter, "capabilities", None)
+    if record is not None and dataclasses.is_dataclass(record):
+        return dataclasses.asdict(record)
+    return {"status": getattr(submitter, "delivery_reporting_status", ""),  # "": never answered (not checked)
+            "continuation_version": getattr(submitter, "continuation_version", 0),
+            "reaction_context": getattr(submitter, "presence_reaction_context", 0),
+            "explicit_completion": getattr(submitter, "presence_explicit_completion", 0),
+            "identity": getattr(submitter, "presence_identity", 0),
+            "places_version": getattr(submitter, "places_version", 0),
+            "checked_at": getattr(submitter, "identity_checked_at", 0.0),
+            "unasked": ""}
+
+
+def _confirmed(running: bool, token: str, client_token: str, bot_id: str) -> Tuple[str, str]:
+    """confirmed_bot()'s answer from one read of the runtime's facts and one read of the token."""
+    if not running:
+        return "", BOT_NOT_RUNNING
+    if not token:
+        return "", BOT_TOKEN_MISSING
+    if token != client_token or not _BOT_ID.fullmatch(bot_id):
+        return "", BOT_UNCONFIRMED
+    return bot_id, ""
+
+
+def _poll_facts(attempt: Dict[str, Any], token: str) -> Dict[str, Any]:
+    """The last completed poll attempt, only when it ran with the token configured now (local, no network).
+
+    ``poll_result`` is ``ok``, ``failed`` or ``""`` (none completed for this token yet); a failure keeps its own
+    error and side (``_poll_failure``), never another loop's newest error.
+    """
+    if not attempt or not token or attempt.get("token") != token:
+        return {"poll_result": "", "poll_at": "", "poll_error": "", "poll_failure": "", "poll_stage": ""}
+    return {"poll_result": attempt["result"], "poll_at": _iso(attempt["at"]),
+            "poll_error": attempt.get("error", ""), "poll_failure": attempt.get("failure", ""),
+            "poll_stage": attempt.get("stage", "")}
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(epoch))) if epoch else ""
 
 
 def _error(exc: Exception) -> str:
