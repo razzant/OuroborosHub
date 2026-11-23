@@ -530,10 +530,11 @@ class Normalized:
     accounts_known: bool
     quota_known: bool
     readings: List[Reading]
-    cooling_all: Set[Tuple[str, str]]
-    cooling_scoped: Dict[Tuple[str, str], Set[str]]
-    # Model scopes a live reported exhaustion holds, per account.
-    exhausted_scoped: Dict[Tuple[str, str], Set[str]]
+    # Active cooldowns of each account by exact hold scope ("-" is the whole
+    # account); the earliest known end of its evidence, or None if unknown.
+    cooldown_ends: Dict[Tuple[str, str], Dict[str, Optional[float]]]
+    # Live reported model exhaustions, per account and hold scope, with their earliest reported reset.
+    exhaustion_ends: Dict[Tuple[str, str], Dict[str, float]]
     unattributed: Counter
     superseded: Counter
     malformed: int
@@ -542,8 +543,8 @@ class Normalized:
     # cached quota facet are never fresh; a cached account list keeps the
     # roster, never the accounts' current state.
     cached: Dict[str, float] = field(default_factory=dict)
-    # account -> keys of shared limits its current reading reports spent.
-    spent: Dict[Tuple[str, str], Set[str]] = field(default_factory=dict)
+    # account -> resolved shared limits that are spent, including groups not shown.
+    spent: Dict[Tuple[str, str], Dict[str, Reading]] = field(default_factory=dict)
 
     @property
     def accounts_cached(self) -> bool:
@@ -1068,9 +1069,8 @@ def normalize(payload: Any, now: float,
     malformed = attributed.malformed
     projection = attributed.freshness
     readings: List[Reading] = []
-    cooling_all: Set[Tuple[str, str]] = set()
-    cooling_scoped: Dict[Tuple[str, str], Set[str]] = {}
-    exhausted_scoped: Dict[Tuple[str, str], Set[str]] = {}
+    cooldown_ends: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
+    exhaustion_ends: Dict[Tuple[str, str], Dict[str, float]] = {}
 
     for hid, sid, row in attributed.rows:
         if hid not in harness_order:
@@ -1082,17 +1082,17 @@ def normalize(payload: Any, now: float,
         account = accounts.get((hid, sid))
         plan_key = plan_evidence(plan, account.plan if account is not None else None)
         for cooldown in cooldowns_of(row, hid, sid, now, projection):
-            # Every window only for a cooldown governing both request kinds
-            # (hold_key "-"); any other holds the windows of exactly its scope.
-            if cooldown.scope == "-":
-                cooling_all.add((hid, sid))
-            else:
-                cooling_scoped.setdefault((hid, sid), set()).add(cooldown.scope)
+            ends = cooldown_ends.setdefault((hid, sid), {})
+            previous = ends.setdefault(cooldown.scope, cooldown.until)
+            if cooldown.until is not None and (previous is None or cooldown.until < previous):
+                ends[cooldown.scope] = cooldown.until
         for exhaustion in exhaustions_of(row, hid, sid, now):
             # A model's limit, never the account: one that names no model
             # cannot hold any window.
-            if exhaustion.live and exhaustion.scope != "-":
-                exhausted_scoped.setdefault((hid, sid), set()).add(exhaustion.scope)
+            if exhaustion.live and exhaustion.scope != "-" and exhaustion.resets_at is not None:
+                ends = exhaustion_ends.setdefault((hid, sid), {})
+                at = exhaustion.resets_at
+                ends[exhaustion.scope] = min(ends.get(exhaustion.scope, at), at)
         constraints = row.get("constraints")
         for constraint in (constraints if isinstance(constraints, list) else [])[:MAX_CONSTRAINTS]:
             if not isinstance(constraint, dict):
@@ -1107,8 +1107,8 @@ def normalize(payload: Any, now: float,
     return Normalized(
         reads=reads, unified=attributed.unified, harness_order=harness_order,
         families=families, accounts=accounts, accounts_known=attributed.accounts_known,
-        quota_known=attributed.quota_known, readings=readings, cooling_all=cooling_all,
-        cooling_scoped=cooling_scoped, exhausted_scoped=exhausted_scoped,
+        quota_known=attributed.quota_known, readings=readings, cooldown_ends=cooldown_ends,
+        exhaustion_ends=exhaustion_ends,
         unattributed=attributed.unattributed,
         superseded=attributed.superseded, malformed=malformed,
         cached={k: float(v) for k, v in (cached or {}).items() if k in FACETS},
@@ -1161,6 +1161,26 @@ class Member:
     pseudo: str = ""
     # The newest usable reading that is not current (see LastKnown), or None.
     last_known: Optional["LastKnown"] = None
+    # Earliest reported end of evidence behind this member's time-limited flags.
+    restriction_boundary: Optional[float] = None
+    # Earliest known end of a competing current source; not a reset prediction.
+    conflict_boundary: Optional[float] = None
+
+    def prepare_snapshot(self, now: float) -> Optional[float]:
+        """Apply the file's exclusive validity bound to this publication-only member."""
+        if self.status == "measured":
+            return self.restriction_boundary
+        if self.status == "conflicting":
+            return self.conflict_boundary
+        last = self.last_known
+        if last is None or not last.carried or last.carry_until is None:
+            return None
+        if last.carry_until <= now:
+            # The live tool includes the exact age boundary without a reported
+            # reset. The file cannot carry it into a new positive validity span.
+            self.last_known = replace(last, carried=False, why="too_old")
+            return None
+        return last.carry_until
 
 
 @dataclass
@@ -1182,21 +1202,26 @@ class LastKnown:
     origin: str
     carried: bool
     why: str = ""
+    # Publication bound, not necessarily a reset the provider reported.
+    carry_until: Optional[float] = None
 
 
 def carry_verdict(observed_at: float, resets_at: Optional[float], window: Optional[int],
-                  now: float) -> Tuple[bool, str]:
+                  now: float) -> Tuple[bool, str, float]:
     """Whether a last-known reading may still be carried at ``now`` — drawn
     dated, and counted only in the labelled last-known part of the widget's
     figure, never in ``measured`` — and why not. It is dated
     evidence of a cycle still running, not a bound on what is left now: use
     may have grown since, and a restore or an unreported reset may have
     lowered it. One whose reported reset has passed describes a cycle that
-    has ended."""
+    has ended. Return the same boundary for the strictly expiring host snapshot.
+    The live answer still carries a no-reset reading at exactly its age limit."""
     if resets_at is not None:
-        return (True, "") if resets_at > now else (False, "reset_passed")
+        carried = resets_at > now
+        return carried, "" if carried else "reset_passed", resets_at
     limit = float(window) if window else LAST_KNOWN_NO_WINDOW_SEC
-    return (True, "") if now - observed_at <= limit else (False, "too_old")
+    carried = now - observed_at <= limit
+    return carried, "" if carried else "too_old", observed_at + limit
 
 
 def last_known_of(readings: Sequence[Reading], now: float, origin: str
@@ -1216,9 +1241,9 @@ def last_known_of(readings: Sequence[Reading], now: float, origin: str
     chosen, reason = _resolve_sources([(r.ratio, r.resets_at, r.observed_at, r.source, r) for r in pool])
     if reason or chosen is None:
         return None, reason or "missing"
-    carried, why = carry_verdict(chosen.observed_at, chosen.resets_at, chosen.window, now)
+    carried, why, until = carry_verdict(chosen.observed_at, chosen.resets_at, chosen.window, now)
     return LastKnown(ratio=chosen.ratio, observed_at=chosen.observed_at, resets_at=chosen.resets_at,
-                     source=chosen.source, origin=origin, carried=carried, why=why), ""
+                     source=chosen.source, origin=origin, carried=carried, why=why, carry_until=until), ""
 
 
 def last_known_from_runs(runs: Sequence[Run], window: Optional[int], now: float) -> Optional[LastKnown]:
@@ -1238,9 +1263,9 @@ def last_known_from_runs(runs: Sequence[Run], window: Optional[int], now: float)
                                        for run in pool])
     if reason or chosen is None:
         return None
-    carried, why = carry_verdict(chosen.last_obs, chosen.resets_at, window, now)
+    carried, why, until = carry_verdict(chosen.last_obs, chosen.resets_at, window, now)
     return LastKnown(ratio=chosen.ratio, observed_at=chosen.last_obs, resets_at=chosen.resets_at,
-                     source=chosen.source, origin="history", carried=carried, why=why)
+                     source=chosen.source, origin="history", carried=carried, why=why, carry_until=until)
 
 
 @dataclass
@@ -1350,6 +1375,9 @@ def resolve_member(readings: List[Reading], now: float) -> Member:
     if reason:
         base.status = "conflicting"
         base.reason = reason
+        # A known end can remove a conflicting source, even though there is
+        # no measured reading to contribute to next_reset for this member.
+        base.conflict_boundary = min((r.resets_at for r in current if r.resets_at is not None), default=None)
         return base
     base.reading = chosen
     base.status = "measured"
@@ -1390,13 +1418,14 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
     # other limits, whether or not its reset was reported: a missing reset is
     # unknown timing, not the absence of a restriction. A reading of an ended
     # cycle (reset passed), a stale or an unreadable one blocks nothing.
-    spent: Dict[Tuple[str, str], Set[str]] = {}
+    spent: Dict[Tuple[str, str], Dict[str, Reading]] = {}
     for key, members in resolved.items():
         for member in members:
-            if member.status == "measured" and not _scoped(member.reading) \
-                    and member.remaining <= RATIO_EPS and (member.reading.desc is None or any(
-                        quota_scope.account_wide(member.reading.desc, kind) for kind in quota_scope.REQUEST_KINDS)):
-                spent.setdefault((member.harness, member.subject_id), set()).add(key)
+            reading = member.reading
+            if member.status == "measured" and reading is not None and not _scoped(reading) \
+                    and member.remaining <= RATIO_EPS and (reading.desc is None or any(
+                        quota_scope.account_wide(reading.desc, kind) for kind in quota_scope.REQUEST_KINDS)):
+                spent.setdefault((member.harness, member.subject_id), {})[key] = reading
     norm.spent = spent
     groups: List[GroupCalc] = []
     for key, subjects in by_key.items():
@@ -1413,7 +1442,7 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
         # account view and the widget.
         hold = quota_scope.hold_key(sample.desc) if sample.desc is not None else sample.scope
         for member in members:
-            _decorate(norm, member, key, hold, spent, sample.desc)
+            _decorate(norm, member, key, hold, sample.desc)
         family_accounts = [a for (h, _s), a in norm.accounts.items() if h == sample.harness]
         present = {m.subject_id for m in members}
         other = sum(1 for a in family_accounts if a.subject_id not in present)
@@ -1432,10 +1461,10 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
 
 
 def _decorate(norm: Normalized, member: Member, key: str, scope: str,
-              spent: Dict[Tuple[str, str], Set[str]], desc: Optional[quota_scope.Scope] = None) -> None:
+              desc: Optional[quota_scope.Scope] = None) -> None:
     """``scope`` is the window's quota_scope.hold_key: a cooldown or a live
     model exhaustion restricts it only by that exact identity, and a
-    whole-account cooldown (``cooling_all``) restricts every window."""
+    whole-account cooldown (scope ``-``) restricts every window."""
     subject = (member.harness, member.subject_id)
     account = norm.accounts.get(subject)
     reading = member.reading
@@ -1456,15 +1485,19 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
             flags.append("signed_out")
         if account.auth_failed:
             flags.append("auth_failed")
-    if subject in norm.cooling_all or (scope != "-" and scope in norm.cooling_scoped.get(subject, set())):
+    ends = norm.cooldown_ends.get(subject, {})
+    if "-" in ends or scope in ends:
         flags.append("cooling")
     # The engine reports exactly this model scope out until a reset still
     # ahead while the share counted here is not at the limit (another source,
     # a newer reading): the share is held back. A share already at the limit
     # says it itself, and is not counted a second time as a restriction.
-    if scope != "-" and scope in norm.exhausted_scoped.get(subject, set()) \
-            and (member.status != "measured" or member.remaining > RATIO_EPS):
-        flags.append("model_exhausted")
+    scoped_end = None
+    if scope != "-" and (member.status != "measured" or member.remaining > RATIO_EPS):
+        scoped_end = norm.exhaustion_ends.get(subject, {}).get(scope)
+        if scoped_end is not None:
+            flags.append("model_exhausted")
+    boundaries = [ends.get("-"), ends.get(scope), scoped_end]
     # A spent shared limit holds another window only when it covers every
     # request kind that window governs. Unknown scope proves no such coverage.
     target_kinds = (set(quota_scope.REQUEST_KINDS) if desc.kinds is None else set(desc.kinds)) \
@@ -1473,13 +1506,13 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
     # token establishes a model- and kind-unscoped window.
     if desc is None and scope == "-":
         target_kinds = set(quota_scope.REQUEST_KINDS)
-    def covers(limit: str) -> bool:
-        other = next((r.desc for r in norm.readings
-                      if (r.harness, r.subject_id) == subject and r.key == limit), None)
-        return bool(target_kinds) and (other is None or all(
-            quota_scope.account_wide(other, kind) for kind in target_kinds))
-    if any(other != key and covers(other) for other in spent.get(subject, set())):
+    blockers = [other for limit, other in norm.spent.get(subject, {}).items()
+                if limit != key and target_kinds and (other.desc is None or all(
+                    quota_scope.account_wide(other.desc, kind) for kind in target_kinds))]
+    if blockers:
         flags.append("other_limit_spent")
+        boundaries.extend(other.resets_at for other in blockers)
+    member.restriction_boundary = min((end for end in boundaries if end is not None), default=None)
     member.flags = tuple(flags)
 
 
@@ -2230,7 +2263,7 @@ def finish(norm: Normalized, groups: List[GroupCalc], view: Optional[HistoryView
                                reason="no_reading_in_answer", observed_at=found.observed_at,
                                pseudo=pseudo, last_known=found)
                 hold = quota_scope.hold_key(calc.scope_info) if calc.scope_info is not None else calc.scope
-                _decorate(norm, extra, calc.key, hold, norm.spent, calc.scope_info)
+                _decorate(norm, extra, calc.key, hold, calc.scope_info)
                 calc.extra.append(extra)
         if calc.key in restored:
             # No account reads this limit in this answer: the whole family is
@@ -3167,6 +3200,46 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
 # Compact form for the model tool
 
 
+def amount_words(value: Optional[float], places: int, *, positive_if_zero: bool = False,
+                 fixed: bool = True) -> str:
+    """Format one nonnegative fact at its display resolution without inventing zero."""
+    if value is None:
+        return "unknown"
+    shown = f"{value:.{places}f}"
+    if (value > 0.0 or positive_if_zero) and float(shown) == 0.0:
+        return f"<{10 ** -places:.{places}f}"
+    return shown if fixed else str(value)
+
+
+def measured_words(value: Optional[float], measured: int, at_limit: Optional[int], *, places: int = 2,
+                   fixed: bool = True) -> str:
+    """A projected total or mean; the unrounded at-limit count witnesses tiny positives."""
+    if not measured:
+        return "unknown"
+    count_known = type(at_limit) is int and 0 <= at_limit <= measured
+    if value == 0.0 and not count_known:
+        return "unknown"
+    return amount_words(value, places, positive_if_zero=count_known and at_limit < measured, fixed=fixed)
+
+
+def unflagged_note(row: Dict[str, Any], *, unit: str = "aw") -> str:
+    """The same measured subtotal in every text, not a verdict of availability."""
+    restrictions = row.get("restrictions") or {}
+    if not restrictions or not row.get("of_accounts"):
+        return ""
+    unknown = (restrictions.get("account_state_unknown") or {}).get("accounts")
+    state = f"account state unknown ({unknown})" if unknown else "account state unknown"
+    if restrictions.keys() == {"account_state_unknown"}:
+        return state  # missing account status is not a proven hold
+    value = row.get("unrestricted_windows")
+    has_room = row.get("_unrestricted_has_room")
+    if value is None or (value == 0.0 and has_room is None):
+        subtotal = "unflagged subtotal unknown"
+    else:
+        subtotal = f"{amount_words(value, 2, positive_if_zero=has_room is True)} {unit} unflagged"
+    return f"{subtotal}; {state}" if "account_state_unknown" in restrictions else subtotal
+
+
 def _compact_pace(pace: Dict[str, Any], detail: bool) -> Dict[str, Any]:
     """Unknowns and zero counts drop out; a known pace of zero stays, since
     "no growth observed" is an answer, not an absence."""
@@ -3185,7 +3258,7 @@ def _compact_pace(pace: Dict[str, Any], detail: bool) -> Dict[str, Any]:
     return out
 
 
-def _headline(group: Dict[str, Any]) -> str:
+def _headline(group: Dict[str, Any], row: Dict[str, Any]) -> str:
     """One plain sentence per limit, from the same numbers as the fields:
     current windows of how many accounts, what is last known and how old,
     what is unknown, the next reported reset and how much of the pace is
@@ -3196,15 +3269,19 @@ def _headline(group: Dict[str, Any]) -> str:
              if group.get("model_scope") == "names_unknown" else "")
     head = f"{group.get('family')} {group.get('label')} ({group.get('duration')}{scope}): "
     if m.get("accounts"):
-        parts = [head + f"{m.get('windows')} account-windows left now across "
+        reserve = measured_words(m.get("windows"), m["accounts"], m.get("at_limit"), fixed=False)
+        parts = [head + f"{reserve} account-windows left now across "
                         f"{m.get('accounts')} measured of {slots} accounts"]
     else:
         # Nothing measured is not "0 left": no current reading says nothing
         # about what is left now (remaining_windows keeps its own meaning).
         parts = [head + f"no current reading of any of {slots} account{'s' if slots != 1 else ''}"]
+    if note := unflagged_note(row, unit="account-windows"):
+        parts.append(note)
     lk = group.get("last_known") or {}
     if lk.get("accounts"):
-        parts.append(f"plus {lk.get('windows')} last known from {lk.get('accounts')} "
+        reserve = measured_words(lk.get("windows"), lk["accounts"], row.get("_last_known_at_limit"), fixed=False)
+        parts.append(f"plus {reserve} last known from {lk.get('accounts')} "
                      f"account{'s' if lk.get('accounts') != 1 else ''} "
                      f"(oldest observed {lk.get('oldest_observed_at')}), not current")
     unknown = (group.get("unknown") or {}).get("accounts")
@@ -3228,10 +3305,44 @@ def _headline(group: Dict[str, Any]) -> str:
     return "; ".join(parts) + "."
 
 
-def compact(summary: Dict[str, Any], harness: str = "", detail: bool = False) -> Dict[str, Any]:
+def compact_scope(group: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the same scope evidence for the compact tool row and the chip's title."""
+    row: Dict[str, Any] = {}
+    if group.get("models"):
+        row["models"] = group["models"]
+    if group.get("model_scope") == "names_unknown":
+        # Restored from the history: tied to models, names not recorded.
+        row["model_scope"] = "model-scoped; model names unavailable from history"
+    scope_fields = group.get("scope") or {}
+    if group.get("model_scope") == "prefixes":
+        row["model_scope"] = "tied to model families by prefix"
+    if (scope_fields.get("prefixes") or {}).get("names"):
+        row["model_prefixes"] = scope_fields["prefixes"]["names"]
+    if (scope_fields.get("prefixes") or {}).get("omitted"):
+        row["model_prefixes_omitted"] = scope_fields["prefixes"]["omitted"]
+    if scope_fields.get("unspecified_model") is True:
+        row["governs_unspecified_model"] = True
+    if scope_fields.get("request_kinds") is not None:
+        row["request_kinds"] = scope_fields["request_kinds"]
+    unreadable = [name for name, state in (("models", "models_state"), ("model_prefixes", "prefixes_state"),
+                                           ("request_kinds", "request_kinds_state"))
+                  if scope_fields.get(state) == "unreadable"]
+    if unreadable:
+        row["scope_unreadable"] = unreadable
+    if not scope_fields and "~" in str(group.get("key", "")).rsplit("|", 1)[-1]:
+        # The historical series key records the request scope only as a digest.
+        row["request_scope"] = "unknown; recorded only as a digest in the history"
+    if group.get("models_omitted"):
+        row["models_omitted"] = group["models_omitted"]
+    return row
+
+
+def compact(summary: Dict[str, Any], harness: str = "", detail: bool = False, *,
+            for_snapshot: bool = False) -> Dict[str, Any]:
     """The tool's projection of :func:`build_summary`: the same numbers, fewer
     fields, zero counts dropped. ``detail`` adds plan breakdowns and the
-    per-reason pace counts."""
+    per-reason pace counts. The headlines and in-process snapshot renderers
+    use the same rounding evidence from already-projected measured shares."""
     wanted = str(harness or "").strip().lower()
     groups = []
     for group in summary.get("groups", []):
@@ -3258,36 +3369,13 @@ def compact(summary: Dict[str, Any], harness: str = "", detail: bool = False) ->
         }
         if group.get("tightest"):
             row["tightest_in_family"] = True
-        if group["models"]:
-            row["models"] = group["models"]
-        if group.get("model_scope") == "names_unknown":
-            # Restored from the history: tied to models, names not recorded.
-            row["model_scope"] = "model-scoped; model names unavailable from history"
-        scope_fields = group.get("scope") or {}
-        if group.get("model_scope") == "prefixes":
-            row["model_scope"] = "tied to model families by prefix"
-        if (scope_fields.get("prefixes") or {}).get("names"):
-            row["model_prefixes"] = scope_fields["prefixes"]["names"]
-        if (scope_fields.get("prefixes") or {}).get("omitted"):
-            row["model_prefixes_omitted"] = scope_fields["prefixes"]["omitted"]
-        if scope_fields.get("unspecified_model") is True:
-            row["governs_unspecified_model"] = True
-        if scope_fields.get("request_kinds") is not None:
-            row["request_kinds"] = scope_fields["request_kinds"]
-        unreadable = [name for name, state in (("models", "models_state"), ("model_prefixes", "prefixes_state"),
-                                               ("request_kinds", "request_kinds_state"))
-                      if scope_fields.get(state) == "unreadable"]
-        if unreadable:
-            row["scope_unreadable"] = unreadable
-        if not scope_fields and "~" in str(group["key"]).rsplit("|", 1)[-1]:
-            # Restored from the history: its scope carried fields the series
-            # key records only as a digest (request kinds, the unspecified-
-            # model flag, an unreadable field).
-            row["request_scope"] = "unknown; recorded only as a digest in the history"
-        if group.get("models_omitted"):
-            row["models_omitted"] = group["models_omitted"]
+        row.update(compact_scope(group))
         if group["restrictions"]:
             row["restrictions"] = group["restrictions"]
+            if row["unrestricted_windows"] == 0.0:
+                row["_unrestricted_has_room"] = any(
+                    not share["restricted"] and not share["at_limit"] for share in group["shares"]
+                )
         if group["plans"]["mixed"]:
             row["mixed_plans"] = True
             if detail:
@@ -3308,6 +3396,11 @@ def compact(summary: Dict[str, Any], harness: str = "", detail: bool = False) ->
                 "oldest_observed_at": last_known.get("oldest_observed_at"),
             }
             row["remaining_windows_with_last_known"] = (group.get("with_last_known") or {}).get("windows")
+            if last_known.get("windows") == 0.0:
+                limits = [bar["at_limit"] for bar in group.get("bars", [])
+                          if bar.get("state") == "last_known" and type(bar.get("at_limit")) is bool]
+                if len(limits) == last_known["accounts"]:
+                    row["_last_known_at_limit"] = sum(limits)
         unknown = group.get("unknown") or {}
         if unknown.get("accounts"):
             row["unknown_accounts"] = unknown["accounts"]
@@ -3315,7 +3408,10 @@ def compact(summary: Dict[str, Any], harness: str = "", detail: bool = False) ->
                 row["unknown_reasons"] = unknown.get("reasons")
         if group.get("applicability_unknown"):
             row["applicability_unknown_accounts"] = group["applicability_unknown"]
-        row["headline"] = _headline(group)
+        row["headline"] = _headline(group, row)
+        if not for_snapshot:
+            row.pop("_unrestricted_has_room", None)
+            row.pop("_last_known_at_limit", None)
         groups.append(row)
     history = summary.get("history", {})
     extra: Dict[str, Any] = {}

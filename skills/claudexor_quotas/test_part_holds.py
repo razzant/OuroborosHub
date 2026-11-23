@@ -125,7 +125,7 @@ def test_hold_key_is_one_identity_of_the_whole_scope():
 def test_a_cooldown_of_part_of_the_requests_holds_its_own_window_never_the_account(answer):
     now, data = answer["now"], answer["data"]
     norm = qs.normalize(data, now)
-    whole = {sid for hid, sid in norm.cooling_all if hid == "codex"}
+    whole = {sid for (hid, sid), ends in norm.cooldown_ends.items() if hid == "codex" and "-" in ends}
     assert whole == {"bare", "state"}, whole
     computed = qs.compute(data, qs.HistoryView(state="empty"), now)
     summary = qs.build_summary(data, computed.view, now, state=computed, name_accounts=True)

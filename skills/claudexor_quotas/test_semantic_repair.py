@@ -98,8 +98,11 @@ def test_positive_hours_are_not_quantized_to_zero_in_tool_snapshot_or_widget_dat
     hours = answer["joint"]["claude"]["conditional_account_hours"]
     assert hours == pytest.approx(float(expected), abs=1e-10)
     assert hours > 0
-    assert "conditional ≈<0.1 account-hours" in qc.snapshot_text(answer)
-    assert "common-watched-period pace" in qc.snapshot_text(answer)
+    assert answer["joint"]["claude"]["same_account_capacity"] == pytest.approx(0.0001)
+    details = qc.snapshot_text(answer)
+    assert "conditional <0.1 account-hours" in details
+    assert any("): <0.1 from " in line for line in details.splitlines() if "same-account capacity" in line)
+    assert "common-watched-period pace" in details
     assert answer["joint"]["claude"]["hours_pace_basis"] == "common_watched_period"
     assert qc.rounded_hours(0) == "0.0"  # a real zero stays distinct
 
@@ -156,8 +159,11 @@ def test_passed_resource_is_dated_not_whole_snapshot_suppressed(tmp_path):
     api = Api(tmp_path)
     assert plugin.publish_snapshot(api, None, data, "", NOW, latest) == "written"
     body = json.loads((tmp_path/qc.SNAPSHOT_FILE).read_text())
-    assert "last known" in body["text"] and "same-account" in body["text"]
-    assert "usable yes" in body["text"]  # a dated vendor statement, not renewed usability
+    assert len(body["text"]) <= qc.BRIEF_MAX_CHARS
+    assert "five_hour" in body["text"] and "seven_day" in body["text"]
+    assert "same-account" not in body["text"] and "usable yes" not in body["text"]
+    assert "last known" in body["details"] and "same-account" in body["details"]
+    assert "usable yes" in body["details"]  # a dated vendor statement, not renewed usability
     assert qs.parse_instant(body["valid_until"]) == NOW+qc.VALID_FOR_SEC
     answer = plugin.answer_of(None, data, {}, data, NOW, NOW)
     assert answer["resources"]["claude"]["facets"]["resets"][0]["state"] == "last_known"
@@ -271,3 +277,119 @@ def test_widget_future_svg_and_cursor_do_not_coerce_unknown_to_zero(tmp_path):
                      text=True,capture_output=True,timeout=30)
     assert p.returncode==0,p.stdout+p.stderr
     assert "FUTURE_GAP_RENDER_PASS" in p.stdout
+
+
+# --- the published summary's honest words (0.13.2 repairs) ---
+
+
+def _group_row(**over):
+    row = {"family": "codex", "limit": "five_hour", "duration": "5h", "of_accounts": 2,
+           "accounts_known_to_apply": 2, "remaining_windows": 1.6, "average_remaining_pct": 80.0,
+           "accounts_at_limit": 0,
+           "recent_pace": {"state": "ok", "windows_per_hour": 0.5, "accounts_known": 2, "of": 2,
+                           "zero_growth": 0}}
+    row.update(over)
+    return row
+
+
+def test_a_pace_the_tool_rounded_to_zero_is_not_read_as_a_confirmed_zero():
+    # The tool sums the per-account rates and rounds the sum before this module
+    # sees it: a positive sum below that resolution arrives as 0.0.
+    assert qc._pace_rate({"windows_per_hour": 0.0, "accounts_known": 1, "zero_growth": 0}) == "<0.1"
+    assert qc._pace_rate({"windows_per_hour": 0.0, "accounts_known": 1}) == "<0.1"  # zero_growth dropped as 0
+    assert qc._pace_rate({"windows_per_hour": 0.0, "accounts_known": 1, "zero_growth": 1}) == "0.0"
+    assert qc._pace_rate({"windows_per_hour": 0.75, "accounts_known": 1, "zero_growth": 0}) == "0.8"
+    assert qc._pace_rate({"windows_per_hour": 0.02, "accounts_known": 1, "zero_growth": 0}) == "<0.1"
+
+
+def test_a_window_whose_request_kinds_cannot_be_read_is_not_read_as_having_none():
+    def view(kinds):
+        row = constraint("codex", 1.0, FIVE_H, reset=H)
+        row["applies_to_request_kinds"] = kinds
+        data = payload([snap("codex", "a", [row], observed_abs=NOW)],
+                       [profile("codex", "a")], harnesses=("codex",))
+        return plugin.answer_of(None, data, {}, data, NOW, NOW)
+
+    answer = view(["video"])
+    group = next(r for r in answer["groups"] if r["limit"] == "codex")
+    assert group["scope_unreadable"] == ["request_kinds"]
+    text = qc.brief_text(answer)
+    assert "no request kinds" not in text and "kinds applicability unknown" in text
+    assert "kinds video" not in text
+
+    answer = view(["video", "image"])
+    group = next(r for r in answer["groups"] if r["limit"] == "codex")
+    assert group["scope_unreadable"] == ["request_kinds"]
+    text = qc.brief_text(answer)
+    assert "kinds applicability unknown" in text and "kinds image" not in text
+
+    # A kind the engine's schema does know is still named.
+    answer = view(["image"])
+    text = qc.brief_text(answer)
+    assert "kinds image" in text and "kinds applicability unknown" not in text
+
+
+def test_a_family_without_a_group_here_says_its_window_is_not_represented():
+    from test_scope_resources_context import wide_resources
+    data = wide_resources(accounts=1, rows=1)
+    answer = plugin.answer_of(None, data, {}, data, NOW, NOW)
+    text = qc.brief_text(answer)
+    assert "no window in this summary; resources: see quota_summary" in text
+    assert "resources in details" not in text
+
+
+def test_a_restriction_and_the_origin_of_the_account_list_are_said_beside_the_reserve():
+    answer = {"groups": [_group_row(restrictions={"other_limit_spent": {"accounts": 2}}, unrestricted_windows=0.0)],
+              "resources": {}, "roster": "unknown"}
+    text = qc.brief_text(answer)
+    assert "1.60 aw (2/2 measured, restriction flags, unflagged subtotal unknown)" in text
+    assert "unflagged subtotal unknown" in qc.snapshot_text(answer)
+    assert text.count("Account list:") == 1 and "unknown" in text
+    assert "Account list:" not in qc.brief_text(dict(answer, roster="current"))
+
+
+def test_a_measured_reserve_is_never_shown_as_zero_when_it_is_not():
+    row = _group_row(remaining_windows=0.004, accounts_at_limit=1)
+    details = qc.snapshot_text({"groups": [row], "resources": {}, "roster": "current"})
+    assert "<0.01 left across 2 measured" in details
+    spent = _group_row(remaining_windows=0.0, accounts_at_limit=2)
+    details = qc.snapshot_text({"groups": [spent], "resources": {}, "roster": "current"})
+    assert "0.00 left across 2 measured" in details
+    del spent["accounts_at_limit"]  # zero alone is not evidence that all measured accounts are at limit
+    details = qc.snapshot_text({"groups": [spent], "resources": {}, "roster": "current"})
+    assert "unknown left across 2 measured" in details
+
+
+def test_the_detail_reader_takes_the_files_own_dates_with_it():
+    assert "select=" not in qc.DETAIL_READER
+    assert 'state_file="context_snapshot"' in qc.DETAIL_READER
+    assert qc.DETAIL_READER in qc.BRIEF_FOOTER
+
+
+def test_the_detail_names_what_it_left_out_without_promising_the_tool_has_it():
+    rows = [_group_row(family=f"family{index:03d}", limit=f"limit-{index:03d}-" + "x" * 90)
+            for index in range(120)]
+    answer = {"groups": rows, "resources": {}, "roster": "current"}
+    details = qc.snapshot_text(answer)
+    assert details is not None
+    omission = [line for line in details.split("\n") if "left out" in line]
+    assert len(omission) == 1
+    assert "the quota_summary answer lists the windows it carries" in omission[0]
+    assert "quota_summary has them" not in details
+
+
+def test_a_too_long_detail_is_never_serialized(monkeypatch):
+    calls = []
+    original = qc.envelope_bytes
+
+    def counting(text, details=None):
+        calls.append(details)
+        return original(text, details)
+
+    monkeypatch.setattr(qc, "envelope_bytes", counting)
+    rows = [_group_row(family=f"family{index:03d}", limit=f"limit-{index:03d}-" + "x" * 90)
+            for index in range(120)]
+    details = qc.snapshot_text({"groups": rows, "resources": {}, "roster": "current"},
+                               reserved_text="short")
+    assert details is not None and len(details) <= qc.MAX_CHARS
+    assert len(calls) <= 5, f"the detail was serialized {len(calls)} times"
