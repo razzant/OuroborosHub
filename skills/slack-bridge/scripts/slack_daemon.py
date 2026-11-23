@@ -18,7 +18,7 @@ from lib.local_settings import (  # noqa: E402
     NEW_ROOT_CHANNELS, LocalSettingsError, load_local_settings, normalize_channel_ids,
 )
 from lib.presence import slack_identity  # noqa: E402
-from lib.redaction import error_text, install_log_redaction  # noqa: E402
+from lib.redaction import error_text, install_log_redaction, log_loop_exception  # noqa: E402
 from lib.runtime import BridgeRuntime  # noqa: E402
 from lib.slack_api import SlackClient  # noqa: E402
 from lib.store import BridgeStore  # noqa: E402
@@ -47,6 +47,8 @@ def _new_root_channels(settings: dict[str, Any]) -> tuple[list[str], str]:
 
 
 async def _run() -> None:
+    # A task's exception nobody awaited is logged through the redacting handlers, as everything else.
+    asyncio.get_running_loop().set_exception_handler(log_loop_exception)
     state_dir = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
     with closing(BridgeStore(state_dir)) as store:
         store.set_runtime(socket_state="starting", companion_pid=os.getpid())
@@ -151,7 +153,12 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     install_log_redaction()
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except Exception:
+        # Python would print this traceback raw to stderr; the handlers above print it without credentials.
+        log.error("Slack bridge stopped after an error", exc_info=True)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

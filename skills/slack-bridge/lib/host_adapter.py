@@ -4,6 +4,7 @@ import asyncio
 import base64
 import ipaddress
 import json
+import logging
 import os
 import re
 from copy import Error as CopyError
@@ -88,6 +89,8 @@ PLACE_POLICY_UNREAD = "Held: It retries by itself."
 SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
 
 
+log = logging.getLogger(__name__)
+
 class HostAdapterUnavailable(RuntimeError):
     """Raised when the owner has not selected a presence binding."""
 
@@ -98,6 +101,10 @@ class HostContractError(RuntimeError):
 
 class HostBindingTerminalError(HostContractError):
     """Raised when the configured binding is missing or cannot admit the event."""
+
+
+class HostReceiptConflict(HostContractError):
+    """The Host already holds a receipt for this part and state, with different facts."""
 
 
 class HostRetryError(HostContractError):
@@ -432,6 +439,9 @@ class LoopbackPresenceHostAdapter:
         self._terminal_work: dict[str, dict[str, Any]] = {}
         self.delivery_reporting_version = 0
         self.delivery_reporting_status = "unknown"
+        # Why the capabilities are not confirmed while the status is "unavailable": "credential_missing" (no
+        # HOST_SERVICE_TOKEN, so no request is made) or "request_failed" (a request got no usable answer).
+        self.delivery_reporting_cause = ""
         # Discovered with delivery reporting from the same /identity answer:
         # 2 when ``presence_continuation_versions`` lists it, else the scalar 1, else 0.
         self.continuation_version = 0
@@ -453,18 +463,32 @@ class LoopbackPresenceHostAdapter:
     def _capabilities(self) -> tuple[Any, ...]:
         return (self.available, self.delivery_reporting_status, self.delivery_reporting_version,
                 self.continuation_version, self.places_version, self.presence_identity, self.reaction_context,
-                self.explicit_completion, self.wake_signals)
+                self.explicit_completion, self.wake_signals, self.delivery_reporting_cause)
+
+    def _publish(self) -> None:
+        """Record what the adapter knows when it differs from what was last recorded.
+
+        The marker moves only after the listener's write succeeded: a write that failed (a transient database
+        lock) is retried at the next check, including a cached one, without another Host request.
+        """
+        now = self._capabilities()
+        if self.capabilities_listener is None or now == self._published:
+            return
+        try:
+            self.capabilities_listener()
+        except Exception as exc:  # the store's write failed: keep the marker, so the next check writes again
+            log.warning("Recording the Host capabilities failed; retried at the next check: %s", type(exc).__name__)
+            return
+        self._published = now
 
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
+            self._publish()
             return self.delivery_reporting_version
         try:
             return await self._discover_delivery_support()
         finally:
-            now = self._capabilities()
-            if self.capabilities_listener is not None and now != self._published:
-                self._published = now
-                self.capabilities_listener()
+            self._publish()
 
     async def _discover_delivery_support(self) -> int:
         if self._skill_token is None:
@@ -472,6 +496,7 @@ class LoopbackPresenceHostAdapter:
             self.delivery_reporting_version = 0
             self.continuation_version = 0
             self.delivery_reporting_status = "unavailable"
+            self.delivery_reporting_cause = "credential_missing"
             return 0
         try:
             response = await self._http.get(
@@ -497,8 +522,14 @@ class LoopbackPresenceHostAdapter:
             self.delivery_reporting_version = 1 if payload.get("presence_delivery_version") == 1 else 0
             self.continuation_version = _continuation_version(payload)
             self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
+            self.delivery_reporting_cause = ""
         except (HostContractError, httpx.HTTPError):
+            if self.delivery_reporting_status in {"supported", "unsupported"}:
+                # Only a Host answer changes the capabilities: an overlapping check answered while this one
+                # failed, and its answer stands.
+                return self.delivery_reporting_version
             # Failed discovery can retry. The outbox holds until policy is known.
+            self.delivery_reporting_cause = "request_failed"
             self.delivery_reporting_version = 0
             self.continuation_version = 0
             self.reaction_context = 0
@@ -553,6 +584,13 @@ class LoopbackPresenceHostAdapter:
             },
             json=dict(payload), timeout=10.0,
         )
+        if response.status_code == 409:
+            try:
+                code = response.json().get("code")
+            except (ValueError, AttributeError):
+                code = None
+            if code == "presence_receipt_conflict":
+                raise HostReceiptConflict("Presence Host already holds a different receipt for this part")
         result = await self._json_response(response)
         if result.get("ok") is not True or result.get("recorded") is not True:
             raise HostContractError("Presence delivery report was not acknowledged")

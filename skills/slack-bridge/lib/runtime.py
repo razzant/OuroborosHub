@@ -13,7 +13,9 @@ import httpx
 from typing import Any, Awaitable, Sequence
 
 from .events import REACTION_EVENTS
-from .host_adapter import HostBindingTerminalError, HostOutput, HostRetryError, HostTurnStatus, PresenceHostAdapter
+from .host_adapter import (
+    HostBindingTerminalError, HostOutput, HostReceiptConflict, HostRetryError, HostTurnStatus, PresenceHostAdapter,
+)
 from .provider_context import capture_context
 from .slack_api import (
     SlackApiError, SlackClient, SlackConfigurationError, SlackMutationUncertain, UploadInput, chunk_message,
@@ -101,6 +103,8 @@ def _record_capabilities(host: Any, store: BridgeStore, mode: int | None = None)
         presence_identity=getattr(host, "presence_identity", 0),
         connector_identity=getattr(host, "connector_identity", {}),
         history_reporting_state=getattr(host, "delivery_reporting_status", "unsupported"),
+        # Why "unavailable": no Host credential (nothing is asked) or a request without an answer (asked again).
+        host_check_cause=getattr(host, "delivery_reporting_cause", ""),
         history_reporting_limitation="" if mode else "Host delivery reporting unavailable; provider sending remains enabled.",
         reaction_context_state="available" if _reactions_live(host) else "update_required",
         reaction_context_limitation="" if _reactions_live(host) else (
@@ -507,6 +511,14 @@ class OutboundWorker:
             await self.host.report_delivery(report["payload"])
         except asyncio.CancelledError:
             raise
+        except HostReceiptConflict as exc:
+            if report.get("cleaned"):
+                # An older version's report, cleaned of a credential on the way out, whose original the Host
+                # recorded before its answer was lost: the Host holds this part's receipt, so it is done.
+                log.warning("Slack history report %s: the Host already holds this part's receipt", report["row_id"])
+                self.store.finish_report(report)
+            else:
+                self.store.finish_report(report, error=str(exc))
         except Exception as exc:
             self.store.finish_report(report, error=str(exc) or type(exc).__name__)
         else:

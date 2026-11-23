@@ -411,9 +411,11 @@ Module widgets can declare `render.appearance: host` and feature-detect
 `OuroborosWidget.onTheme`. Preserve state while applying Light/Dark, unsubscribe
 on disposal, and retain a usable palette on older hosts. The real-bridge
 browser suites require a local core checkout with git history, Playwright,
-Chromium and WebKit. CI gives the `widgets`, `calendar-skill`, `smart-lists`,
-`telegram-user-session` and `slack-bridge` jobs the pinned core, its runtime and both browsers; only
-the dashboard suite (`widgets`) reads the core's history:
+Chromium and WebKit. CI gives the `widgets`, `calendar-skill`, `smart-lists` and
+`telegram-user-session` jobs the pinned core, its runtime and both browsers. The `slack-bridge` job
+checks out the same pinned core without installing its runtime: it installs the suite's own
+dependencies, Playwright 1.62.0, Chromium and WebKit. Only the dashboard suite (`widgets`) reads the
+core's history:
 
 ```bash
 OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py tests/test_telegram_participant_widget_browser.py \

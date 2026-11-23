@@ -169,6 +169,29 @@ def seed(scenario, root):
         if scenario == 'host_unanswered':  # the start check got a 503: what the runtime records for it
             store.set_runtime(host_adapter_state='missing_binding_id', history_reporting_state='unavailable',
                               reaction_context_state='update_required')
+        if scenario == 'host_key_missing':  # no HOST_SERVICE_TOKEN: the start check asked nothing
+            store.set_runtime(host_adapter_state='missing_binding_id', history_reporting_state='unavailable',
+                              reaction_context_state='update_required', host_check_cause='credential_missing')
+        if scenario == 'redacted_label':  # provider labels shaped like credentials (synthetic)
+            store.set_runtime(workspace_name='xox' + 'b-4417-0000-SYNTHETICWORKSPACE', workspace_id='T09SYNTH01',
+                              presence_identity=1, connector_identity={'sends_as': {
+                                  'id': 'U09OUROBOT1', 'label': 'Bearer synthetic0123456789', 'kind': 'bot'}})
+        if scenario == 'held_old_unknown':  # part 1's outcome unknown two days ago, part 2 held by a paused place
+            import sqlite3
+            store.enqueue_outbox(request_id='synthetic-old-unknown', target='C09SYNTH01', thread_ts='', chunks=('one', 'two'))
+            first = store.claim_outbox()
+            store.fail_outbox(first.row_id, first.lease_token, 'ReadTimeout', state='uncertain')
+            store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
+            with sqlite3.connect(store.path) as conn:
+                conn.execute('UPDATE outbox SET updated_at=updated_at-172800 WHERE id=?', (first.row_id,))
+        if scenario == 'delivered_uncertain_held':  # one message in three parts: delivered, unknown now, held
+            store.enqueue_outbox(request_id='synthetic-three', target='C09SYNTH01', thread_ts='',
+                                 chunks=('one', 'two', 'three'))
+            first = store.claim_outbox()
+            store.complete_outbox(first.row_id, first.lease_token, provider_message_ts='1700000000.000100')
+            second = store.claim_outbox()
+            store.fail_outbox(second.row_id, second.lease_token, 'ReadTimeout', state='uncertain')
+            store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
         if scenario == 'reactions_unbound':  # Ouroboros answered: no place confirmed, reactions need an update
             store.set_runtime(host_adapter_state='missing_binding_id', history_reporting_state='unsupported',
                               reaction_context_state='update_required')
@@ -464,18 +487,39 @@ DEGRADED = [
      ['while handing it to Ouroboros or following the reply', 'Saved reason', 'inbound · event · not handled'],
      ['Ouroboros’s turn', 'event · not delivered']),
     ('mixed', 'Connected · 1 message not delivered · 1 more needs attention',
-     ['Part of it was refused and is not retried', 'send only the refused parts',
+     ['Part of it was refused and is not retried',
+      'Fix the cause, then part by part: wait until the queued or held parts are sent',
+      'send again only the parts confirmed missing',
       '1 of these messages also has a part refused', '1 of the queued ones with a part not delivered or unknown'],
-     ['send again if needed', 'send only what is missing']),
+     ['send again if needed', 'send only what is missing', 'send only the refused parts']),
     ('mixed_1b', 'Connected · 2 messages not delivered',
      ['1 of them had a part refused, which is not retried; its other parts are still queued',
-      'For that one, fix the cause and wait until the queued parts are sent',
-      'its other parts were delivered or have an unknown outcome', 'check slack_receipt and Slack for which parts arrived'],
-     ['send again if needed', 'For the others', 'send only what is missing']),
+      'its other parts were delivered or have an unknown outcome',
+      'Fix the cause, then part by part: wait until the queued or held parts are sent',
+      'check parts with an unknown outcome in Slack itself'],
+     ['send again if needed', 'For the others', 'send only what is missing', 'send only the refused parts']),
     ('held_old_problem', 'Connected · 1 message held',
      ['an earlier part that was refused or ended with an unknown outcome more than a day ago',
-      'Before sending that part again'],
-     ['(listed above)']),
+      'For that message, part by part: wait until the queued or held parts are sent'],
+     ['(listed above)', 'Before sending that part again']),
+    ('held_old_unknown', 'Connected · 1 message held',
+     ['an earlier part that was refused or ended with an unknown outcome more than a day ago',
+      'check parts with an unknown outcome in Slack itself', 'send again only the parts confirmed missing'],
+     ['(listed above)', 'Before sending that part again', 'repeat it']),
+    ('delivered_uncertain_held', 'Connected · outcome unknown for 1 message · 1 more needs attention',
+     ['Some of its parts are already in the conversation',
+      'Some of its parts are still waiting, held or being sent',
+      'Part by part: wait until the queued or held parts are sent',
+      'check parts with an unknown outcome in Slack itself', '(listed above)'],
+     ['repeat it', 'send again if needed', 'send only the missing parts']),
+    ('host_key_missing', 'Connected · Slack events are not passed to Ouroboros · 1 more needs attention',
+     ['the bridge has no Ouroboros service key (HOST_SERVICE_TOKEN)',
+      'In Extensions, turn Slack Bridge off and on; Ouroboros gives the bridge its key when it starts it.',
+      'no: the bridge has no Ouroboros service key (HOST_SERVICE_TOKEN)'],
+     ['checks again by itself', 'asked again', 'didn’t answer', 'Connect Slack in Circles']),
+    ('redacted_label', 'Connected · nothing needs attention',
+     ['[redacted] (T09SYNTH01)', 'Bearer [redacted] (U09OUROBOT1)'],
+     ['SYNTHETICWORKSPACE', 'synthetic0123456789', 'xox' + 'b-4417']),
     ('host_unanswered', 'Connected · Slack events are not passed to Ouroboros · 1 more needs attention',
      ['The bridge checks again by itself with the next Slack event or send',
       'not yet: Ouroboros didn’t answer the check; asked again with the next event or send',

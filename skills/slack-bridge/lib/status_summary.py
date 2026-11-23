@@ -84,6 +84,11 @@ def _sentence_tail(headline: str) -> str:
     return headline[0].lower() + headline[1:]
 
 
+def _present(part: Mapping[str, Any], **keys: str) -> dict[str, int]:
+    """Item fields copied from the store's counts that an older payload may lack (then they stay absent)."""
+    return {name: _int(part.get(key)) for name, key in keys.items() if key in part}
+
+
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
@@ -147,6 +152,9 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     link = payload.get("link") if isinstance(payload.get("link"), Mapping) else {}
     detail = str(link.get("detail") or "")
+    # Why the Host's capabilities are not confirmed: a missing service key (no request is made) or a request
+    # without an answer (asked again by itself). An older payload without the cause reads as unanswered.
+    no_host_key = payload.get("host_check_cause") == "credential_missing"
     if detail in _LINK_ITEM:
         headline, tone = _LINK_ITEM[detail]
         item: dict[str, Any] = {"kind": "link", "detail": detail, "tone": tone, "headline": headline}
@@ -160,8 +168,12 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         if detail == "host_adapter_inactive" and _int(payload.get("inbox_pending")):
             item["count"] = _int(payload.get("inbox_pending"))
         if detail == "host_adapter_inactive" and payload.get("history_reporting_state") == "unavailable":
-            # Ouroboros did not answer the check (not "no place"): the next event or send asks again by itself.
-            item["host_unanswered"] = True
+            if no_host_key:
+                # No HOST_SERVICE_TOKEN: the bridge asks Ouroboros nothing, so nothing is asked again by itself.
+                item["host_key_missing"] = True
+            else:
+                # Ouroboros did not answer the check (not "no place"): the next event or send asks again by itself.
+                item["host_unanswered"] = True
         if link.get("companion_alive") is None and detail != "store_unreadable":
             # The probe did not answer: the detail is the state the bridge last recorded, not a running process's.
             item["process_unknown"] = True
@@ -179,6 +191,8 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "still_queued": _int(text.get("uncertain_messages_still_queued")),
             # Partly delivered with nothing left queued: only those may have their missing parts sent now.
             "partly_delivered_none_queued": _int(text.get("uncertain_messages_partly_delivered_none_queued")),
+            # Sent in several parts: per-part advice only. Absent in an older payload (the card then assumes parts).
+            **_present(text, in_parts="uncertain_messages_in_parts", with_refused_part="uncertain_messages_with_refused_part"),
             "events": _int(inbound.get("uncertain")),
             "at": _latest(_item_time(text, "uncertain", _int(text.get("uncertain_messages"))),
                           _item_time(mutations, "uncertain", _int(mutations.get("uncertain"))),
@@ -201,6 +215,7 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             **({"others_settled": _int(text.get("failed_messages_others_delivered_or_unknown")),
                 "every_part_refused": _int(text.get("failed_messages_every_part_refused"))}
                if "failed_messages_every_part_refused" in text else {}),
+            **_present(text, in_parts="failed_messages_in_parts"),
             "at": _latest(_item_time(text, "failed", _int(text.get("failed_messages"))),
                           _item_time(mutations, "failed", _int(mutations.get("failed")))),
             "error": _newest_error(_state_error(text, "failed", _int(text.get("failed_messages"))),
@@ -279,7 +294,7 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         gaps.append("process_unknown")
     if link.get("state") == "connected":
         if host_unanswered:
-            gaps.append("host_unanswered")
+            gaps.append("host_key_missing" if no_host_key else "host_unanswered")
         elif payload.get("reaction_context_state") == "unknown":
             gaps.append("capabilities_unchecked")
         if not recent:

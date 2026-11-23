@@ -613,6 +613,12 @@ var TransportKit = (function () {
         'Messages from Slack are kept here and not passed on yet: when the bridge started, Ouroboros did not answer its check of the place.',
         'The bridge checks again by itself with the next Slack event or send.'
     ];
+    // No HOST_SERVICE_TOKEN in the bridge's environment (the store's cause "credential_missing"): the bridge asks
+    // Ouroboros nothing, so nothing is checked again by itself. Ouroboros hands the key over when it starts the bridge.
+    var HOST_KEY_LINES = [
+        'Messages from Slack are kept here and not passed on: the bridge has no Ouroboros service key (HOST_SERVICE_TOKEN), so it cannot ask Ouroboros about its place.',
+        { strong: 'In Extensions, turn Slack Bridge off and on;', text: 'Ouroboros gives the bridge its key when it starts it.' }
+    ];
     var UNKNOWN_HOST_UNANSWERED_LINES = [
         'When the bridge last started, Ouroboros did not answer its check of the place, so messages from Slack were kept here and not passed on. The system did not answer whether the bridge’s process is still running.',
         { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
@@ -652,6 +658,7 @@ var TransportKit = (function () {
         if (item.kind === 'link') {
             var unanswered = item.detail === 'host_adapter_inactive' && item.host_unanswered;
             out.lines = (item.auth ? AUTH_LINES
+                : item.detail === 'host_adapter_inactive' && item.host_key_missing ? HOST_KEY_LINES
                 : unanswered ? (item.process_unknown ? UNKNOWN_HOST_UNANSWERED_LINES : HOST_UNANSWERED_LINES)
                 : (item.process_unknown && UNKNOWN_PROCESS_LINES[item.detail]) || LINK_LINES[item.detail] || []).slice();
             if (item.detail === 'host_adapter_inactive' && count(item.count)) {
@@ -660,13 +667,7 @@ var TransportKit = (function () {
             if (error) out.error = { label: item.auth ? 'Slack’s answer' : 'Error text', text: error.text };
         } else if (item.kind === 'outcome_unknown') {
             out.atLabel = 'last';
-            out.lines = [
-                'The bridge has no saved final result for ' + them + ', so nobody knows whether ' + (one ? 'it' : 'they') + ' took effect. Nothing repeats ' + them + ' by itself.',
-                { strong: 'Check in Slack whether ' + (one ? 'it' : 'they') + ' took effect', text: '(the message is there, the edit or deletion is done) before asking Ouroboros to repeat ' + them + '.' },
-                queuedLine(item.still_queued, 'check only after they are sent'),
-                // Partly delivered with parts still queued: those are covered by the line above, not sent now.
-                partsLine(item.partly_delivered_none_queued !== undefined ? item.partly_delivered_none_queued : item.partly_delivered)
-            ];
+            out.lines = unknownLines(item, them, one);
             if (error) out.error = { label: 'What happened' + actionWord(error.operation), text: error.text, at: error.at };
         } else if (item.kind === 'not_delivered') {
             out.atLabel = 'last';
@@ -696,7 +697,7 @@ var TransportKit = (function () {
             if (mixed > recentMixed) {
                 out.lines.push((mixed - recentMixed === 1 ? '1 of these messages has' : num(mixed - recentMixed) + ' of these messages have')
                     + ' an earlier part that was refused or ended with an unknown outcome more than a day ago; only the held parts go out by themselves.');
-                out.lines.push({ strong: 'Before sending that part again,', text: 'ask Ouroboros to check slack_receipt for which parts arrived.' });
+                out.lines.push(perPartAdvice(mixed - recentMixed === 1 ? 'For that message, ' : 'For those messages, ', true));
             }
         } else if (item.kind === 'reactions') {
             var skipped = count(item.count) ? ' (' + num(count(item.count)) + ' so far)' : '';
@@ -732,50 +733,77 @@ var TransportKit = (function () {
         return out;
     }
 
-    /* Messages of a problem item that still have parts waiting, held or being sent: those parts go out by themselves. */
-    function queuedLine(queued, then) {
-        var n = count(queued);
-        if (!n) return null;
-        return (n === 1 ? '1 of them still has' : num(n) + ' of them still have') + ' parts waiting, held or being sent;'
-            + ' those go out by themselves. For ' + (n === 1 ? 'it' : 'them') + ', ' + then + '.';
+    /* A message sent in several parts with a refused or unknown-outcome part: resending it whole could post a part
+       that arrived twice, and slack_receipt can still say "unknown" for a part Slack posted. One advice for all such
+       messages, whatever the age of the problem part and the state of the others. */
+    function perPartAdvice(lead, queued) {
+        return { strong: lead ? lead + 'part by part:' : 'Part by part:',
+            text: (queued ? 'wait until the queued or held parts are sent, ' : '')
+                + 'ask Ouroboros to check slack_receipt for each part, check parts with an unknown outcome in Slack itself,'
+                + ' and send again only the parts confirmed missing.' };
     }
 
-    /* Refused messages by their other parts, each class with its own advice (lib/store.py's grouped pass):
-       still queued → wait, then send only the refused parts; others delivered or unknown → check, send only the refused
-       parts; every part refused (and actions) → send again if needed. One class alone speaks of "it"/"they". */
+    /* How many of an item's messages went out in several parts; an older payload without the count may have any. */
+    function inParts(item) {
+        var messages = count(item.messages);
+        return item.in_parts === undefined ? messages : Math.min(messages, count(item.in_parts));
+    }
+
+    function someOf(n) { return n === 1 ? '1 of them' : num(n) + ' of them'; }
+
+    /* Outcome unknown: messages in several parts get the per-part advice; the rest the simple check in Slack. */
+    function unknownLines(item, them, one) {
+        var total = count(item.messages) + count(item.actions) + count(item.events);
+        var parted = inParts(item), simple = total - parted;
+        var refused = Math.min(parted, count(item.with_refused_part));
+        var queued = count(item.still_queued), partly = count(item.partly_delivered);
+        var whole = parted === 1 && total === 1;  // the item is one message in parts: "its parts"
+        var lines = ['The bridge has no saved final result for ' + them + ', so nobody knows whether ' + (one ? 'it' : 'they')
+            + ' took effect. Nothing repeats ' + them + ' by itself.'];
+        if (parted) {
+            if (!whole) lines.push((parted === total ? (parted === 1 ? 'It was' : 'They were') : someOf(parted) + (parted === 1 ? ' was' : ' were'))
+                + ' sent in several parts.');
+            if (refused) lines.push(whole ? 'Another of its parts was refused.' : someOf(refused) + ' also had a part refused.');
+            if (partly) lines.push(whole ? 'Some of its parts are already in the conversation.'
+                : someOf(partly) + (partly === 1 ? ' was' : ' were') + ' delivered in part: some parts are already in the conversation.');
+            if (queued) lines.push(whole ? 'Some of its parts are still waiting, held or being sent; those go out by themselves.'
+                : someOf(queued) + (queued === 1 ? ' still has' : ' still have') + ' parts waiting, held or being sent; those go out by themselves.');
+            lines.push(perPartAdvice(simple ? 'For the messages sent in parts, ' : '', queued));
+        }
+        if (simple) {
+            var it = simple === 1 ? 'it' : 'they';
+            lines.push({ strong: (parted ? 'For the others, check' : 'Check') + ' in Slack whether ' + it + ' took effect',
+                text: '(the message is there, the edit or deletion is done) before asking Ouroboros to repeat ' + (simple === 1 ? 'it' : 'them') + '.' });
+        }
+        return lines;
+    }
+
+    /* Refused messages. Those sent in several parts are told by their other parts (lib/store.py's grouped pass): still
+       queued, delivered or unknown, or every part refused; they share one per-part advice. Single-part messages and
+       actions may be sent again whole. One class alone speaks of "it"/"they". */
     function notDeliveredLines(item) {
         var messages = count(item.messages), actions = count(item.actions), queued = count(item.still_queued);
-        var legacy = item.every_part_refused === undefined;
-        var settled = legacy ? 0 : count(item.others_settled);
-        var whole = (legacy ? Math.max(0, messages - queued - settled) : count(item.every_part_refused)) + actions;
+        var parted = inParts(item);
+        var settled = item.every_part_refused === undefined ? 0 : count(item.others_settled);
+        var wholeParted = Math.max(0, parted - queued - settled);
+        var single = messages - parted + actions;
         var total = messages + actions;
-        var single = [queued, settled, whole].filter(function (n) { return n > 0; }).length === 1;
-        function some(n) { return n === 1 ? '1 of them' : num(n) + ' of them'; }
-        function those(n) { return n === 1 ? 'For that one, ' : 'For those ' + num(n) + ', '; }
+        var alone = [queued, settled, wholeParted, single].filter(function (n) { return n > 0; }).length === 1;
         function partOf(n, rest) {
-            if (single) return (total === 1 ? 'Part of it was refused and is not retried; its' : 'Part of each was refused and is not retried; their')
+            if (alone) return (total === 1 ? 'Part of it was refused and is not retried; its' : 'Part of each was refused and is not retried; their')
                 + ' other parts ' + rest;
-            return some(n) + ' had a part refused, which is not retried; ' + (n === 1 ? 'its' : 'their') + ' other parts ' + rest;
+            return someOf(n) + ' had a part refused, which is not retried; ' + (n === 1 ? 'its' : 'their') + ' other parts ' + rest;
         }
         var lines = [];
-        if (queued) {
-            lines.push(partOf(queued, 'are still queued and go out by themselves.'));
-            lines.push({ strong: single ? 'Fix the cause, wait until the queued parts are sent,' : those(queued) + 'fix the cause and wait until the queued parts are sent,',
-                text: 'then ask Ouroboros to check slack_receipt for which parts arrived and send only the refused parts.' });
-        }
-        if (settled) {
-            lines.push(partOf(settled, 'were delivered or have an unknown outcome.'));
-            lines.push({ strong: single ? 'Fix the cause,' : those(settled) + 'fix the cause,',
-                text: 'then ask Ouroboros to check slack_receipt and Slack for which parts arrived and send only the refused parts.' });
-        }
-        if (whole) {
-            var oneWhole = (single ? total : whole) === 1;
-            lines.push((single ? (oneWhole ? 'It' : 'They') : some(whole)) + ' could not be delivered and ' + (oneWhole ? 'is' : 'are') + ' not retried.');
-            // An older payload without the classes: its partly-delivered count is the only hint (as in 1.13.0 round 6).
-            var partly = legacy && !queued ? count(item.partly_delivered) : 0;
-            lines.push({ strong: single ? 'Fix the cause,' : those(whole) + 'fix the cause,',
-                text: partly ? 'then ask Ouroboros to send only what is missing.' : 'then ask Ouroboros to send again if needed.' });
-            if (partly) lines.push(partsLine(partly));
+        if (queued) lines.push(partOf(queued, 'are still queued and go out by themselves.'));
+        if (settled) lines.push(partOf(settled, 'were delivered or have an unknown outcome.'));
+        if (wholeParted) lines.push((alone ? (total === 1 ? 'It was' : 'They were') : someOf(wholeParted) + (wholeParted === 1 ? ' was' : ' were'))
+            + ' sent in several parts, and every part was refused; none is retried.');
+        if (parted) lines.push(perPartAdvice(single ? 'For the messages sent in parts, fix the cause, then ' : 'Fix the cause, then ', queued));
+        if (single) {
+            var oneSingle = single === 1;
+            lines.push((alone ? (oneSingle ? 'It' : 'They') : someOf(single)) + ' could not be delivered and ' + (oneSingle ? 'is' : 'are') + ' not retried.');
+            lines.push({ strong: parted ? 'For the others, fix the cause,' : 'Fix the cause,', text: 'then ask Ouroboros to send again if needed.' });
         }
         return lines;
     }
@@ -789,17 +817,10 @@ var TransportKit = (function () {
     function running(data) { return !!(data.link && data.link.companion_alive === true); }
     var STORE_UNKNOWN = 'unknown: the queue store could not be read';
 
-    /* Long messages go out in parts; parts Slack already confirmed must not be sent twice. */
-    function partsLine(partly) {
-        var n = count(partly);
-        if (!n) return null;
-        return (n === 1 ? '1 of them was' : num(n) + ' of them were') + ' delivered in part: some of its parts are already in'
-            + ' the conversation. Ask Ouroboros to check slack_receipt for which part numbers arrived and send only the missing parts.';
-    }
-
     var PARTIAL_LINES = {
         process_unknown: 'The system did not answer whether the bridge’s process is running, so the link above is the last state it recorded.',
         host_unanswered: 'Ouroboros did not answer the bridge’s capability check, so reactions and delivery history are not confirmed. It is asked again with the bridge’s next Slack event or send.',
+        host_key_missing: 'The bridge has no Ouroboros service key, so reactions and delivery history are not confirmed.',
         capabilities_unchecked: 'Ouroboros has not been asked about reactions and delivery history yet.',
         no_recent_window: 'This status has no recent-problem window, so recent failures cannot be told from old ones.'
     };
@@ -926,8 +947,11 @@ var TransportKit = (function () {
         if (link.detail === 'store_unreadable') return unreadableGroups(data);
         // Host facts are the bridge's last check unless the system confirmed its process runs now.
         var atLast = running(data) ? '' : ', at the last check';
-        // Ouroboros did not answer the capability check: what it supports is not known (status_summary's signal).
+        // Ouroboros did not answer the capability check, or was never asked (no service key): what it supports is
+        // not known (status_summary's signal).
         var unanswered = data.history_reporting_state === 'unavailable';
+        var noKey = unanswered && data.host_check_cause === 'credential_missing';
+        var why = noKey ? 'the bridge has no Ouroboros service key' : 'Ouroboros didn’t answer';
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as : null;
         var lastError = data.last_error || null;
         var groups = [];
@@ -960,15 +984,17 @@ var TransportKit = (function () {
             rows: [
                 row('Events passed on', !data.host_adapter_checked ? 'not checked yet'
                     : data.host_adapter_state === 'active' ? 'yes' + atLast
+                    : noKey ? 'no' + atLast + ': the bridge has no Ouroboros service key (HOST_SERVICE_TOKEN)'
                     : unanswered ? 'not yet' + atLast + ': Ouroboros didn’t answer the check' + (atLast ? '' : '; asked again with the next event or send')
                     : 'no' + atLast + ': no place was confirmed when the bridge started'),
                 row('Place binding', BINDING_WORD[data.binding_state] || data.binding_state),
-                row('Reactions', unanswered && data.reaction_context_state !== 'available' ? 'not known: Ouroboros didn’t answer'
+                row('Reactions', unanswered && data.reaction_context_state !== 'available' ? 'not known: ' + why
                     : REACTION_WORD[data.reaction_context_state] ? REACTION_WORD[data.reaction_context_state]
                         + (data.reaction_context_state === 'unknown' ? '' : atLast) : data.reaction_context_state),
                 row('Reactions skipped', count(data.reactions_withheld) ? num(count(data.reactions_withheld)) : ''),
                 row('Delivery history', HISTORY_WORD[data.history_reporting_state]
-                    ? (data.history_reporting_state === 'unavailable' && atLast ? 'not recorded at the last check: Ouroboros didn’t answer'
+                    ? (noKey ? 'not recorded' + atLast + ': ' + why
+                        : data.history_reporting_state === 'unavailable' && atLast ? 'not recorded at the last check: Ouroboros didn’t answer'
                         : HISTORY_WORD[data.history_reporting_state] + atLast)
                     : data.history_reporting_state),
                 row('Delivery reports', !K.known(data.delivery_reports_acked) ? '—' : num(count(data.delivery_reports_acked)) + ' recorded'

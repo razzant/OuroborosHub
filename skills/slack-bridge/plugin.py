@@ -456,7 +456,7 @@ def _make_settings_save(api: Any):
                     {
                         "ok": False,
                         "error": (
-                            f"{exc}. Existing settings were left unchanged; repair or "
+                            f"{redact(exc)}. Existing settings were left unchanged; repair or "
                             "remove the file before saving."
                         ),
                     },
@@ -477,7 +477,7 @@ def _make_settings_save(api: Any):
                         binding_id = normalize_binding_id(binding_id)
                     except HostContractError as exc:
                         return JSONResponse(
-                            {"ok": False, "error": str(exc)}, status_code=400
+                            {"ok": False, "error": redact(exc)}, status_code=400
                         )
                 current["binding_id"] = binding_id
             for key, default, minimum, maximum in _WORKER_SETTINGS:
@@ -495,7 +495,7 @@ def _make_settings_save(api: Any):
                 try:
                     current[NEW_ROOT_CHANNELS] = normalize_channel_ids(body[NEW_ROOT_CHANNELS])
                 except ValueError as exc:
-                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+                    return JSONResponse({"ok": False, "error": redact(exc)}, status_code=400)
 
             _save_local_settings(api, current)
             return JSONResponse(

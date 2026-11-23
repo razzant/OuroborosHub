@@ -35,9 +35,18 @@
   `failed_messages_others_delivered_or_unknown` and `failed_messages_every_part_refused` class the
   other refused messages (check `slack_receipt` and send only the refused parts, or send again),
   `uncertain_messages_partly_delivered_none_queued` and `outbound_messages_with_recent_problem_parts`
-  keep the other advice to the messages it fits. The 24-hour window applies to each outcome's own
+  keep the other advice to the messages it fits. `failed_messages_in_parts` and
+  `uncertain_messages_in_parts` count the messages sent in several parts, and
+  `uncertain_messages_with_refused_part` those unknown-outcome messages that also had a part refused.
+  A message in several parts with a refused or unknown part gets one advice, part by part (wait for
+  its queued or held parts, check each part with `slack_receipt`, check unknown parts in Slack itself,
+  send again only the parts confirmed missing), whatever the age of that part and the state of the
+  others; only a single-part message or an action is advised to be sent or repeated whole. The
+  24-hour window applies to each outcome's own
   time, and an item's error and time come from the messages it counts. Each queue in `recent_problems` also gains `last_failed_error` and `last_uncertain_error`
-  (its newest error of that state inside the 24-hour window), so each item carries its own error;
+  (the newest error of that state among the messages its item counts inside the 24-hour window; a
+  message with both a recent refused and a recent unknown part counts as unknown, so its refused
+  part's error is not `last_failed_error`), so each item carries its own error;
   `last_error` stays. `mutations_leased` counts actions in progress and `host_adapter_checked`
   says whether a companion ever recorded its view of the Host binding. All of it is read in one
   transaction, with one grouped pass over the outgoing text rows. `text` and `tone` keep their keys; their words and tone now follow the rule
@@ -53,15 +62,30 @@
   hand-off, a place check before a send, a report) records it once, so "events passed on" and the
   Places line follow it; overlapping checks that end in either order leave what is recorded equal
   to what the bridge knows. A check Ouroboros did not answer is not read as a missing place: the
-  card says the next event or send checks again. While the bridge is not confirmed running, the Host facts read as its last
+  card says the next event or send checks again. A bridge without an Ouroboros service key
+  (`HOST_SERVICE_TOKEN`) asks nothing, so it is not said to be asked again: `host_check_cause`
+  (`credential_missing` or `request_failed`) carries the reason, and the card advises turning the
+  skill off and on, which starts the bridge with its key. Only an answer from Ouroboros changes what the
+  bridge knows about it: a failed request after a confirmed answer keeps that answer, and a
+  recording that failed (a locked database) is written again at the next check without a new request.
+  While the bridge is not confirmed running, the Host facts read as its last
   check, and a store that can't be read leaves every store-based row "unknown".
 - A token could reach the card through error text (an HTTP library prints the `Authorization`
   value of a token with an illegal character); stored error text and every free-text error field
   of `GET status`, records of older versions included, now leave without Slack token shapes, values
-  after `Bearer`/`Authorization` and the configured tokens. Error text in the bridge's logs
-  (formatted messages and tracebacks) and delivery/reaction reports is cleaned the same way
-  before it is logged, stored as a report or sent to the Host. The earlier 1.12.x bridge-hardening
-  findings stay as they were.
+  after `Bearer`/`Authorization` and the configured tokens (also without their outer spaces). A value
+  after `Bearer`/`Authorization` or a token shape is removed up to its closing quote, escaped and
+  control characters included, so no tail of a split token stays; a `ticket` or other credential
+  query parameter in a URL is masked and the rest of the URL kept. Every field the card shows passes
+  through the same cleaning, the workspace name and the sends-as label included. Log lines of the
+  bridge and of the libraries it uses (websockets, httpx, asyncio), and Python's own printouts of an
+  uncaught exception (the main process, threads, asyncio tasks, finalizers, warnings), go through the
+  same cleaning; an error that ends the bridge is logged that way and the process exits with status 1.
+  Every report to the Host leaves without credentials in its error and notes, built now or queued by
+  an older version; its `text`, the copy of the message posted to Slack, is never changed, since
+  Ouroboros matches it against the turn's reply. If Ouroboros already recorded an older report whose
+  cleaned copy now differs (HTTP 409 `presence_receipt_conflict`), the report is done. The message
+  posted to Slack is never changed. The earlier 1.12.x bridge-hardening findings stay as they were.
 - `GET status` answers with string `text` and `tone` on every path, including a queue store that
   can't be read ("Status unknown · the bridge's queue store can't be read").
 - 1.13.0 introduces the companion liveness probe (POSIX signal 0; on Windows `OpenProcess` and
@@ -71,7 +95,9 @@
 - Residuals: a reused PID can still read as alive (there is no companion heartbeat), and on POSIX
   an exited child not yet reaped reads as alive until it is; "waiting unusually long" is not shown
   because status reports no age of the oldest waiting row; each status read still groups the
-  whole outgoing history by message, so its cost grows with history; earlier review findings on
+  whole outgoing history by message, so its cost grows with history (on a synthetic snapshot of
+  40,000 parts the median read took 46.3 ms against 11.0 ms in 1.12.2, at 1,000 parts 1.15 against
+  0.22 ms); earlier review findings on
   bridge hardening are not addressed here.
 
 ## 1.12.2

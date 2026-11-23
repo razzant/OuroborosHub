@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .events import REACTION_EVENTS, ParsedEnvelope, conversation_thread, provider_facts
-from .redaction import redact
+from .redaction import redact, redact_report
 from .slack_api import normalize_text_format
 
 
@@ -240,14 +240,14 @@ class OutboxItem:
         if self.output_ref:
             message["output_ref"] = self.output_ref
         if error:
-            message["error"] = redact(error)
-        return {
+            message["error"] = error
+        return redact_report({
             "schema_version": 1, "delivery_id": self.request_id, "part_id": str(self.chunk_index),
             "state": state, "provider": "slack", "account_id": self.provider_account_id,
             "conversation_id": str(result.get("channel") or self.resolved_channel or self.target),
             "thread_id": thread, "text": self.text, "format": self.text_format,
             "message": message, "origin": self.origin,
-        }
+        })
 
 
     def reaction_report(self, state: str, *, retained: Mapping[str, Any] | None = None, effect: str = "",
@@ -262,14 +262,14 @@ class OutboxItem:
                     "target": {"message_id": str(self.payload.get("ts") or ""),
                                "resolution": "resolved" if retained else "unresolved"},
                     **({"effect": effect} if effect else {})}
-        message = {"kind": "operation", "method": method, "reaction": reaction, **({"error": redact(error)} if error else {})}
-        return {
+        message = {"kind": "operation", "method": method, "reaction": reaction, **({"error": error} if error else {})}
+        return redact_report({
             "schema_version": 1, "delivery_id": self.request_id, "part_id": "0", "state": state,
             "provider": "slack", "account_id": self.provider_account_id,
             "conversation_id": str(self.payload.get("channel") or self.target),
             "thread_id": str(retained["thread_ts"]) if retained else "",
             "text": "", "format": "", "message": message, "origin": self.origin,
-        }
+        })
 
 
 def _iso(epoch: float) -> str:
@@ -1395,9 +1395,12 @@ class BridgeStore:
             db.execute("""UPDATE outbox SET report_state='reporting',report_lease_token=?,
                           report_lease_until=?,report_attempts=report_attempts+1 WHERE id=?""",
                        (token, now + 30, row["id"]))
+        stored = json.loads(row["report_payload_json"])
+        # A report queued by an older version may still hold a credential in its error: it leaves clean.
+        payload = redact_report(stored)
         return {"row_id": int(row["id"]), "lease_token": token,
                 "attempts": int(row["report_attempts"]) + 1,
-                "payload": json.loads(row["report_payload_json"])}
+                "payload": payload, "cleaned": payload != stored}
 
     def finish_report(self, report: Mapping[str, Any], *, error: str = "") -> None:
         delay = min(60, 2 ** min(int(report["attempts"]), 5)) if error else 0
@@ -1650,6 +1653,12 @@ class BridgeStore:
                         THEN 1 ELSE 0 END), 0) AS recent_failed_settled,
                     COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n = 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
                         AS recent_uncertain_partly_settled,
+                    -- Messages sent in several parts: resending one whole could post a part twice.
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND parts_n > 1 THEN 1 ELSE 0 END), 0) AS recent_failed_in_parts,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND parts_n > 1 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_in_parts,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND failed_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_with_failed,
                     COALESCE(SUM(CASE WHEN leased_n > 0 AND recent_f + recent_u > 0 THEN 1 ELSE 0 END), 0)
                         AS msg_leased_recent_problem,
                     COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 AND recent_f + recent_u > 0 THEN 1 ELSE 0 END), 0)
@@ -1667,6 +1676,7 @@ class BridgeStore:
                             THEN 1 ELSE 0 END AS recent_f
                     FROM (
                         SELECT
+                            COUNT(*) AS parts_n,
                             SUM(CASE WHEN state='pending' AND last_error NOT LIKE 'Held:%' THEN 1 ELSE 0 END) AS waiting_n,
                             SUM(CASE WHEN state='pending' AND last_error LIKE 'Held:%' THEN 1 ELSE 0 END) AS held_n,
                             SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END) AS leased_n,
@@ -1861,6 +1871,8 @@ class BridgeStore:
             "host_adapter_state": "missing_binding_id",
             "reaction_context_state": "unknown",
             "workspace_name": "",
+            # Why the Host's capabilities are not confirmed ("credential_missing", "request_failed"); "" otherwise.
+            "host_check_cause": "",
             "workspace_id": "",
             "bot_user_id": "",
             **runtime,
@@ -1927,6 +1939,11 @@ class BridgeStore:
                     - int(text_row["recent_failed_settled"]),
                     # Unknown-outcome messages partly delivered with nothing left queued.
                     "uncertain_messages_partly_delivered_none_queued": int(text_row["recent_uncertain_partly_settled"]),
+                    # Of the counted messages, those sent in several parts (each gets per-part advice, never a
+                    # whole resend), and the unknown-outcome ones that also have a refused part.
+                    "failed_messages_in_parts": int(text_row["recent_failed_in_parts"]),
+                    "uncertain_messages_in_parts": int(text_row["recent_uncertain_in_parts"]),
+                    "uncertain_messages_with_refused_part": int(text_row["recent_uncertain_with_failed"]),
                     "last_failed_at": outbox_prob.get(("text", "failed"), (0, None))[1],
                     "last_uncertain_at": outbox_prob.get(("text", "uncertain"), (0, None))[1],
                     **errors["outbound_text"],
