@@ -71,6 +71,9 @@ async def _run() -> None:
                 raise
 
             runtime: BridgeRuntime | None = None
+            # The daemon owns the final state: cleanup writes "disconnected", so a run that ended with an error
+            # records that error again after cleanup (a clean stop stays "disconnected").
+            fatal: str | None = None
             try:
                 auth = await slack.auth_test()
                 bot_user_id = str(auth.get("user_id") or "")
@@ -122,13 +125,18 @@ async def _run() -> None:
                     stop_task.cancel()
                     await runtime_task
             except Exception as exc:
-                store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
+                fatal = str(exc)[:500]
+                store.set_runtime(socket_state="error", last_socket_error=fatal)
                 raise
             finally:
-                if runtime is not None:
-                    await runtime.close()
-                else:
-                    await slack.aclose()
+                try:
+                    if runtime is not None:
+                        await runtime.close()
+                    else:
+                        await slack.aclose()
+                finally:
+                    if fatal is not None:
+                        store.set_runtime(socket_state="error", last_socket_error=fatal)
         finally:
             try:
                 store.clear_runtime_if_equal("companion_pid", os.getpid())

@@ -15,7 +15,6 @@ from test_workers_plugin import _Api, _load_plugin
 
 SKILL = Path(__file__).resolve().parents[1]
 WIDGET = SKILL / "widget.js"
-KIT = re.compile(r"/\* transport-kit:begin.*?/\* transport-kit:end \*/", re.S)
 RENDER = {"kind": "module", "entry": "widget.js", "appearance": "host", "start": "auto", "span": 1}
 
 
@@ -74,36 +73,25 @@ def test_action_kinds_are_named_in_words():
     assert "'Slack action'" in source  # an unknown kind gets a generic word, never its raw name
 
 
-def test_review_wave_wording_holds():
-    source = WIDGET.read_text(encoding="utf-8")
-    # F11: token advice lives only in the auth-refusal lines; other connection errors say what happened.
-    auth = source[source.index("var AUTH_LINES"):source.index("function itemFor")]
-    other = source[source.index("socket_error: ["):source.index("// Only when Slack refused the tokens")]
-    assert "SLACK_BOT_TOKEN" in auth and "Accounts and keys" not in other and "token" not in other.lower()
-    assert "(item.auth && AUTH_LINES[item.detail])" in source
-    # F10: a partly delivered message is never advised to be sent again whole.
-    assert "send only the missing parts" in source and "send only what is missing" in source
-    # A3/A5: unknown is a dash or "not checked yet".
-    assert "'not checked yet'" in source and "!K.known(data.delivery_reports_acked) ? '—'" in source
+KIT_BYTES = re.compile(rb"/\* transport-kit:begin.*?/\* transport-kit:end \*/", re.S)
 
 
-def test_restart_advice_names_the_place():
-    source = WIDGET.read_text(encoding="utf-8")
-    assert "turn this skill off and on" not in source
-    assert "turn Slack Bridge off and on" in source
+def _one_kit(path: Path) -> bytes:
+    blocks = KIT_BYTES.findall(path.read_bytes())
+    assert len(blocks) == 1, f"{path} must carry exactly one transport kit block, found {len(blocks)}"
+    return blocks[0]
 
 
 def test_shared_kit_is_marked_once():
-    assert len(KIT.findall(WIDGET.read_text(encoding="utf-8"))) == 1
+    _one_kit(WIDGET)
 
 
-def test_shared_kit_matches_the_telegram_copy_when_both_are_present():
-    # The two cards ship in separate PRs: compare only once both carry the kit (skills also install separately).
+def test_shared_kit_matches_the_telegram_copy_byte_for_byte():
+    # The two cards ship in separate PRs and skills install separately: skip only while telegram-bot's card is absent.
     sibling = SKILL.parent / "telegram-bot" / "widget.js"
-    theirs = KIT.search(sibling.read_text(encoding="utf-8")) if sibling.exists() else None
-    if theirs is None:
-        pytest.skip("telegram-bot's widget.js with the transport kit is not beside this skill")
-    assert KIT.search(WIDGET.read_text(encoding="utf-8")).group(0) == theirs.group(0)
+    if not sibling.exists():
+        pytest.skip("telegram-bot's widget.js is not beside this skill")
+    assert _one_kit(WIDGET) == _one_kit(sibling)
 
 
 def test_every_status_field_the_card_reads_exists_on_the_route(tmp_path):

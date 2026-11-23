@@ -569,8 +569,12 @@ var TransportKit = (function () {
             { strong: 'Add SLACK_APP_TOKEN', text: 'in Settings → Accounts and keys and grant it to Slack Bridge in Extensions.' }
         ],
         unreadable_settings: [
-            'This skill’s settings file can’t be read, so the bridge can’t start.',
-            { strong: 'Save Slack Bridge’s settings again', text: 'from its card in Extensions, or remove the damaged file.' }
+            'This skill’s settings file can’t be read, so the bridge can’t start, and its settings form can’t save over the damaged file.',
+            { strong: 'Keep a copy of the damaged settings file, then restore or remove it;', text: 'then open Slack Bridge’s settings in Extensions and save them.' }
+        ],
+        store_unreadable: [
+            'The bridge’s queue store can’t be read, so nothing about the link or the queues is known right now.',
+            { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on; keep the skill’s data folder as it is.' }
         ],
         invalid_binding_id: [
             'The place binding saved in this skill’s settings is not valid.',
@@ -589,17 +593,12 @@ var TransportKit = (function () {
             { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
         ]
     };
-    // Only when Slack refused the tokens (the rule's `auth`, from the skill's own refusal codes).
-    var AUTH_LINES = {
-        socket_error: [
-            'Slack did not accept the bridge’s tokens, so it cannot connect.',
-            { strong: 'Check SLACK_BOT_TOKEN and SLACK_APP_TOKEN', text: 'in Settings → Accounts and keys and the Slack app' + '’s scopes, then in Extensions turn Slack Bridge off and on.' }
-        ],
-        companion_exited_error: [
-            'Slack did not accept the bridge’s tokens, and the bridge stopped.',
-            { strong: 'Check SLACK_BOT_TOKEN and SLACK_APP_TOKEN', text: 'in Settings → Accounts and keys, then in Extensions turn Slack Bridge off and on.' }
-        ]
-    };
+    // Only when Slack refused the tokens (the rule's `auth`, from the skill's own refusal codes). A refusal ends the
+    // bridge's process (the daemon records it after its cleanup), so one set of lines serves both error details.
+    var AUTH_LINES = [
+        'Slack did not accept the bridge’s tokens, so the bridge stopped and cannot connect.',
+        { strong: 'Check SLACK_BOT_TOKEN and SLACK_APP_TOKEN', text: 'in Settings → Accounts and keys and the Slack app’s scopes, then in Extensions turn Slack Bridge off and on.' }
+    ];
 
     function itemFor(item, data) {
         var out = { kind: item.kind, detail: item.detail || '', tone: item.tone, headline: item.headline, at: item.at || null, lines: [] };
@@ -607,7 +606,7 @@ var TransportKit = (function () {
         var one = count(item.messages) + count(item.actions) + count(item.events) === 1;
         var them = one ? 'it' : 'them', are = one ? 'is' : 'are';
         if (item.kind === 'link') {
-            out.lines = ((item.auth && AUTH_LINES[item.detail]) || LINK_LINES[item.detail] || []).slice();
+            out.lines = (item.auth ? AUTH_LINES : LINK_LINES[item.detail] || []).slice();
             if (item.detail === 'host_adapter_inactive' && count(item.count)) {
                 out.lines.splice(1, 0, plural(count(item.count), 'Slack event') + ' wait here.');
             }
@@ -615,8 +614,8 @@ var TransportKit = (function () {
         } else if (item.kind === 'outcome_unknown') {
             out.atLabel = 'last';
             out.lines = [
-                'Sending started, then the connection broke, so nobody knows whether Slack has ' + them + '. Nothing sends ' + them + ' again by itself.',
-                { strong: 'Check whether ' + (one ? 'it' : 'they') + ' arrived in the Slack conversation;', text: 'only you can decide to send ' + them + ' again.' },
+                'The bridge started ' + them + ' but did not get Slack’s confirmation (the link broke, or the send, edit or deletion was cancelled once it had begun), so nobody knows whether ' + (one ? 'it' : 'they') + ' took effect. Nothing repeats ' + them + ' by itself.',
+                { strong: 'Check in Slack whether ' + (one ? 'it' : 'they') + ' took effect', text: '(the message is there, the edit or deletion is done) before asking Ouroboros to repeat ' + them + '.' },
                 partsLine(item.partly_delivered)
             ];
             if (error) out.error = { label: 'What happened' + actionWord(error.operation), text: error.text, at: error.at };
@@ -674,11 +673,12 @@ var TransportKit = (function () {
     function partsLine(partly) {
         var n = count(partly);
         if (!n) return null;
-        return (n === 1 ? '1 of them was' : num(n) + ' of them were') + ' delivered in part: the first parts are already in the'
-            + ' conversation. Ask Ouroboros to check slack_receipt and send only the missing parts.';
+        return (n === 1 ? '1 of them was' : num(n) + ' of them were') + ' delivered in part: some of its parts are already in'
+            + ' the conversation. Ask Ouroboros to check slack_receipt for which part numbers arrived and send only the missing parts.';
     }
 
     var PARTIAL_LINES = {
+        process_unknown: 'The system did not answer whether the bridge’s process is running, so the link above is the last state it recorded.',
         host_unanswered: 'Ouroboros did not answer the bridge’s capability check, so reactions and delivery history are not confirmed. It is asked again when the bridge restarts.',
         capabilities_unchecked: 'Ouroboros has not been asked about reactions and delivery history yet.',
         no_recent_window: 'This status has no recent-problem window, so recent failures cannot be told from old ones.'
@@ -759,10 +759,12 @@ var TransportKit = (function () {
                 { text: count(messages.uncertain) ? num(count(messages.uncertain)) + ' outcome unknown'
                     + (text.last_uncertain_at ? ', last ' + K.clock(text.last_uncertain_at, now) : '') : '', dim: true }
             ])]);
-            var actions = count(data.mutations_delivered) + count(data.mutations_pending) + count(data.mutations_failed) + count(data.mutations_uncertain);
+            var actions = count(data.mutations_delivered) + count(data.mutations_pending) + count(data.mutations_leased)
+                + count(data.mutations_failed) + count(data.mutations_uncertain);
             if (actions) {
                 facts.push(['Actions', parts([
                     { text: num(count(data.mutations_delivered)) + ' done' },
+                    { text: count(data.mutations_leased) ? num(count(data.mutations_leased)) + ' in progress' : '' },
                     { text: count(data.mutations_pending) ? num(count(data.mutations_pending)) + ' waiting' : '' },
                     { text: count(data.mutations_failed) ? num(count(data.mutations_failed)) + ' not done'
                         + (mutations.last_failed_at ? ', last ' + K.clock(mutations.last_failed_at, now) : '') : '', dim: true },
@@ -797,6 +799,8 @@ var TransportKit = (function () {
 
     function detailGroups(data, now) {
         var link = data.link || {};
+        // Ouroboros did not answer the capability check: what it supports is not known (status_summary's signal).
+        var unanswered = data.history_reporting_state === 'unavailable';
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as : null;
         var lastError = data.last_error || null;
         var groups = [];
@@ -805,7 +809,8 @@ var TransportKit = (function () {
             rows: [
                 row('Link', LINK_WORD[link.state] || link.state || '—'),
                 row('Socket Mode', SOCKET_WORD[data.socket_state] || String(data.socket_state || '—')),
-                row('Bridge process', link.companion_alive ? 'running' : 'not running'),
+                row('Bridge process', link.companion_alive === null ? 'not known: the system did not answer'
+                    : link.companion_alive ? 'running' : 'not running'),
                 row('Connected since', link.since ? K.clock(link.since, now) : '', K.exact(link.since)),
                 row('Last Slack event', K.clock(data.last_event_at, now), K.exact(data.last_event_at)),
                 row('Last connection note', data.last_socket_error ? rawText(data.last_socket_error) : ''),
@@ -826,25 +831,27 @@ var TransportKit = (function () {
         groups.push({
             title: 'Ouroboros',
             rows: [
-                row('Events passed on', data.host_adapter_state === 'active' ? 'yes'
-                    : data.host_adapter_state ? 'no: no place was confirmed when the bridge started' : 'not checked yet'),
+                row('Events passed on', !data.host_adapter_checked ? 'not checked yet'
+                    : data.host_adapter_state === 'active' ? 'yes' : 'no: no place was confirmed when the bridge started'),
                 row('Place binding', BINDING_WORD[data.binding_state] || data.binding_state),
-                row('Reactions', REACTION_WORD[data.reaction_context_state] || data.reaction_context_state),
+                row('Reactions', unanswered && data.reaction_context_state !== 'available' ? 'not known: Ouroboros didn’t answer'
+                    : REACTION_WORD[data.reaction_context_state] || data.reaction_context_state),
                 row('Reactions skipped', count(data.reactions_withheld) ? num(count(data.reactions_withheld)) : ''),
                 row('Delivery history', HISTORY_WORD[data.history_reporting_state] || data.history_reporting_state),
                 row('Delivery reports', !K.known(data.delivery_reports_acked) ? '—' : num(count(data.delivery_reports_acked)) + ' recorded'
                     + (count(data.delivery_reports_pending) ? ' · ' + num(count(data.delivery_reports_pending)) + ' waiting' : '')),
                 row('Last report note', data.last_report_error ? rawText(data.last_report_error) : '')
             ].filter(Boolean),
-            note: [data.history_reporting_limitation, data.reaction_context_limitation, data.reaction_history_limitation]
-                .filter(Boolean).join(' ')
+            // The reaction notes say an update is needed; without the Host's answer that is not known, so they wait.
+            note: [data.history_reporting_limitation].concat(unanswered ? []
+                : [data.reaction_context_limitation, data.reaction_history_limitation]).filter(Boolean).join(' ')
         });
         groups.push({
             title: 'Queues',
             rows: [
                 row('Incoming events', counts([
                     [data.inbox_pending, 'waiting or in progress'], [data.inbox_leased, 'being passed on'],
-                    [data.inbox_retained, 'following a reply'], [data.inbox_delivered, 'handled'],
+                    [data.inbox_retained, 'of them following a reply'], [data.inbox_delivered, 'handled'],
                     [data.inbox_failed, 'not handled'], [data.inbox_ignored, 'ignored']
                 ])),
                 row('Outgoing parts and actions', counts([
@@ -853,7 +860,7 @@ var TransportKit = (function () {
                     [data.outbox_failed, 'not delivered'], [data.outbox_uncertain, 'outcome unknown']
                 ])),
                 row('Of them, actions', counts([
-                    [data.mutations_pending, 'waiting'], [data.mutations_delivered, 'done'],
+                    [data.mutations_pending, 'waiting'], [data.mutations_leased, 'in progress'], [data.mutations_delivered, 'done'],
                     [data.mutations_failed, 'not done'], [data.mutations_uncertain, 'outcome unknown']
                 ]))
             ].filter(Boolean),

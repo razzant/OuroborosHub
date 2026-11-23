@@ -6,7 +6,7 @@
     "Slack"
   ],
   "description": "Slack connector for workspace places, with typed conversation facts, durable replies, files, and live place-state delivery holds.",
-  "digest": "0d4a2525387342019a0097f516840142cdcd9e48055ab5e02dabee77b3ed33f9",
+  "digest": "8fd7b763b8c39417a1466077adeb6b2516eb8892b1fe7df02a2710269531c2be",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",

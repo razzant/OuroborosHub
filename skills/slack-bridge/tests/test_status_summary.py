@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -192,12 +191,6 @@ def test_clear_runtime_if_equal_never_erases_a_newer_companion_pid(tmp_path):
         store.close()
 
 
-def test_daemon_exit_clears_only_its_own_pid():
-    daemon = (Path(__file__).resolve().parents[1] / "scripts" / "slack_daemon.py").read_text(encoding="utf-8")
-    assert 'store.clear_runtime_if_equal("companion_pid", os.getpid())' in daemon
-    assert "set_runtime(companion_pid=None)" not in daemon
-
-
 class _Fn:
     def __init__(self, result):
         self.result, self.argtypes, self.restype, self.calls = result, None, None, []
@@ -232,6 +225,30 @@ def test_windows_probe_declares_handle_signatures(monkeypatch):
     assert kernel32.CloseHandle.restype == wintypes.BOOL
 
 
+def test_windows_probe_that_cannot_read_the_exit_code_says_not_known(monkeypatch):
+    ctypes, wintypes, kernel32 = _fake_windows(259)
+    kernel32.GetExitCodeProcess = _Fn(0)  # the call failed
+    monkeypatch.setitem(__import__("sys").modules, "ctypes", ctypes)
+    monkeypatch.setitem(__import__("sys").modules, "ctypes.wintypes", wintypes)
+    monkeypatch.setattr(store_mod, "_IS_WINDOWS", True)
+    assert store_mod._pid_is_alive(4242) is None
+    assert kernel32.CloseHandle.calls == [(0x7FFF_0000_1234,)]
+
+
+def test_an_unanswered_process_probe_reads_as_partly_known(tmp_path):
+    store = BridgeStore(tmp_path)
+    try:
+        store.set_runtime(socket_state="connected", host_adapter_state="active", companion_pid=4242,
+                          reaction_context_state="available", history_reporting_state="supported")
+        payload = store.status(pid_alive=lambda _pid: None)
+    finally:
+        store.close()
+    assert payload["link"]["state"] == "connected" and payload["link"]["companion_alive"] is None
+    summary = summarize(payload)
+    assert (summary["text"], summary["tone"]) == ("Connected · state partly known", "muted")
+    assert summary["attention"][0]["gaps"] == ["process_unknown"]
+
+
 @pytest.mark.parametrize(("exit_code", "alive"), [(259, True), (0, False)])
 def test_windows_probe_reads_exit_code_without_signal_zero(monkeypatch, exit_code, alive):
     ctypes, wintypes, kernel32 = _fake_windows(exit_code)
@@ -256,3 +273,121 @@ def test_windows_probe_counts_access_denied_as_alive(monkeypatch):
 def test_posix_probe_still_sees_this_process():
     assert store_mod._pid_is_alive(os.getpid()) is True
     assert store_mod._pid_is_alive(True) is False
+
+
+# ---------- order inside one tone ----------
+
+def test_ties_inside_one_tone_follow_the_order_of_consequence():
+    amber = _with_recent(outbound_text={"uncertain": 1, "uncertain_messages": 1})
+    amber.update(outbox_held=1, outbound_text_chunks={"held": 1}, outbound_messages={"held": 1},
+                 held_reasons=[{"reason": "Check this skill's access in Skills.", "note": SKILL_ACCESS_REFUSED, "count": 1}],
+                 reaction_context_state="update_required", reactions_withheld=2)
+    items = attention_items(amber)
+    assert [(item["kind"], item["tone"]) for item in items] == [
+        ("outcome_unknown", "warn"), ("held", "warn"), ("reactions", "warn")]
+    summary = summarize(amber)
+    assert summary["text"] == "Connected · outcome unknown for 1 message · 2 more need attention"
+    red = _with_recent(inbound={"failed": 2}, outbound_text={"failed": 1, "failed_messages": 1})
+    assert [item["kind"] for item in attention_items(red)] == ["not_delivered", "not_handled"]
+    assert summarize(red)["text"] == "Connected · 1 message not delivered · 1 more needs attention"
+
+
+def test_the_first_lines_dot_and_words_name_the_same_item():
+    payload = _with_recent(outbound_text={"uncertain": 1, "uncertain_messages": 1})
+    payload.update(link={"state": "connected", "detail": "host_adapter_inactive", "companion_alive": True})
+    summary = summarize(payload)
+    first = summary["attention"][0]
+    assert first["kind"] == "link" and summary["tone"] == first["tone"] == "warn"
+    assert summary["text"] == "Connected · Slack events are not passed to Ouroboros · 1 more needs attention"
+
+
+# ---------- errors per state ----------
+
+def test_an_item_carries_only_its_own_queues_error_of_its_own_state():
+    payload = _with_recent(
+        outbound_text={"failed": 1, "failed_messages": 1, "uncertain": 1, "uncertain_messages": 1,
+                       "last_error": {"at": "2026-11-22T21:00:00Z", "state": "uncertain", "text": "ReadTimeout"},
+                       "last_failed_error": {"at": "2026-11-22T20:00:00Z", "state": "failed", "text": "not_in_channel"},
+                       "last_uncertain_error": {"at": "2026-11-22T21:00:00Z", "state": "uncertain", "text": "ReadTimeout"}},
+        # A refusal days ago: the queue counts no recent failure, so its error is attached to nothing.
+        mutations={"failed": 0, "last_error": {"at": "2026-11-17T09:00:00Z", "state": "failed", "operation": "upload_file",
+                                               "text": "missing_scope"},
+                   "last_failed_error": None, "last_uncertain_error": None},
+    )
+    items = {item["kind"]: item for item in attention_items(payload)}
+    assert items["not_delivered"]["error"]["text"] == "not_in_channel"
+    assert items["outcome_unknown"]["error"]["text"] == "ReadTimeout"
+
+
+def test_an_older_payload_uses_last_error_only_for_its_own_state_and_count():
+    payload = _with_recent(outbound_text={"failed": 1, "failed_messages": 1},
+                           mutations={"last_error": {"at": "2026-11-22T21:00:00Z", "state": "failed", "text": "is_archived"}})
+    assert attention_items(payload)[0]["error"] is None
+
+
+# ---------- holds ----------
+
+@pytest.mark.parametrize(("note", "tone"), [
+    (SKILL_ACCESS_REFUSED, "warn"),
+    ("Held: Connect this place in Consciousness > Places.", "warn"),  # the Host's words for a place not connected
+    ("Held: Ops room is paused", "muted"),
+    ("Held: Team room is silent", "muted"),
+    ("Held: It retries by itself.", "muted"),
+])
+def test_a_hold_is_amber_only_when_its_reason_needs_the_owner(note, tone):
+    payload = _quiet(outbox_held=1, outbound_text_chunks={"held": 1}, outbound_messages={"held": 1},
+                     held_reasons=[{"reason": note[len("Held:"):].strip(), "note": note, "count": 1}])
+    assert attention_items(payload)[0]["tone"] == tone
+
+
+def test_the_owners_hold_reasons_come_first():
+    payload = _quiet(outbox_held=4, outbound_text_chunks={"held": 4}, outbound_messages={"held": 4},
+                     held_reasons=[{"reason": "Ops room is paused", "note": "Held: Ops room is paused", "count": 3},
+                                   {"reason": "Connect this place in Consciousness > Places.",
+                                    "note": "Held: Connect this place in Consciousness > Places.", "count": 1}],
+                     last_delivery_error="Held: Ops room is paused")
+    held = attention_items(payload)[0]
+    assert held["tone"] == "warn"
+    assert [reason["reason"] for reason in held["reasons"]] == [
+        "Connect this place in Consciousness > Places.", "Ops room is paused"]
+
+
+def test_the_neutral_hold_notes_are_the_skills_own():
+    from lib.host_adapter import PLACE_POLICY_UNREAD
+    from lib.runtime import _REACTION_HISTORY_UNAVAILABLE
+    from lib.status_summary import owner_hold
+    assert not owner_hold(PLACE_POLICY_UNREAD) and not owner_hold(_REACTION_HISTORY_UNAVAILABLE)
+
+
+# ---------- hand-offs waiting and refusals ----------
+
+def test_waiting_hand_offs_are_said_in_neutral_ink_and_quiet_rows_stay_clear():
+    waiting = summarize(_quiet(inbox_retrying={"count": 2, "last_error": {"at": "2026-11-22T22:00:00Z",
+                                                                          "text": "HostRetryError: capacity full"}}))
+    assert (waiting["text"], waiting["tone"]) == ("Connected · 2 Slack events wait to be passed to Ouroboros", "muted")
+    assert waiting["attention"][0]["error"]["text"] == "HostRetryError: capacity full"
+    assert summarize(_quiet(inbox_retrying={"count": 0, "last_error": None}))["tone"] == "ok"
+    # When no place was confirmed, that item already explains the wait; no second item.
+    inactive = _quiet(link={"state": "connected", "detail": "host_adapter_inactive"},
+                      inbox_retrying={"count": 2, "last_error": None})
+    assert [item["kind"] for item in attention_items(inactive)] == ["link"]
+
+
+def test_auth_codes_match_the_socket_modes_own_list():
+    from lib.socket_mode import _FATAL_AUTH_ERRORS
+    from lib.status_summary import AUTH_REFUSALS
+    assert AUTH_REFUSALS == _FATAL_AUTH_ERRORS
+
+
+def test_only_an_auth_refusal_reads_as_a_token_problem():
+    from lib.status_summary import auth_refused
+    assert auth_refused("invalid_auth") and auth_refused("Slack API error: token_revoked")
+    assert not auth_refused("ConnectionResetError: [Errno 54] Connection reset by peer")
+    assert not auth_refused("")
+    refused = attention_items(_quiet(link={"state": "error", "detail": "socket_error", "error": "invalid_auth"}))[0]
+    assert refused["auth"] is True and refused["headline"] == "Slack refused the bridge's tokens"
+    other = attention_items(_quiet(link={"state": "error", "detail": "companion_exited_error",
+                                         "error": "OSError: disk full"}))[0]
+    assert other["auth"] is False and other["headline"] == "The bridge stopped after an error"
+    assert summarize(_quiet(link={"state": "error", "detail": "socket_error", "error": "timed out"}))["text"] == (
+        "Connection error · the Slack connection failed")

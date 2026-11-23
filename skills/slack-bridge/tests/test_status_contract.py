@@ -157,6 +157,8 @@ def test_fresh_install_edge_reports_not_configured_zero_recent_and_null_last_err
             "last_failed_at": None,
             "last_uncertain_at": None,
             "last_error": None,
+            "last_failed_error": None,
+            "last_uncertain_error": None,
         },
         "outbound_text": {
             "failed": 0,
@@ -168,6 +170,8 @@ def test_fresh_install_edge_reports_not_configured_zero_recent_and_null_last_err
             "last_failed_at": None,
             "last_uncertain_at": None,
             "last_error": None,
+            "last_failed_error": None,
+            "last_uncertain_error": None,
         },
         "mutations": {
             "failed": 0,
@@ -175,6 +179,8 @@ def test_fresh_install_edge_reports_not_configured_zero_recent_and_null_last_err
             "last_failed_at": None,
             "last_uncertain_at": None,
             "last_error": None,
+            "last_failed_error": None,
+            "last_uncertain_error": None,
         },
     }
     assert payload["outbound_text_chunks"] == {
@@ -239,22 +245,45 @@ def test_dead_companion_edge_never_reports_connected_starting_or_reconnecting(tm
         }
 
 
-def test_daemon_clears_companion_pid_on_clean_and_error_exit(tmp_path, monkeypatch) -> None:
+def _load_daemon():
     daemon_path = Path(__file__).resolve().parents[1] / "scripts" / "slack_daemon.py"
     spec = importlib.util.spec_from_file_location("slack_daemon_pid_test", daemon_path)
     assert spec is not None and spec.loader is not None
     daemon = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(daemon)
+    return daemon
 
-    class _FakeSlack:
-        def __init__(self, *_args):
-            pass
 
-        async def auth_test(self):
-            return {"user_id": "U09BOT", "team_id": "T09TEAM", "team": "Northstar Labs"}
+class _SignedInSlack:
+    """auth.test answers; opening Socket Mode answers ``socket_error`` when one is set."""
 
-        async def aclose(self):
-            pass
+    socket_error = ""
+
+    def __init__(self, *_args):
+        pass
+
+    async def auth_test(self):
+        return {"user_id": "U09BOT", "bot_id": "B09BOT", "team_id": "T09TEAM", "team": "Northstar Labs"}
+
+    async def open_socket_url(self):
+        from lib.slack_api import SlackApiError
+        raise SlackApiError(self.socket_error)
+
+    async def aclose(self):
+        pass
+
+
+def _run_daemon(daemon, monkeypatch):
+    async def run():
+        monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *_a: None)
+        await daemon._run()
+
+    asyncio.run(run())
+
+
+def test_daemon_clean_exit_ends_disconnected_and_keeps_a_successors_pid(tmp_path, monkeypatch) -> None:
+    daemon = _load_daemon()
+    successor = os.getpid() + 1
 
     class _FakeRuntime:
         def __init__(self, *, store, **_kwargs):
@@ -263,29 +292,83 @@ def test_daemon_clears_companion_pid_on_clean_and_error_exit(tmp_path, monkeypat
 
         async def run(self):
             self.store.set_runtime(socket_state="connected", host_adapter_state="active")
+            # A newer companion started and wrote its PID before this one finished.
+            self.store.set_runtime(companion_pid=successor)
 
         async def close(self):
             self.store.set_runtime(socket_state="disconnected")
 
     monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
-    monkeypatch.setattr(daemon, "SlackClient", _FakeSlack)
+    monkeypatch.setattr(daemon, "SlackClient", _SignedInSlack)
     monkeypatch.setattr(daemon, "BridgeRuntime", _FakeRuntime)
     monkeypatch.setattr(daemon, "create_host_adapter", lambda *_a, **_k: object())
+    _run_daemon(daemon, monkeypatch)
+    store = BridgeStore(tmp_path)
+    try:
+        assert store.runtime_value("companion_pid") == successor  # never erased by the exiting one
+        assert store.runtime_value("socket_state") == "disconnected"
+        store.set_runtime(companion_pid=None)
+    finally:
+        store.close()
+    payload = _read_status_route(_TokensApi(tmp_path))
+    assert payload["link"] == {"state": "disconnected", "detail": "disconnected", "companion_alive": False,
+                               "since": None, "error": ""}
 
-    async def run_clean():
-        monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *_a: None)
-        await daemon._run()
 
-    asyncio.run(run_clean())
+def test_daemon_error_exit_clears_its_own_pid_and_keeps_the_error(tmp_path, monkeypatch) -> None:
+    daemon = _load_daemon()
+
+    class _FailingRuntime:
+        def __init__(self, *, store, **_kwargs):
+            self.store = store
+
+        async def run(self):
+            raise OSError("disk full")
+
+        async def close(self):
+            self.store.set_runtime(socket_state="disconnected")
+
+    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "SlackClient", _SignedInSlack)
+    monkeypatch.setattr(daemon, "BridgeRuntime", _FailingRuntime)
+    monkeypatch.setattr(daemon, "create_host_adapter", lambda *_a, **_k: object())
+    with pytest.raises(OSError):
+        _run_daemon(daemon, monkeypatch)
     payload = _read_status_route(_TokensApi(tmp_path))
     assert payload["companion_pid"] is None
-    assert payload["link"] == {
-        "state": "disconnected",
-        "detail": "disconnected",
-        "companion_alive": False,
-        "since": None,
-        "error": "",
-    }
+    assert payload["link"] == {"state": "error", "detail": "companion_exited_error", "companion_alive": False,
+                               "since": None, "error": "disk full"}
+    assert payload["text"] == "Connection error · the bridge stopped after an error"
+    assert payload["attention"][0]["auth"] is False
+
+
+@pytest.mark.parametrize("code", ["invalid_auth", "missing_scope"])
+def test_app_token_refused_after_sign_in_reaches_the_token_advice(tmp_path, monkeypatch, code) -> None:
+    """The real daemon and BridgeRuntime: auth.test succeeds, then Slack refuses to open Socket Mode."""
+    daemon = _load_daemon()
+
+    class _Host:
+        available = False
+        delivery_reporting_status = "unsupported"
+        reaction_context = 1  # a current Host: the only item left is the refusal itself
+        explicit_completion = 1
+
+    slack = type("RefusingSlack", (_SignedInSlack,), {"socket_error": code})
+    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "SlackClient", slack)
+    monkeypatch.setattr(daemon, "create_host_adapter", lambda *_a, **_k: _Host())
+    from lib.slack_api import SlackApiError
+    with pytest.raises(SlackApiError):
+        _run_daemon(daemon, monkeypatch)
+    payload = _read_status_route(_TokensApi(tmp_path))
+    assert payload["companion_pid"] is None
+    assert payload["socket_state"] == "error"
+    assert payload["link"] == {"state": "error", "detail": "companion_exited_error", "companion_alive": False,
+                               "since": None, "error": f"Slack API error: {code}"}
+    assert payload["text"] == "Connection error · Slack refused the bridge's tokens"
+    assert payload["tone"] == "error"
+    item = payload["attention"][0]
+    assert (item["kind"], item["auth"], item["error"]) == ("link", True, {"text": f"Slack API error: {code}"})
 
 
 def test_link_enum_covers_live_connected_adapter_reconnecting_settings_and_token_states(tmp_path) -> None:
@@ -449,6 +532,9 @@ def test_recent_problems_and_old_failure_outside_window_edge(tmp_path) -> None:
             "last_failed_at": _iso_z(ancient_ts),
             "last_uncertain_at": None,
             "last_error": {"at": _iso_z(ancient_ts), "state": "failed", "text": "old inbound turn failure"},
+            # Outside the window: no error of either state is attached to an item.
+            "last_failed_error": None,
+            "last_uncertain_error": None,
         },
         "outbound_text": {
             "failed": 0,
@@ -460,6 +546,8 @@ def test_recent_problems_and_old_failure_outside_window_edge(tmp_path) -> None:
             "last_failed_at": _iso_z(old_ts),
             "last_uncertain_at": None,
             "last_error": {"at": _iso_z(old_ts), "state": "failed", "text": "channel_not_found"},
+            "last_failed_error": None,
+            "last_uncertain_error": None,
         },
         "mutations": {
             "failed": 0,
@@ -472,6 +560,8 @@ def test_recent_problems_and_old_failure_outside_window_edge(tmp_path) -> None:
                 "operation": "update_message",
                 "text": "timeout_after_send",
             },
+            "last_failed_error": None,
+            "last_uncertain_error": None,
         },
     }
     assert old_only["last_error"] == {
@@ -718,3 +808,222 @@ def test_units_and_logical_message_counts_separate_3900_char_chunks_messages_and
     assert units["outbound_messages"] == "logical_text_requests"
     assert units["mutations"] == "outbox_subset_operations"
     assert "3,900-char" in units["note"] and "request_ids" in units["note"]
+
+
+# ---------- one read, queue rows, holds and parts (moved from the review-wave module) ----------
+
+def _quiet_route_payload() -> dict:
+    return {"link": {"state": "connected", "detail": "ok", "companion_alive": True, "since": None, "error": ""},
+            "reaction_context_state": "available", "history_reporting_state": "supported"}
+
+
+def test_status_reads_every_counter_in_one_transaction(tmp_path) -> None:
+    store = BridgeStore(tmp_path)
+    try:
+        store.status()  # opens the kept connection
+        seen: list[str] = []
+        store._db.set_trace_callback(seen.append)
+        store.status()
+        store._db.set_trace_callback(None)
+        statements = [line.strip().split()[0].upper() for line in seen if line.strip()]
+        assert statements[0] == "BEGIN" and statements[-1] == "COMMIT", statements
+        assert set(statements[1:-1]) == {"SELECT"}, statements
+        # The outgoing text rows are grouped by message once, not once per counter.
+        assert sum("GROUP BY request_id" in line for line in seen) == 1
+    finally:
+        store.close()
+
+
+def test_events_the_host_refused_for_now_are_counted_from_their_rows_and_accepted_ones_are_not(tmp_path) -> None:
+    store = BridgeStore(tmp_path)
+    try:
+        for index in (1, 2, 3, 4):
+            raw = _envelope(index, channel=f"C09SYNTH0{index}")
+            store.ingest_envelope(raw, parse_socket_envelope(raw, bot_user_id="U_BOT"))
+        first, second, accepted = store.claim_inbox(), store.claim_inbox(), store.claim_inbox()
+        # A refusal the worker will retry, and a turn that is simply running (its routine note).
+        store.retry_inbox(first.row_id, first.lease_token, "HostRetryError: capacity full", delay_seconds=30.0)
+        store.retry_inbox(second.row_id, second.lease_token, "Host turn state: pending", delay_seconds=5.0)
+        # Ouroboros accepted this one (its reference is stored); only reading its turn's status failed.
+        store.set_host_reference(accepted.row_id, accepted.lease_token, "deferred:turn-synth-1")
+        store.retry_inbox(accepted.row_id, accepted.lease_token, "status poll: ReadTimeout", delay_seconds=5.0)
+        status = store.status()
+        assert status["inbox_retrying"]["count"] == 1  # the fourth row (attempts=0) is an ordinary wait
+        assert status["inbox_retrying"]["last_error"]["text"] == "HostRetryError: capacity full"
+        assert status["inbox_retrying"]["last_error"]["at"].endswith("Z")
+    finally:
+        store.close()
+
+
+def test_every_hold_reason_is_read_with_its_count(tmp_path) -> None:
+    from lib.status_summary import SKILL_ACCESS_REFUSED
+    store = BridgeStore(tmp_path)
+    try:
+        for index in range(4):
+            store.enqueue_outbox(request_id=f"held-{index}", target=f"C09HOLD{index}", thread_ts="", chunks=("hold",))
+        for index in range(4):
+            item = store.claim_outbox()
+            store.hold_outbox(item, SKILL_ACCESS_REFUSED if index == 0 else "Held: Ops room is paused")
+        assert store.status()["held_reasons"] == [
+            {"reason": "Ops room is paused", "note": "Held: Ops room is paused", "count": 3},
+            {"reason": "Check this skill's access in Skills.", "note": SKILL_ACCESS_REFUSED, "count": 1},
+        ]
+    finally:
+        store.close()
+
+
+def test_partly_delivered_messages_are_counted(tmp_path) -> None:
+    store = BridgeStore(tmp_path)
+    try:
+        store.enqueue_outbox(request_id="long", target="C09LONG", thread_ts="", chunks=("part one", "part two"))
+        first = store.claim_outbox()
+        store.complete_outbox(first.row_id, first.lease_token, provider_message_ts="1.1")
+        second = store.claim_outbox()
+        store.fail_outbox(second.row_id, second.lease_token, "msg_too_long", state="failed")
+        store.enqueue_outbox(request_id="short", target="C09SHORT", thread_ts="", chunks=("only part",))
+        only = store.claim_outbox()
+        store.fail_outbox(only.row_id, only.lease_token, "channel_not_found", state="failed")
+        text = store.status()["recent_problems"]["outbound_text"]
+        assert text["failed_messages"] == 2
+        assert text["failed_messages_partly_delivered"] == 1
+        assert text["uncertain_messages_partly_delivered"] == 0
+    finally:
+        store.close()
+
+
+def test_a_problem_part_counts_while_another_part_waits_or_is_held(tmp_path) -> None:
+    from lib.status_summary import summarize
+    store = BridgeStore(tmp_path)
+    try:
+        store.enqueue_outbox(request_id="mixed", target="C09MIX", thread_ts="", chunks=("one", "two", "three"))
+        first = store.claim_outbox()
+        store.complete_outbox(first.row_id, first.lease_token, provider_message_ts="1.1")
+        second = store.claim_outbox()
+        store.fail_outbox(second.row_id, second.lease_token, "ReadTimeout after send", state="uncertain")
+        waiting = store.status()
+        text = waiting["recent_problems"]["outbound_text"]
+        assert (text["uncertain_messages"], text["uncertain_messages_partly_delivered"]) == (1, 1)
+        assert waiting["outbound_messages"]["waiting"] == 1  # the queue view still says the third part waits
+        payload = {**waiting, **_quiet_route_payload()}
+        summary = summarize(payload)
+        assert summary["text"] == "Connected · outcome unknown for 1 message" and summary["tone"] == "warn"
+        third = store.claim_outbox()
+        store.hold_outbox(third, "Held: Ops room is paused")
+        held = store.status()
+        assert held["recent_problems"]["outbound_text"]["uncertain_messages"] == 1
+        assert held["outbound_messages"]["held"] == 1
+        payload = {**held, **_quiet_route_payload()}
+        kinds = [item["kind"] for item in summarize(payload)["attention"]]
+        assert kinds == ["outcome_unknown", "held"]
+    finally:
+        store.close()
+
+
+def test_actions_in_progress_are_counted(tmp_path) -> None:
+    store = BridgeStore(tmp_path)
+    try:
+        store.enqueue_mutation(request_id="edit-1", operation="update_message", payload={"channel": "C1", "ts": "1.0"})
+        assert store.claim_outbox() is not None
+        status = store.status()
+        assert status["outbox_leased"] == 1 and status["outbound_text_chunks"]["leased"] == 0
+        assert status["mutations_leased"] == 1
+    finally:
+        store.close()
+
+
+def test_each_queue_keeps_its_newest_error_per_state_inside_the_window(tmp_path) -> None:
+    from lib.status_summary import attention_items
+    now = 1795384800.0
+    store = BridgeStore(tmp_path)
+    try:
+        # An upload refused five days ago, then today a text message refused and a later one with an unknown outcome.
+        store.enqueue_mutation(request_id="old-upload", operation="upload_file", payload={"channel": "C1", "path": "/x"})
+        old = store.claim_outbox()
+        store.fail_outbox(old.row_id, old.lease_token, "missing_scope", state="failed")
+        _set_row_time(store.path, "outbox", "id=?", (old.row_id,), now - 5 * 86400)
+        store.enqueue_outbox(request_id="refused", target="C09A", thread_ts="", chunks=("a",))
+        refused = store.claim_outbox()
+        store.fail_outbox(refused.row_id, refused.lease_token, "invalid_arguments", state="failed")
+        _set_row_time(store.path, "outbox", "id=?", (refused.row_id,), now - 600)
+        store.enqueue_outbox(request_id="unknown", target="C09B", thread_ts="", chunks=("b",))
+        unknown = store.claim_outbox()
+        store.fail_outbox(unknown.row_id, unknown.lease_token, "ReadTimeout", state="uncertain")
+        _set_row_time(store.path, "outbox", "id=?", (unknown.row_id,), now - 60)
+        status = store.status(now=now, pid_alive=lambda _pid: True)
+    finally:
+        store.close()
+    text, mutations = status["recent_problems"]["outbound_text"], status["recent_problems"]["mutations"]
+    assert text["last_error"]["text"] == "ReadTimeout"  # compatibility: the newest of either state
+    assert text["last_failed_error"] == {"at": _iso_z(now - 600), "state": "failed", "text": "invalid_arguments"}
+    assert text["last_uncertain_error"] == {"at": _iso_z(now - 60), "state": "uncertain", "text": "ReadTimeout"}
+    assert mutations["last_failed_error"] is None and mutations["last_error"]["text"] == "missing_scope"
+    items = {item["kind"]: item for item in attention_items({**status, **_quiet_route_payload()})}
+    assert items["not_delivered"]["error"]["text"] == "invalid_arguments"  # not the old upload's refusal
+    assert items["outcome_unknown"]["error"]["text"] == "ReadTimeout"
+
+
+def test_a_recheck_that_finds_the_host_binding_updates_events_passed_on(tmp_path) -> None:
+    from lib.runtime import _discover_reporting
+
+    class _Host:
+        available = False
+
+        async def discover_delivery_support(self):
+            return 0
+
+    store = BridgeStore(tmp_path)
+    try:
+        host = _Host()
+        store.set_runtime(host_adapter_state="missing_binding_id")  # what run() recorded at start
+        asyncio.run(_discover_reporting(host, store))
+        assert store.runtime_value("host_adapter_state") == "missing_binding_id"
+        host.available = True  # lib/host_adapter.py: a later /identity answer restores the binding
+        asyncio.run(_discover_reporting(host, store))
+        assert store.runtime_value("host_adapter_state") == "active"
+    finally:
+        store.close()
+
+
+def test_a_bridge_that_never_started_has_not_checked_the_host(tmp_path) -> None:
+    fresh = _read_status_route(_TokensApi(tmp_path))
+    assert fresh["host_adapter_checked"] is False
+    assert fresh["host_adapter_state"] == "missing_binding_id"  # the existing key keeps its old default
+    store = BridgeStore(tmp_path)
+    store.set_runtime(host_adapter_state="missing_binding_id")
+    store.close()
+    assert _read_status_route(_TokensApi(tmp_path))["host_adapter_checked"] is True
+
+
+def test_status_route_answers_text_and_tone_on_every_path(tmp_path) -> None:
+    """The next shared card accepts a status only with string text and tone; every route path gives both."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    assert child.wait(timeout=10.0) == 0
+    seen = {}
+
+    def read(name, api):
+        payload = _read_status_route(api)
+        assert isinstance(payload["text"], str) and payload["text"], (name, payload.get("text"))
+        assert isinstance(payload["tone"], str) and payload["tone"] in {"ok", "muted", "warn", "error"}, name
+        seen[name] = (payload["text"], payload["tone"])
+        return payload
+
+    read("not configured", _TokensApi(tmp_path / "a", bot_token="", app_token=""))
+    read("never started", _TokensApi(tmp_path / "a"))
+    store = BridgeStore(tmp_path / "b")
+    store.set_runtime(socket_state="connected", host_adapter_state="active", companion_pid=child.pid)
+    store.close()
+    read("companion dead", _TokensApi(tmp_path / "b"))
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "settings.json").write_bytes(b"{corrupt json")
+    read("settings unreadable", _TokensApi(tmp_path / "c"))
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "slack_bridge.sqlite3").write_bytes(b"this is not a database" * 64)
+    unreadable = read("store unreadable", _TokensApi(tmp_path / "d"))
+    assert unreadable["link"]["detail"] == "store_unreadable" and unreadable["link"]["error"]
+    assert seen == {
+        "not configured": ("Not set up · Slack tokens are missing", "warn"),
+        "never started": ("Disconnected · the bridge has not started", "error"),
+        "companion dead": ("Disconnected · the bridge process is not running", "error"),
+        "settings unreadable": ("Connection error · the bridge settings can't be read", "error"),
+        "store unreadable": ("Status unknown · the bridge's queue store can't be read", "error"),
+    }

@@ -6,9 +6,11 @@ import os
 import pathlib
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from starlette.responses import JSONResponse
@@ -118,11 +120,18 @@ def _make_slack_send(api: Any):
 
 def _make_status(api: Any):
     def read_status() -> dict[str, Any]:
-        store = BridgeStore(_state_dir(api))
+        store_error = ""
         try:
-            payload = store.status()
-        finally:
-            store.close()
+            store = BridgeStore(_state_dir(api))
+            try:
+                payload = store.status()
+            finally:
+                store.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            # The queue store can't be read: say that, with the settings facts below, instead of failing the route.
+            store_error = f"{type(exc).__name__}: {exc}"[:500]
+            payload = {"socket_state": None, "link": {"companion_alive": False}, "store_error": store_error,
+                       "observed_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
         identity = payload.pop("connector_identity", {})
         if payload.get("presence_identity") == 1 and identity:
             payload["identity"] = identity
@@ -151,9 +160,11 @@ def _make_status(api: Any):
                 "local_settings_error": settings_error,
             }
         )
-        payload["link"] = derive_link_state(
-            payload, companion_alive=bool(payload["link"]["companion_alive"])
-        )
+        alive = payload["link"]["companion_alive"]
+        payload["link"] = derive_link_state(payload, companion_alive=None if alive is None else bool(alive))
+        if store_error:
+            payload["link"] = {"state": "error", "detail": "store_unreadable", "companion_alive": None, "since": None,
+                               "error": store_error}
         # One rule for the Places line and the card's first line: the same words, the worst current tone.
         summary = summarize_status(payload)
         payload.update(text=summary["text"], tone=summary["tone"], attention=summary["attention"],

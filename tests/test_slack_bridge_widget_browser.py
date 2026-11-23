@@ -1,7 +1,8 @@
 """Slack Bridge card through the core's real module bridge and the skill's own routes.
 
 Opt in with OUROBOROS_THEME_CORE_ROOT (a core checkout with web/modules/widget_module.js). Synthetic private state
-only: no companion, no runtime loop, no Slack or Host call. Needs only skills/slack-bridge.
+only: no companion, no runtime loop, no Slack or Host call. Needs skills/slack-bridge and tests/widget_lease_gateway.py,
+which answers the card's route lease as the core's controls do.
 """
 import asyncio
 import importlib.util
@@ -20,7 +21,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from widget_lease_gateway import RESOURCES, LeaseGateway, controls  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
+# The card's live publication as a host lists it (HOST mounts the same tab id and generation).
+CARDS = {'slack-bridge': ('slack_presence', 'fixture-generation')}
 HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 <style>body{margin:0;background:#0f0f11}.widgets-frame{width:100%;height:var(--widget-frame-height,320px);border:0;display:block}</style></head>
 <body><section style="width:__WIDTH__px"><div class="widgets-card-status"></div><div id="mount"></div></section>
@@ -28,7 +34,8 @@ HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 import {mountModuleWidget} from '/static/modules/widget_module.js';
 ouroTheme.set('__THEME__');
 window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
- {skill:'__SKILL__',ws_prefix:'ext:__SKILL__:'},{entry:'widget.js',appearance:'host'},null,new Set());
+ {skill:'__SKILL__',ws_prefix:'ext:__SKILL__:',tab_id:'slack_presence',generation:'fixture-generation'},
+ {entry:'widget.js',appearance:'host'},null,new Set());
 window.ready=true;
 </script></body></html>'''
 
@@ -92,18 +99,41 @@ def load_plugin(skill, api):
     return module
 
 
-def seed(skill, root):
-    """A connected bridge with a live companion PID (this test process)."""
+TOKENS = {'SLACK_BOT_TOKEN': 'xoxb-synthetic', 'SLACK_APP_TOKEN': 'xapp-synthetic'}
+
+
+def seed(scenario, root):
+    """Synthetic store states: a healthy link, recent problems with holds, or Slack refusing the tokens."""
     sys.path.insert(0, str(ROOT / 'skills' / 'slack-bridge'))
     from lib.store import BridgeStore
     store = BridgeStore(root)
-    store.set_runtime(socket_state='connected', host_adapter_state='active', workspace_name='Northstar Labs',
-                      companion_pid=os.getpid(), connected_at=1795381200.0)
-    store.close()
-    return {'SLACK_BOT_TOKEN': 'xoxb-synthetic', 'SLACK_APP_TOKEN': 'xapp-synthetic'}
+    try:
+        if scenario == 'auth_refused':
+            # What the daemon leaves after Slack refused the app token: the error, and no companion PID.
+            store.set_runtime(socket_state='error', last_socket_error='Slack API error: invalid_auth',
+                              workspace_name='Northstar Labs', host_adapter_state='active')
+            return TOKENS
+        store.set_runtime(socket_state='connected', host_adapter_state='active', workspace_name='Northstar Labs',
+                          companion_pid=os.getpid(), connected_at=1795381200.0, reaction_context_state='available',
+                          history_reporting_state='supported')
+        if scenario == 'problems':
+            store.enqueue_outbox(request_id='synthetic-refused', target='C09SYNTH01', thread_ts='', chunks=('hello',))
+            refused = store.claim_outbox()
+            store.fail_outbox(refused.row_id, refused.lease_token, 'not_in_channel', state='failed')
+            store.enqueue_mutation(request_id='synthetic-edit', operation='update_message',
+                                   payload={'channel': 'C09SYNTH01', 'ts': '1700000000.000100'})
+            edit = store.claim_outbox()
+            store.fail_outbox(edit.row_id, edit.lease_token, 'ReadTimeout', state='uncertain')
+            for index, note in enumerate(("Held: Check this skill's access in Skills.", 'Held: Ops room is paused')):
+                store.enqueue_outbox(request_id=f'synthetic-held-{index}', target=f'C09HOLD0{index}', thread_ts='',
+                                     chunks=('later',))
+                store.hold_outbox(store.claim_outbox(), note)
+    finally:
+        store.close()
+    return TOKENS
 
 
-@pytest.fixture(params=['slack-bridge'])
+@pytest.fixture
 def served(request):
     # The hosted suite names its Presence core; a theme core checkout works the same for the module bridge.
     configured = os.environ.get('OUROBOROS_THEME_CORE_ROOT') or os.environ.get('OUROBOROS_PRESENCE_CORE_ROOT')
@@ -117,11 +147,12 @@ def served(request):
         pytest.skip('Playwright is not installed')
     core = Path(configured).resolve()
     assert (core / 'web/modules/widget_module.js').is_file()
-    skill = request.param
+    skill = 'slack-bridge'
     root = Path(tempfile.mkdtemp(prefix='slack-bridge-widget-'))
-    api = API(root, seed(skill, root))
+    api = API(root, seed(getattr(request, 'param', 'healthy'), root))
     load_plugin(skill, api)
-    state = {'posts': [], 'errors': [], 'faults': [], 'leases': 0, 'skill': skill, 'root': root, 'api': api}
+    leases = LeaseGateway(CARDS)
+    state = {'posts': [], 'errors': [], 'faults': [], 'skill': skill, 'root': root, 'api': api, 'leases': leases}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -150,18 +181,15 @@ def served(request):
             if url.path == '/api/widgets/fault':
                 state['faults'].append(payload.decode('utf-8', 'replace'))
                 return self.send({'ok': True})
-            # A classic module mount asks the host for a route lease before it builds the frame
-            # (core web/modules/widget_assets.js); the fixture answers as the host would, nothing more.
-            if url.path == '/api/widgets/asset-leases':
-                body = json.loads(payload or b'{}')
-                assert body.get('skill') == skill and body.get('scope') == 'routes', body
-                state['leases'] += 1
-                return self.send({'token': 'card-fixture', 'base_url': '/api/widget-resources/card-fixture/',
-                                  'renew_after': 3600, 'expires_in': 7200})
-            if url.path == '/api/widgets/asset-leases/revoke':
-                return self.send({'ok': True})
-            if url.path.startswith('/api/widget-resources/card-fixture/'):
-                url = url._replace(path=f'/api/extensions/{skill}/' + url.path.removeprefix('/api/widget-resources/card-fixture/'))
+            if controls(url.path):
+                # Lease issue, renewal and revoke as the core answers them; a refused one fails the teardown below.
+                status, answer = leases.answer(self.command, url.path, self.headers, payload)
+                return self.send(answer, status=status)
+            if url.path.startswith(RESOURCES):
+                token, _, rest = url.path[len(RESOURCES):].partition('/')
+                if token not in leases.held:
+                    return self.send({'error': 'widget publication or lease unavailable'}, status=409)
+                url = url._replace(path=f'/api/extensions/{skill}/' + rest)
             if url.path.startswith('/static/'):
                 web = core / 'web'
                 source = (web / url.path[len('/static/'):]).resolve()
@@ -198,6 +226,7 @@ def served(request):
             unload()
         shutil.rmtree(root, ignore_errors=True)
         assert not state['errors'], state['errors']
+        assert not leases.refused, leases.refused
 
 
 def route_status(state, url):
@@ -233,7 +262,80 @@ def test_card_first_line_is_the_route_line_and_nothing_overflows(served, engine,
             # Disposal goes through the host's handshake and leaves no fault behind.
             page.evaluate('async () => { await disposeWidget(); }')
             expect(page.locator('iframe')).to_have_count(0)
-            assert state['leases'] >= 1
+            assert state['leases'].held == {} and state['leases'].ended  # issued, then revoked on disposal
             assert not state['faults'], state['faults']
         finally:
             browser.close()
+
+
+def open_card(pw, engine, url, theme, width, messages):
+    browser = getattr(pw, engine).launch(headless=True)
+    page = browser.new_page(viewport={'width': 1083 if width == 335 else 390, 'height': 1026}, device_scale_factor=2)
+    page.on('console', lambda m: messages.append((m.type, m.text)) if m.type == 'error' else None)
+    page.on('pageerror', lambda e: messages.append(('pageerror', str(e))))
+    page.goto(url + f'/?theme={theme}&width={width}')
+    page.wait_for_function('window.ready === true')
+    return browser, page
+
+
+@pytest.mark.parametrize('served', ['problems'], indirect=True)
+@pytest.mark.parametrize('engine', ['webkit', 'chromium'])
+def test_recent_problems_and_holds_render_as_their_items(served, engine):
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    route = route_status(state, url)
+    assert [item['kind'] for item in route['attention']] == ['not_delivered', 'outcome_unknown', 'held']
+    messages = []
+    with sync_playwright() as pw:
+        browser, page = open_card(pw, engine, url, 'dark', 335, messages)
+        try:
+            frame = page.frame_locator('iframe')
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(route['text'], timeout=15000)
+            items = frame.locator('.tc-items .tc-item')
+            expect(items).to_have_count(3)
+            assert [items.nth(i).get_attribute('data-kind') for i in range(3)] == ['not_delivered', 'outcome_unknown', 'held']
+            assert [items.nth(i).get_attribute('data-tone') for i in range(3)] == ['error', 'warn', 'warn']
+            expect(items.nth(0)).to_contain_text('not retried')
+            expect(items.nth(1)).to_contain_text('did not get Slack’s confirmation')
+            expect(items.nth(1)).to_contain_text('Check in Slack whether it took effect')
+            held = items.nth(2)
+            expect(held).to_contain_text('Ouroboros refused this skill’s access')
+            expect(held).to_contain_text('Ops room is paused')
+            # The refusal's own error text, not a neighbour's, sits in its fold.
+            items.nth(0).locator('summary').click()
+            expect(items.nth(0).locator('.tc-raw')).to_have_text('not_in_channel')
+            items.nth(1).locator('summary').click()
+            expect(items.nth(1).locator('.tc-raw')).to_have_text('ReadTimeout')
+            inner = next(f for f in page.frames if f is not page.main_frame)
+            assert inner.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            page.evaluate('async () => { await disposeWidget(); }')
+            expect(page.locator('iframe')).to_have_count(0)
+        finally:
+            browser.close()
+    assert not messages, messages
+    assert not state['faults'], state['faults']
+
+
+@pytest.mark.parametrize('served', ['auth_refused'], indirect=True)
+@pytest.mark.parametrize('engine,theme,width', [('webkit', 'dark', 335), ('chromium', 'light', 366)])
+def test_refused_tokens_render_the_token_advice(served, engine, theme, width):
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    route = route_status(state, url)
+    assert route['text'] == "Connection error · Slack refused the bridge's tokens"
+    messages = []
+    with sync_playwright() as pw:
+        browser, page = open_card(pw, engine, url, theme, width, messages)
+        try:
+            frame = page.frame_locator('iframe')
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(route['text'], timeout=15000)
+            item = frame.locator('.tc-items .tc-item').first
+            assert item.get_attribute('data-kind') == 'link'
+            expect(item).to_contain_text('Slack did not accept the bridge’s tokens')
+            expect(item).to_contain_text('Check SLACK_BOT_TOKEN and SLACK_APP_TOKEN')
+            item.locator('summary').click()
+            expect(item.locator('.tc-raw')).to_have_text('Slack API error: invalid_auth')
+            page.evaluate('async () => { await disposeWidget(); }')
+        finally:
+            browser.close()
+    assert not messages, messages

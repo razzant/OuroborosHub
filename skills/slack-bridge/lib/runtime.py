@@ -77,7 +77,12 @@ def _event_directory_name(item: InboxItem) -> str:
 async def _discover_reporting(host: Any, store: BridgeStore) -> int:
     discover = getattr(host, "discover_delivery_support", None)
     mode = await discover() if discover is not None else 0
+    # A recheck that finds the Host binding again (host.available turns True after a failed start-time check)
+    # updates the stored view, so the status stops saying events are not passed on. Availability never turns
+    # back off within one companion, so only that change is written here; the start value is written by run().
+    adapter = {"host_adapter_state": "active"} if getattr(host, "available", None) is True else {}
     store.set_runtime(
+        **adapter,
         presence_delivery_version=mode,
         presence_continuation_version=getattr(host, "continuation_version", 0),
         presence_identity=getattr(host, "presence_identity", 0),

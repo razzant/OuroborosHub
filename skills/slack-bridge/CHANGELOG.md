@@ -5,14 +5,18 @@
 - The Widgets card is redrawn as one surface (a module `widget.js`). Its first line says whether
   the link works and whether anything needs attention ("Connected · nothing needs attention",
   "Connected · 3 messages not delivered"); the Places sheet shows the same words and tone. What
-  needs attention is listed below it, worst first, each with its time, what it means and what
-  to do; the raw error sits in a fold beside it. Quiet totals since install and a Details fold
+  needs attention is listed below it, worst tone first (error, then warn, then muted) and within
+  one tone by consequence: the link, outcomes nobody knows, what was not delivered, what was not
+  handled, what is held, notes, what is only partly known. The first line names the first item,
+  so its dot and its words agree, and adds "· N more need attention". Each item has its time,
+  what it means and what to do; the raw error sits in a fold beside it. Quiet totals since install and a Details fold
   keep every fact the old card showed. Credentials and message contents are still never shown.
 - The card shows when the status was read and keeps refreshing every 10 seconds while it is
   visible. A failed read keeps the last data and says so with "Try again"; the old poll stopped
   silently after about five minutes.
-- "Outcome unknown" (a send whose result was lost) is its own item and is never called a failure:
-  nothing resends it, and the owner checks the conversation before sending again. Problems are
+- "Outcome unknown" (the bridge started a send, edit or deletion but got no confirmation: the link
+  broke, or it was cancelled once begun) is its own item and is never called a failure: nothing
+  repeats it, and the owner checks in Slack whether it took effect before asking for it again. Problems are
   attention for 24 hours; older ones stay in the totals with their date. A connected bridge whose
   state is only partly known (Ouroboros has not answered its capability check) never reads as
   all clear.
@@ -23,20 +27,32 @@
   `held_reasons` (every reason holding outbound rows, with its count), `inbox_retrying` (events the
   Host refused for now and the bridge retries, from the queue rows), and per-message
   `failed_messages_partly_delivered` / `uncertain_messages_partly_delivered`, so the card never
-  advises sending a message again whole when its first parts already arrived. All of it is read in
-  one transaction. `text` and `tone` keep their keys; their words and tone now follow the rule
+  advises sending a message again whole when some of its parts already arrived. A message with a
+  failed or unknown part counts as a problem even while another of its parts still waits or is
+  held. Each queue in `recent_problems` also gains `last_failed_error` and `last_uncertain_error`
+  (its newest error of that state inside the 24-hour window), so each item carries its own error;
+  `last_error` stays. `mutations_leased` counts actions in progress and `host_adapter_checked`
+  says whether a companion ever recorded its view of the Host binding. All of it is read in one
+  transaction, with one grouped pass over the outgoing text rows. `text` and `tone` keep their keys; their words and tone now follow the rule
   above. Every other existing key keeps its name and meaning.
 - Token advice appears only when Slack refused the tokens (the bridge's own refusal codes); any
-  other connection error is shown as itself. When several reasons hold messages, the one the owner
-  must act on comes first and sets the amber tone.
-- An exiting companion clears only its own PID, so it cannot erase a newer companion's; the
-  Windows process probe declares its `OpenProcess`, `GetExitCodeProcess` and `CloseHandle`
-  signatures and still never sends signal 0.
-- Residuals: a reused PID can still read as alive (there is no companion heartbeat);
-  `host_adapter_state` is written once per companion start; "waiting unusually long" is not shown
-  because status reports no age of the oldest waiting row; a hold's reason is shown only while
-  the newest stored note is that hold's; earlier review findings on bridge hardening are not
-  addressed here.
+  other connection error is shown as itself. A refusal of the app-level token after sign-in now
+  reaches that advice: the daemon records its final error after cleanup instead of leaving
+  "disconnected". When several reasons hold messages, one the owner must act on (the skill's access
+  refused, a place not connected) comes first and sets the amber tone; a paused or silenced place
+  and a Host that did not answer stay neutral.
+- Details no longer says Ouroboros needs an update for reactions when it simply did not answer the
+  capability check, and a recheck that finds the Host binding again updates "events passed on".
+- `GET status` answers with string `text` and `tone` on every path, including a queue store that
+  can't be read ("Status unknown · the bridge's queue store can't be read").
+- 1.13.0 introduces the companion liveness probe (POSIX signal 0; on Windows `OpenProcess` and
+  `GetExitCodeProcess` with declared signatures, never signal 0; a failed exit-code query reads as
+  not known and the card says the state is partly known) and the compare-and-clear of
+  `companion_pid`: an exiting companion clears only its own PID, never a newer one's.
+- Residuals: a reused PID can still read as alive (there is no companion heartbeat), and on POSIX
+  an exited child not yet reaped reads as alive until it is; "waiting unusually long" is not shown
+  because status reports no age of the oldest waiting row; earlier review findings on bridge
+  hardening are not addressed here.
 
 ## 1.12.2
 
