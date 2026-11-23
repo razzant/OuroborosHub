@@ -388,8 +388,9 @@ var TransportKit = (function () {
             applyTheme(query.matches ? 'light' : 'dark');
         }
 
-        function freshNode() {
-            var line = el('p', 'tc-fresh');
+        /* The freshness line: when the status was read, and Refresh. fillFresh() rewrites an existing line in place,
+         * so the button a keyboard reader is on stays the same element: replacing it blurred the reader. */
+        function fillFresh(line) {
             var now = Date.now();
             var text;
             var stale = false;
@@ -401,27 +402,23 @@ var TransportKit = (function () {
                 stale = now - state.readAt > interval * 3 + 5000;
                 text = 'Updated ' + ago(state.readAt, now);
             } else text = '';
-            var t = el('span', 'tc-fresh-t', text);
-            if (state.readAt) t.title = 'Read ' + exact(state.readAt);
-            if (state.failure && stale) t.title = state.failure;
-            if (stale) line.setAttribute('data-stale', '');
-            add(line, t, text ? el('span', 'tc-sep', '·') : null);
-            var btn = el('button', 'tc-link', state.busy ? 'Refreshing…' : (stale ? 'Try again' : 'Refresh'));
-            btn.type = 'button';
-            btn.setAttribute('data-focus', 'refresh');
-            if (state.busy) btn.setAttribute('aria-busy', 'true');
-            btn.addEventListener('click', function () { if (!state.busy) read(); });
-            add(line, btn);
+            var t = line.querySelector('.tc-fresh-t'), sep = line.querySelector('.tc-sep'), btn = line.querySelector('button');
+            t.textContent = text;
+            var title = state.failure && stale ? state.failure : state.readAt ? 'Read ' + exact(state.readAt) : '';
+            if (title) t.title = title; else t.removeAttribute('title');
+            sep.hidden = !text;
+            if (stale) line.setAttribute('data-stale', ''); else line.removeAttribute('data-stale');
+            btn.textContent = state.busy ? 'Refreshing…' : (stale ? 'Try again' : 'Refresh');
+            if (state.busy) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
             return line;
         }
 
-        /* Replace only the freshness line; a keyboard reader on Refresh stays on the new one. */
-        function swapFresh(old) {
-            var focused = old.contains(document.activeElement);
-            var line = freshNode();
-            old.replaceWith(line);
-            var button = focused ? line.querySelector('button') : null;
-            if (button) button.focus();
+        function freshNode() {
+            var btn = el('button', 'tc-link');
+            btn.type = 'button';
+            btn.setAttribute('data-focus', 'refresh');
+            btn.addEventListener('click', function () { if (!state.busy) read(); });
+            return fillFresh(add(el('p', 'tc-fresh'), el('span', 'tc-fresh-t'), el('span', 'tc-sep', '·'), btn));
         }
 
         function paint(force) {
@@ -442,7 +439,7 @@ var TransportKit = (function () {
                     var unreadSignature = 'unread:' + state.failedAt + ':' + JSON.stringify(unread);
                     if (!force && unreadSignature === state.signature) {
                         var stale = root.querySelector('.tc-fresh');
-                        if (stale) swapFresh(stale);
+                        if (stale) fillFresh(stale);
                         return;
                     }
                     state.signature = unreadSignature;
@@ -458,7 +455,7 @@ var TransportKit = (function () {
                 // Never rebuild under the reader's press; the next paint after they let go catches up.
                 if (state.pointerDown) state.signature = '';
                 var old = state.pointerDown ? null : root.querySelector('.tc-fresh');
-                if (old) swapFresh(old);
+                if (old) fillFresh(old);
                 return;
             }
             state.signature = signature;
@@ -518,17 +515,14 @@ var TransportKit = (function () {
             read();
         }
         document.addEventListener('visibilitychange', onVisibility);
-        function onFocusOut() { setTimeout(function () { if (!state.busy) paint(); }, 0); }
         function onPointerDown() { state.pointerDown = true; }
         function onPointerUp() {
             setTimeout(function () { state.pointerDown = false; if (!state.busy) paint(); }, 0);
         }
-        root.addEventListener('focusout', onFocusOut);
         root.addEventListener('pointerdown', onPointerDown, true);
         window.addEventListener('pointerup', onPointerUp, true);
         window.addEventListener('pointercancel', onPointerUp, true);
         disposers.push(function () {
-            root.removeEventListener('focusout', onFocusOut);
             root.removeEventListener('pointerdown', onPointerDown, true);
             window.removeEventListener('pointerup', onPointerUp, true);
             window.removeEventListener('pointercancel', onPointerUp, true);
@@ -601,6 +595,11 @@ var TransportKit = (function () {
             { strong: 'Not a token or network problem:', text: 'the error text below names what failed here.' }
         ]
     };
+    /* A local failure before Telegram's answer about new messages: the stage it stopped at (the route's poll_stage). */
+    var LOCAL_STAGE = {
+        identity: 'Telegram confirmed the bot, but recording it on this computer failed, so no new messages are fetched yet. It retries by itself, at least once a minute.',
+        updates: 'The bot failed on this computer before asking Telegram for new messages, so nothing new arrives. It retries by itself, at least once a minute.'
+    };
 
     function itemFor(item) {
         var out = { kind: item.kind, detail: item.detail || '', tone: item.tone, headline: item.headline, at: item.at || null, lines: [] };
@@ -610,6 +609,7 @@ var TransportKit = (function () {
         if (item.kind === 'link') {
             var polled = item.detail === 'provider_error' || item.detail === 'local_error';
             out.lines = ((polled && POLL_LINES[item.failure]) || LINK_LINES[item.detail] || []).slice();
+            if (polled && item.failure === 'local' && LOCAL_STAGE[item.stage]) out.lines[0] = LOCAL_STAGE[item.stage];
             if (polled) out.atLabel = 'last successful answer';
             if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
         } else if (item.kind === 'connect') {
@@ -617,14 +617,21 @@ var TransportKit = (function () {
         } else if (item.kind === 'outcome_unknown') {
             out.atLabel = 'last';
             // partial: how many of them Telegram confirmed in part (an album's incomplete answer, a long message's
-            // first parts); their answer was not lost, the rest is unknown.
-            var partial = Math.min(count(item.partial), count(item.messages));
-            out.lines = partial && partial === count(item.messages)
-                ? ['Telegram confirmed part of ' + (one ? 'it' : 'each') + ', but nobody knows whether the rest arrived. '
-                    + 'Nothing sends ' + them + ' again by itself.']
-                : ['Telegram\u2019s answer to the send was lost, so nobody knows whether ' + (one ? 'it' : 'they') + ' arrived. '
-                    + 'Nothing sends ' + them + ' again by itself.'
-                    + (partial ? ' Telegram confirmed part of ' + plural(partial, 'item') + '.' : '')];
+            // first parts). The others had no confirmation at all: an answer naming no message, a lost or cut
+            // answer, or none, so their delivery could not be established (never "lost", which an answer may not be).
+            var sends = count(item.messages), partial = Math.min(count(item.partial), sends), rest = sends - partial;
+            var again = 'Nothing sends ' + them + ' again by itself.';
+            if (!partial) {
+                out.lines = ['Delivery could not be established, so nobody knows whether ' + (one ? 'it' : 'they')
+                    + ' arrived. ' + again];
+            } else if (!rest) {
+                out.lines = ['Telegram confirmed part of ' + (one ? 'it' : 'each') + ', but nobody knows whether the rest '
+                    + 'arrived. ' + again];
+            } else {
+                out.lines = ['Telegram confirmed part of ' + plural(partial, 'item') + '; for '
+                    + (rest === 1 ? 'the other' : 'the other ' + num(rest)) + ', delivery could not be established. '
+                    + 'Nobody knows whether the rest arrived. ' + again];
+            }
             out.lines.push(RECEIPT_CHECK);
             if (error) out.error = { label: 'What happened', text: error.text, at: error.at };
         } else if (item.kind === 'not_delivered') {
@@ -674,7 +681,8 @@ var TransportKit = (function () {
             var stages = item.stages || {}, total = count(item.events);
             var said = [[count(stages.submit), 'passing to Ouroboros failed'],
                 [count(stages.download), 'downloading an attachment from Telegram failed'],
-                [count(stages.other), 'the last attempt failed']].filter(function (pair) { return pair[0]; });
+                // Not recorded (an older version's row): only that it was not passed on, whatever stopped it.
+                [count(stages.other), 'not passed on yet']].filter(function (pair) { return pair[0]; });
             var why = said.length === 1 && said[0][0] === total ? said[0][1]
                 : said.map(function (pair) { return pair[1] + ' (' + num(pair[0]) + ')'; }).join(', ');
             out.lines = [(why ? why.charAt(0).toUpperCase() + why.slice(1) + '; t' : 'T') + 'he bot keeps trying by itself'
@@ -715,19 +723,43 @@ var TransportKit = (function () {
     function rawText(text) { return { raw: String(text) }; }
     function row(label, value, title) { return value === undefined || value === null || value === '' ? null : [label, value, title]; }
 
-    var RUNTIME_WORD = {
-        polling: 'receiving (polling Telegram)', not_started: 'starting', waiting_for_token: 'waiting for the bot token',
-        provider_error: 'requests failing, retrying', stopped: 'stopped'
-    };
-    var SOURCE_WORD = { polling: 'reading updates', outbound: 'sending', inbound: 'passing updates to Ouroboros' };
-    var REPORTING_WORD = {
-        supported: 'recorded in Ouroboros history', unsupported: 'not recorded: this Ouroboros doesn’t support it',
-        unavailable: 'not recorded right now: Ouroboros didn’t answer', unknown: 'not checked yet'
+    /* Details › State words the link as the first line judges it (the route's `link`, status_summary.link_state),
+     * never a second reading of runtime_state; the raw runtime state stays in the row's title. */
+    var LINK_WORD = {
+        connected: 'receiving (polling Telegram)',
+        connecting: 'connecting: no completed answer from Telegram for this token yet',
+        provider_error: 'requests failing, retrying',
+        local_error: 'failing on this computer, retrying',
+        waiting_for_token: 'waiting for the bot token',
+        not_started: 'starting',
+        stopped: 'stopped'
     };
 
-    function capability(value, checked) {
-        if (!checked) return 'not checked yet';
-        return value === 'available' ? 'passed to Ouroboros' : 'needs an Ouroboros update';
+    /* The bot named while the current token's bot is not confirmed is the last one confirmed, not the current one. */
+    function previousBot(data) {
+        if (data.bot_unconfirmed === true) return 'last confirmed bot; the current token is not confirmed yet';
+        if (data.link === 'waiting_for_token') return 'last confirmed bot; no token is set now';
+        if (data.link === 'stopped') return 'last confirmed bot; the bot is not running';
+        return '';
+    }
+    var SOURCE_WORD = { polling: 'reading updates', outbound: 'sending', inbound: 'passing updates to Ouroboros' };
+    /* What Ouroboros said when the bot last checked its capabilities (/identity): a past check, with its time, never
+     * a claim that anything was delivered or recorded now. */
+    var REPORTING_WORD = {
+        supported: 'supported by Ouroboros', unsupported: 'not supported by this Ouroboros',
+        unavailable: 'not known: Ouroboros didn’t answer the check', unknown: 'not checked yet'
+    };
+
+    function checkedAt(data, now) {
+        return data.host_checked_at ? ' (checked ' + K.clock(data.host_checked_at, now) + ')' : '';
+    }
+
+    function capability(value, data, now) {
+        if (data.host_checked !== true) {
+            return data.delivery_reporting === 'unavailable' ? REPORTING_WORD.unavailable + checkedAt(data, now)
+                : 'not checked yet';
+        }
+        return (value === 'available' ? 'supported by Ouroboros' : 'needs an Ouroboros update') + checkedAt(data, now);
     }
 
     /* ---------- the management group setting: one persistent node, so typing survives refreshes ---------- */
@@ -816,10 +848,17 @@ var TransportKit = (function () {
                 form.confirmedAt = Date.now();
                 stored.value = value;
                 stored.state = 'read';
-                show(value ? 'Saved.' : 'Saved: no management group.', 'ok');
+                // The answer is about the value sent; a newer draft typed meanwhile stays, and is said to be unsaved.
+                var saved = value ? 'Saved.' : 'Saved: no management group.';
+                if (input.value.trim() !== value) {
+                    saved = 'Saved ' + (value || 'no management group') + '; the value now in the field is not saved yet.';
+                }
+                show(saved, 'ok');
                 kit.read();
             }).catch(function (error) {
-                show('Not saved: ' + String(error && error.message || error), 'error');
+                var reason = String(error && error.message || error);
+                show(input.value.trim() === value ? 'Not saved: ' + reason
+                    : 'Not saved (' + (value || 'no management group') + '): ' + reason, 'error');
             }).then(function () {
                 form.busy = false;
                 save.disabled = false;
@@ -852,8 +891,8 @@ var TransportKit = (function () {
         var facts = [];
         var bot = sendsAs || (data.bot_label && !/^not (connected|configured)$/.test(data.bot_label) ? data.bot_label : '');
         // A token getMe has not confirmed yet: the label shown is the earlier bot's.
-        var unconfirmed = data.bot_unconfirmed === true;
-        if (bot) facts.push(['Bot', bot + (unconfirmed ? ' (not confirmed for the current token)' : '')]);
+        var previous = previousBot(data);
+        if (bot) facts.push(['Bot', bot + (previous ? ' (' + previous + ')' : '')]);
         if (data.last_event_at) facts.push(['Last update', K.clock(data.last_event_at, now), K.exact(data.last_event_at)]);
         if (data.last_delivery_at) facts.push(['Last delivery', K.clock(data.last_delivery_at, now), K.exact(data.last_delivery_at)]);
 
@@ -898,16 +937,18 @@ var TransportKit = (function () {
         // Without the custody counts "none yet" would be a guess: the times stay unknown (—).
         var countsKnown = K.known(data.inbox_submitted) && K.known(data.outbox_delivered);
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as : null;
+        var previous = previousBot(data);
         var checked = data.host_checked === true;
         var groups = [];
         groups.push({
             title: 'Bot',
             rows: [
-                row('State', data.runtime_state === 'polling' && data.poll_result !== 'ok'
-                    ? (data.poll_result === 'failed' ? 'retrying after a failed request' : 'connecting: no answer from Telegram yet')
-                    : RUNTIME_WORD[data.runtime_state] || data.runtime_state),
-                row('Bot', data.bot_label),
-                row('Sends as', sendsAs ? sendsAs.label + (sendsAs.id ? ' (' + sendsAs.id + ')' : '') : ''),
+                row('State', LINK_WORD[data.link] || data.link || '—',
+                    data.runtime_state ? 'runtime state: ' + data.runtime_state : ''),
+                row('Bot', data.bot_label && !/^not (connected|configured)$/.test(data.bot_label) && previous
+                    ? data.bot_label + ' (' + previous + ')' : data.bot_label),
+                row('Sends as', sendsAs ? sendsAs.label + (sendsAs.id ? ' (' + sendsAs.id + ')' : '')
+                    + (previous ? ' · ' + previous : '') : ''),
                 row('Last successful getUpdates answer', K.clock(data.provider_ok_at, now), K.exact(data.provider_ok_at)),
                 row('Last update', K.clock(data.last_event_at, now) || (countsKnown ? 'none yet' : '—'), K.exact(data.last_event_at)),
                 row('Last delivery', K.clock(data.last_delivery_at, now) || (countsKnown ? 'none yet' : '—'), K.exact(data.last_delivery_at)),
@@ -920,14 +961,17 @@ var TransportKit = (function () {
         groups.push({
             title: 'Ouroboros',
             rows: [
-                row('Delivery history', REPORTING_WORD[data.delivery_reporting] || data.delivery_reporting),
-                row('Reactions in Host context', capability(data.reaction_context, checked)),
-                row('Reaction history', capability(data.reaction_history, checked)),
+                row('Delivery history', (REPORTING_WORD[data.delivery_reporting] || data.delivery_reporting)
+                    + (data.delivery_reporting in REPORTING_WORD && data.delivery_reporting !== 'unknown' ? checkedAt(data, now) : '')),
+                row('Reactions in Host context', capability(data.reaction_context, data, now)),
+                row('Reaction history', capability(data.reaction_history, data, now)),
                 row('Place binding', data.binding_state === 'configured' ? 'saved'
                     : !checked ? 'none saved (not checked whether this Ouroboros needs one)'
-                        : data.places_version ? 'none saved (Places connects it)' : 'none saved; this Ouroboros needs one'),
+                        : (data.places_version ? 'none saved; this Ouroboros connects places itself'
+                            : 'none saved; this Ouroboros needs one') + checkedAt(data, now)),
                 row('Early answers', !checked ? 'not checked yet'
-                    : data.presence_continuation_version === 2 ? 'supported' : 'each turn waits for its end'),
+                    : (data.presence_continuation_version === 2 ? 'supported by Ouroboros' : 'not supported: each turn waits for its end')
+                        + checkedAt(data, now)),
                 row('Delivery reports', counts([[data.delivery_reports_pending, 'waiting'], [data.delivery_reports_held, 'held']]))
             ].filter(Boolean)
         });
@@ -949,7 +993,9 @@ var TransportKit = (function () {
                 ])),
                 row('Group history unreadable', count(data.group_backfill_unreadable) ? num(count(data.group_backfill_unreadable)) : '')
             ].filter(Boolean),
-            note: 'Counts not listed are zero. Totals since install; waiting, sending and held are the queue now.'
+            // Unknown is not zero: without the custody counts no row may read as zero or as a total.
+            note: countsKnown ? 'Counts not listed are zero. Totals since install; waiting, sending and held are the queue now.'
+                : 'The custody counts were not read, so the queues are unknown.'
         });
         var errorRows = data.last_error ? [
             row('When', K.clock(data.last_error_at, now) || 'before this process started', K.exact(data.last_error_at)),

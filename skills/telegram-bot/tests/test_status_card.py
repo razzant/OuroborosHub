@@ -20,6 +20,10 @@ from telegram_bot.status_summary import TONE_RANK, attention_items, summarize
 from test_plugin import FakeApi
 
 
+def _iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
 def _event(update_id):
     return parse_telegram_update(
         {"update_id": update_id, "message": {"message_id": update_id, "text": "hello",
@@ -295,7 +299,7 @@ def _link_facts(runtime):
     """The runtime's link facts over a quiet card (this fake Host is never asked about capabilities)."""
     snapshot = runtime.status_snapshot({})
     return {key: snapshot[key] for key in ("runtime_state", "poll_result", "poll_at", "poll_error", "poll_failure",
-                                           "provider_ok_at")}
+                                           "poll_stage", "provider_ok_at")}
 
 
 async def _until(predicate):
@@ -400,8 +404,45 @@ def _route_payload(runtime):
     """The facts plugin._status_payload takes from one runtime read (connect left to the summary's reason)."""
     snapshot = runtime.status_snapshot({})
     return _quiet(**{key: snapshot[key] for key in ("runtime_state", "poll_result", "poll_at", "poll_error",
-                                                    "poll_failure", "last_error", "last_error_source")},
+                                                    "poll_failure", "poll_stage", "last_error", "last_error_source")},
                   connect=None, connect_unavailable=snapshot["confirmed_reason"])
+
+
+def test_a_refusal_is_recorded_for_the_token_the_attempt_actually_used(tmp_path):
+    """The loop read token A, then waited for the client lock while the owner set B; getMe refused B. That refusal
+    belongs to B: the card says so at once, not "Connecting…" until the next attempt."""
+    async def run():
+        token, gate = {"value": "token-a"}, asyncio.Event()
+        runtime = runtime_mod.TelegramTransportRuntime(
+            state_dir=tmp_path, token_provider=lambda: token["value"], logger=None, submitter=SimpleNamespace(),
+            client_factory=lambda value: _TokenBot(value, "token-b", gate))
+        held = asyncio.Event()
+
+        async def hold(_seconds):
+            await held.wait()
+        runtime._pause = hold
+        runtime._client_lock = asyncio.Lock()
+        await runtime._client_lock.acquire()  # another worker holds the client while the loop starts its attempt
+        loop = asyncio.create_task(runtime._poll_loop())
+        runtime._run_task = loop
+        try:
+            await asyncio.sleep(0.05)  # the loop has read token A and waits for the lock
+            token["value"] = "token-b"
+            runtime._client_lock.release()
+            await _until(lambda: runtime.status_snapshot({})["runtime_state"] == "provider_error")
+            snapshot = runtime.status_snapshot({})
+            assert (snapshot["poll_result"], snapshot["poll_failure"]) == ("failed", "token")
+            summary = summarize(_route_payload(runtime))
+            assert summary["tone"] == "error" and summary["text"].startswith("Connection error")
+            assert summary["attention"][0]["failure"] == "token"
+        finally:
+            runtime._stopping = True
+            held.set()
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            runtime.store.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("first", ["token-a", ""])
@@ -446,8 +487,49 @@ def test_a_new_token_during_a_backoff_or_the_no_token_pause_reads_connecting(tmp
     (ValueError("x"), ""),
 ])
 def test_poll_failure_sides(exc, side):
-    assert runtime_mod._poll_failure(exc, answered=False) == side
-    assert runtime_mod._poll_failure(exc, answered=True) == "local"
+    for stage in ("identity", "updates"):
+        assert runtime_mod._poll_failure(exc, stage) == side
+    assert runtime_mod._poll_failure(exc, "record") == "local"  # Telegram answered: whatever failed is here
+    # The custody store failing is this computer's, at any stage.
+    for stage in runtime_mod.POLL_STAGES:
+        assert runtime_mod._poll_failure(sqlite3.OperationalError("database is locked"), stage) == "local"
+
+
+def test_a_store_failure_after_getme_confirmed_the_bot_is_named_local(tmp_path):
+    """getMe answered, then recording the confirmed bot met a SQLite lock: an error on this computer, at the identity
+    stage, never "Connection error" (nothing was wrong with the token or the network)."""
+    async def run():
+        gate = asyncio.Event()
+        runtime = runtime_mod.TelegramTransportRuntime(
+            state_dir=tmp_path, token_provider=lambda: "token-a", logger=None, submitter=SimpleNamespace(),
+            client_factory=lambda value: _TokenBot(value, "nobody", gate))
+
+        def locked(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        runtime.store.record_confirmed_bot = locked
+        held = asyncio.Event()
+
+        async def hold(_seconds):
+            await held.wait()
+        runtime._pause = hold
+        loop = asyncio.create_task(runtime._poll_loop())
+        runtime._run_task = loop
+        try:
+            await _until(lambda: runtime.status_snapshot({})["poll_result"] == "failed")
+            snapshot = runtime.status_snapshot({})
+            assert (snapshot["poll_failure"], snapshot["poll_stage"]) == ("local", "identity")
+            summary = summarize(_route_payload(runtime))
+            assert (summary["text"], summary["tone"]) == (
+                "Error on this computer · new messages are not being processed", "error")
+            assert summary["attention"][0]["stage"] == "identity"
+        finally:
+            runtime._stopping = True
+            held.set()
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            runtime.store.close()
+
+    asyncio.run(run())
 
 
 def test_a_poll_result_counts_only_for_the_token_set_now(tmp_path):
@@ -527,6 +609,41 @@ def test_card_snapshot_of_an_empty_store(tmp_path):
     assert card["handoff_retrying"] == _NO_WAIT
 
 
+# Answers as any version may have stored them under _sent_messages / _sent_media: one object or a list, with text
+# captions, missing, zero, negative, textual, real or boolean ids, nested lists, bare scalars and nulls.
+_LEGACY_ANSWERS = [
+    {"message_id": 0, "caption": "a photo kept by 0.12"}, {"message_id": 5, "caption": "x"}, {"caption": "x"}, {},
+    "sent", 12, 1.5, True, None, [], [{"message_id": 3}, "plain text"], ["plain text", {"message_id": 3}],
+    [7, {"ok": True}], [[{"message_id": 4}]], [{"message_id": True}], [{"message_id": "6"}], [{"message_id": 6.0}],
+    [{"message_id": -2}], [None, {"message_id": 8, "caption": {"nested": "x"}}], [{"result": {"message_id": 9}}],
+]
+
+
+def test_no_stored_answer_shape_makes_the_status_read_fail(tmp_path):
+    """A legacy receipt (0.12 kept a photo's answer with message_id 0 and a text caption) once made read_status raise
+    "malformed JSON": Places and the card lost the status while it stayed in the window. Every shape reads, and is
+    counted exactly as delivery.stored_answers reads it."""
+    from telegram_bot.delivery import stored_answers
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    expected = {"failed": 0, "uncertain": 0}
+    rows = [({key: shape}, state) for shape in _LEGACY_ANSWERS for key in ("_sent_messages", "_sent_media")
+            for state in ("failed", "uncertain")]
+    rows.append(({"_sent_messages": "x", "_sent_media": [{"message_id": 1}]}, "failed"))  # _sent_messages decides
+    for index, (extra, state) in enumerate(rows):
+        store.enqueue_outbox(f"legacy-{index}", {"kind": "message", "chat_id": str(10_000 + index)})
+        lease = store.claim_outbox()
+        store.checkpoint_outbox(lease.delivery_id, {**lease.payload, **extra})
+        store.mark_outbox_failed(lease.delivery_id, reason="x", state=state)
+        expected[state] += bool((stored_answers({**lease.payload, **extra}) or ([], []))[0])
+    counts, card = store.read_status()  # must not raise
+    outbound = card["recent_problems"]["outbound"]
+    assert (outbound["failed_partly_confirmed"], outbound["uncertain_partly_confirmed"]) == (
+        expected["failed"], expected["uncertain"])
+    assert counts["outbox_failed"] + counts["outbox_uncertain"] == len(rows)
+    assert expected["failed"] > 0 and expected["uncertain"] > 0  # the shapes include confirmed ones too
+    store.close()
+
+
 def test_sends_telegram_confirmed_in_part_are_counted_as_stored_answers_read_them(tmp_path):
     """The receipt's confirmed_messages (delivery.stored_answers) decide; an answer naming no message confirms nothing."""
     from telegram_bot.delivery import stored_answers
@@ -554,7 +671,7 @@ def test_sends_telegram_confirmed_in_part_are_counted_as_stored_answers_read_the
 
 
 _NO_WAIT = {"count": 0, "submit": 0, "download": 0, "other": 0, "since": "", "next_attempt_at": "",
-            "last_error": "", "last_stage": ""}
+            "last_error": "", "last_stage": "", "last_error_at": ""}
 
 
 def _hello(store, *update_ids):
@@ -656,6 +773,85 @@ def test_the_inbox_worker_records_where_an_attempt_stopped(tmp_path):
     asyncio.run(run())
 
 
+# 0.13.0's own statements (telegram_bot/custody.py at c60c7ad), run against this version's store as a rollback runs
+# them: they name their columns, change attempts, last_error and available_at, and never touch the 0.13.1 marks.
+_V0130_CLAIM_INBOX = ("UPDATE inbox SET state='leased', lease_until=?, attempts=attempts+1, last_error='' "
+                      "WHERE event_id=? AND state='pending'")
+_V0130_RELEASE_INBOX = ("UPDATE inbox SET state='pending', available_at=?, lease_until=0, last_error=? "
+                        "WHERE event_id=? AND state='leased'")
+_V0130_DEFER_INBOX = ("UPDATE inbox SET state='pending', available_at=?, lease_until=0, last_error=?, "
+                      "attempts=MAX(0, attempts-1) WHERE event_id=? AND state='leased'")
+_V0130_CLAIM_OUTBOX = ("UPDATE outbox SET state='leased', lease_until=?, attempts=attempts+1, last_error='' "
+                       "WHERE delivery_id=? AND state='pending'")
+_V0130_HOLD_OUTBOX = ("UPDATE outbox SET state='pending', available_at=?, lease_until=0, last_error=?, "
+                      "attempts=MAX(0, attempts-1) WHERE delivery_id=? AND state='leased'")
+
+
+def _as_0130(path, *statements):
+    with sqlite3.connect(path) as conn:
+        for sql, params in statements:
+            assert conn.execute(sql, params).rowcount == 1, sql
+
+
+def test_the_waiting_updates_error_is_the_latest_failed_attempts(tmp_path, monkeypatch):
+    """The newer update's download failed first, then the older update's handoff failed: the card shows the handoff
+    error (the latest attempt), with its time, not the newest update's older error."""
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    _hello(store, 81, 82)
+    older, newer = store.claim_inbox(), store.claim_inbox()
+    assert (older.event_id, newer.event_id) == ("telegram:9:81", "telegram:9:82")
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr("telegram_bot.custody.time.time", lambda: clock[0])
+    store.release_inbox(newer.event_id, reason="TelegramApiError: Telegram getFile failed (429)", retry_after_sec=30,
+                        stage="download")
+    clock[0] += 60
+    store.release_inbox(older.event_id, reason="PresenceHostError: presence Host returned HTTP 500", retry_after_sec=30,
+                        stage="submit")
+    waiting = store.card_snapshot(now=clock[0])["handoff_retrying"]
+    assert waiting["last_error"] == "PresenceHostError: presence Host returned HTTP 500"
+    assert waiting["last_stage"] == "submit" and waiting["last_error_at"] == _iso(clock[0])
+    item = summarize(_quiet(handoff_retrying=waiting))["attention"][0]
+    assert item["error"] == {"text": "PresenceHostError: presence Host returned HTTP 500", "at": _iso(clock[0]),
+                             "stage": "submit"}
+    store.close()
+
+
+def test_marks_left_by_0131_mean_nothing_once_0130_rewrote_the_row(tmp_path):
+    """0.13.1 -> 0.13.0 -> 0.13.1: 0.13.0 claims and settles a row without the 0.13.1 marks. A stale "deferred" must
+    not hide its real Host refusal, a stale "skill_access" must not make an ordinary pause the owner's move."""
+    path = tmp_path / "custody.sqlite3"
+    store = CustodyStore(path)
+    _hello(store, 71)
+    busy = store.claim_inbox()
+    store.defer_inbox(busy.event_id, reason="PresenceHostHTTPError: presence_capacity_full", retry_after_sec=0)
+    store.enqueue_outbox("held", {"kind": "message", "chat_id": "700"})
+    store.hold_outbox(store.claim_outbox().delivery_id, SKILL_ACCESS_REFUSED, kind="skill_access")
+    assert store.card_snapshot()["held_reasons"][0]["kind"] == "skill_access"
+    store.close()
+    # Rolled back to 0.13.0: the deferred update is retried and refused; the held send is retried and paused.
+    later = time.time() + 30
+    _as_0130(path, (_V0130_CLAIM_INBOX, (later + 1800, busy.event_id)),
+             (_V0130_RELEASE_INBOX, (later, "PresenceHostError: presence Host returned HTTP 500", busy.event_id)),
+             (_V0130_CLAIM_OUTBOX, (later + 90, "held")),
+             (_V0130_HOLD_OUTBOX, (later + 5, "Held: Example place is paused", "held")))
+    # 0.13.0 still adds rows to this store with its own explicit column lists.
+    _as_0130(path, ("INSERT OR IGNORE INTO outbox(delivery_id, payload_json, state, attempts, available_at, created_at) "
+                    "VALUES (?, ?, 'pending', 0, ?, ?)", ("from-0130", '{"kind": "message", "chat_id": "701"}', later, later)))
+    # Back on 0.13.1.
+    store = CustodyStore(path)
+    card = store.card_snapshot()
+    waiting = card["handoff_retrying"]
+    assert (waiting["count"], waiting["submit"], waiting["download"], waiting["other"]) == (1, 0, 0, 1)
+    assert waiting["last_error"] == "PresenceHostError: presence Host returned HTTP 500" and waiting["last_stage"] == ""
+    assert card["held_reasons"] == [{"reason": "Example place is paused", "note": "Held: Example place is paused",
+                                     "count": 1}]
+    summary = summarize(_quiet(handoff_retrying=waiting, outbox_held=1, held_reasons=card["held_reasons"]))
+    held = next(item for item in summary["attention"] if item["kind"] == "held")
+    assert held["tone"] == "muted" and not any(reason.get("action") for reason in held["reasons"])
+    assert any(item["kind"] == "handoff_waiting" for item in summary["attention"])
+    store.close()
+
+
 def test_an_older_store_gains_the_stage_column_and_its_waiting_rows_read_as_unrecorded(tmp_path):
     path = tmp_path / "custody.sqlite3"
     store = CustodyStore(path)
@@ -664,8 +860,9 @@ def test_an_older_store_gains_the_stage_column_and_its_waiting_rows_read_as_unre
     store.release_inbox(lease.event_id, reason="PresenceHostError: 500", retry_after_sec=30, stage="submit")
     store.close()
     with sqlite3.connect(path) as conn:  # the 0.13.0 schema: no last_stage
-        conn.execute("ALTER TABLE inbox DROP COLUMN last_stage")
-        conn.execute("ALTER TABLE outbox DROP COLUMN hold_kind")
+        for table, column in (("inbox", "last_stage"), ("inbox", "last_stage_at"), ("inbox", "last_stage_due"),
+                              ("outbox", "hold_kind"), ("outbox", "hold_kind_due")):
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     reopened = CustodyStore(path)
     waiting = reopened.card_snapshot()["handoff_retrying"]
     # The row keeps waiting and its error; where it stopped was not recorded, so it is not called a failed handoff.
@@ -674,6 +871,39 @@ def test_an_older_store_gains_the_stage_column_and_its_waiting_rows_read_as_unre
     assert reopened.card_snapshot()["held_reasons"] == []  # the outbox gained hold_kind too
     reopened.close()
     CustodyStore(path).close()  # opening again changes nothing (idempotent)
+
+
+def test_a_kind_with_no_failed_send_is_not_looked_for(tmp_path):
+    """The newest plain failure and the newest unknown outcome are read only when the shared pass counted some: with
+    none, the walk of outbox_failed_idx would read every failed row's outcome mark to find nothing."""
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+
+    def newest_queries():
+        seen = []
+        with store._connect() as conn:
+            conn.set_trace_callback(seen.append)
+        try:
+            counts, card = store.read_status()
+        finally:
+            with store._connect() as conn:
+                conn.set_trace_callback(None)
+        lookups = [sql for sql in seen if "ORDER BY failed_at DESC, rowid DESC LIMIT 1" in sql]
+        return {"plain": sum("AND NOT (" in sql for sql in lookups), "uncertain": sum("AND NOT (" not in sql for sql in lookups)}, card
+
+    assert newest_queries()[0] == {"plain": 0, "uncertain": 0}
+    for index, state in enumerate(("failed", "failed")):
+        store.enqueue_outbox(f"plain-{index}", {"kind": "message", "chat_id": str(900 + index)})
+        store.mark_outbox_failed(store.claim_outbox().delivery_id, reason="Forbidden", state=state)
+    queries, card = newest_queries()
+    assert queries == {"plain": 1, "uncertain": 0}
+    outbound = card["recent_problems"]["outbound"]
+    assert outbound["last_failed_error"]["text"] == "Forbidden" and outbound["last_uncertain_error"] is None
+    store.enqueue_outbox("unknown", {"kind": "message", "chat_id": "910"})
+    store.mark_outbox_failed(store.claim_outbox().delivery_id, reason="TimeoutError", state="uncertain")
+    queries, card = newest_queries()
+    assert queries == {"plain": 1, "uncertain": 1}
+    assert card["recent_problems"]["outbound"]["last_uncertain_error"]["text"] == "TimeoutError"
+    store.close()
 
 
 def test_status_totals_and_card_facts_come_from_one_read_transaction(tmp_path, monkeypatch):
@@ -722,6 +952,35 @@ def test_last_error_records_its_time_and_the_loop_that_wrote_it(tmp_path):
         assert snapshot["last_error_source"] == source and snapshot["last_error_at"].endswith("Z")
     runtime._last_error = ""
     assert runtime.status_snapshot({})["last_error_at"] == "" and runtime.status_snapshot({})["last_error_source"] == ""
+    runtime.store.close()
+
+
+def test_the_last_error_is_read_whole_never_one_loops_text_with_anothers_source(tmp_path, monkeypatch):
+    """A status read during an error's write saw the new text with the previous loop's source ("Could not send"
+    labelled inbound). The text, its time and its loop are one record, replaced whole and read once."""
+    runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "", logger=None,
+                                                   submitter=object())
+
+    async def write(name, value):
+        async def assign():
+            runtime._last_error = value
+        await asyncio.create_task(assign(), name=name)
+
+    asyncio.run(write("telegram-presence-inbox-0", "PresenceHostError: Host refused"))
+    seen, real = [], runtime_mod._error_source
+
+    def read_during_the_write():
+        snapshot = runtime.status_snapshot({})  # as the route reads it from its own thread, mid-write
+        seen.append((snapshot["last_error"], snapshot["last_error_source"], bool(snapshot["last_error_at"])))
+        return real()
+    monkeypatch.setattr(runtime_mod, "_error_source", read_during_the_write)
+    asyncio.run(write("telegram-presence-outbox", "TelegramApiError: Could not send"))
+    assert seen == [("PresenceHostError: Host refused", "inbound", True)]
+    after = runtime.status_snapshot({})
+    assert (after["last_error"], after["last_error_source"]) == ("TelegramApiError: Could not send", "outbound")
+    runtime._last_error = ""
+    cleared = runtime.status_snapshot({})
+    assert (cleared["last_error"], cleared["last_error_at"], cleared["last_error_source"]) == ("", "", "")
     runtime.store.close()
 
 
@@ -783,6 +1042,7 @@ def test_route_adds_card_fields_and_keeps_every_existing_key(tmp_path):
     assert (payload["poll_result"], payload["poll_error"], payload["poll_failure"]) == ("", "", "")
     assert payload["handoff_retrying"]["count"] == 0
     assert payload["bot_unconfirmed"] is False  # not running: no bot named, nothing to confirm
+    assert payload["link"] == "not_started" and payload["poll_stage"] == ""  # the first line's own link judgement
     assert payload["recent_problems"]["outbound"]["failed"] == 0 and payload["held_reasons"] == []
     assert (payload["text"], payload["tone"], payload["title"]) == ("Starting…", "muted", "Telegram transport")
 

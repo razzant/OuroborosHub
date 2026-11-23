@@ -110,13 +110,20 @@ BOT_TOKEN_MISSING = "Bot token missing"
 BOT_UNCONFIRMED = "Bot identity is unconfirmed; check the transport status"
 
 
-def _poll_failure(exc: Exception, answered: bool) -> str:
-    """Which side a failed getUpdates attempt stopped on: ``token``, ``network``, ``telegram``, ``local`` or ``""``.
+# Where a poll attempt stopped (``poll_stage``): confirming the bot (getMe, and recording the bot it names), asking
+# Telegram for new updates, or recording Telegram's answer on this computer.
+POLL_STAGES = ("identity", "updates", "record")
 
-    ``local``: Telegram answered this attempt and this computer failed while recording the answer.
-    TelegramClient wraps every failure of its own requests in TelegramApiError; without one, the side is unknown.
+
+def _poll_failure(exc: Exception, stage: str) -> str:
+    """Which side a failed poll attempt stopped on: ``token``, ``network``, ``telegram``, ``local`` or ``""``.
+
+    ``local``: this computer failed, so neither the token nor the network is the cause: anything after Telegram's
+    answer was received (``stage`` "record"), or the custody store (SQLite) at any stage, such as recording the bot
+    getMe confirmed. TelegramClient wraps every failure of its own requests in TelegramApiError; any other error
+    leaves the side unknown.
     """
-    if answered:
+    if stage == "record" or isinstance(exc, sqlite3.Error):
         return "local"
     if isinstance(exc, TelegramApiError):
         if exc.error_code in _TOKEN_REFUSED:
@@ -150,16 +157,18 @@ def _error_source() -> str:
 
 
 class TelegramTransportRuntime:
-    # Every assignment of ``self._last_error`` also records when and from which loop, without touching its writers.
+    # Every assignment of ``self._last_error`` also records when and from which loop, without touching its writers:
+    # one immutable (text, time, loop) record, built first and then swapped in whole. The status route reads it from
+    # another thread; it reads the record once, so it never pairs one loop's text with another loop's source or time.
+    _last_error_record: Tuple[str, float, str] = ("", 0.0, "")
+
     @property
     def _last_error(self) -> str:
-        return self._last_error_text
+        return self._last_error_record[0]
 
     @_last_error.setter
     def _last_error(self, value: str) -> None:
-        self._last_error_text = value
-        self._last_error_at = time.time() if value else 0.0
-        self._last_error_source = _error_source() if value else ""
+        self._last_error_record = (value, time.time(), _error_source()) if value else ("", 0.0, "")
 
     def __init__(
         self,
@@ -281,6 +290,7 @@ class TelegramTransportRuntime:
             state, label, attempt = self._runtime_state, self._bot_label, self._poll_attempt
             account, reason = _confirmed(self._run_task is not None, token, self._client_token, self._bot_id)
             identity = getattr(self.submitter, "connector_identity", {})
+        error_text, error_at, error_source = self._last_error_record  # one record, read once
         return {
             "runtime_state": state,
             "bot_label": label,
@@ -288,7 +298,7 @@ class TelegramTransportRuntime:
             "confirmed_reason": reason,
             **({"identity": identity}
                if getattr(self.submitter, "presence_identity", 0) == 1 and identity else {}),
-            "last_error": self._last_error,
+            "last_error": error_text,
             "delivery_reporting": getattr(self.submitter, "delivery_reporting_status", "unsupported"),
             # 2: early custody answers; 0: each turn waits for its terminal (older Host).
             "presence_continuation_version": getattr(self.submitter, "continuation_version", 0),
@@ -300,33 +310,35 @@ class TelegramTransportRuntime:
             "last_delivery_at": custody.get("last_delivery_at", ""),
             # Additive card facts: when the newest error was recorded and by which loop, the last getUpdates answer,
             # and whether Ouroboros answered /identity yet (until then capabilities are unknown, not missing).
-            "last_error_at": _iso(self._last_error_at),
-            "last_error_source": self._last_error_source,
+            "last_error_at": _iso(error_at),
+            "last_error_source": error_source,
             "provider_ok_at": _iso(self._provider_ok_at),
             "host_checked": getattr(self.submitter, "delivery_reporting_status", "") in {"supported", "unsupported"},
+            # When that check last ended, answered or not ("" before any): its facts are a past check, not live.
+            "host_checked_at": _iso(getattr(self.submitter, "identity_checked_at", 0.0) or 0.0),
             "places_version": getattr(self.submitter, "places_version", 0),
             **_poll_facts(attempt, token),
         }
 
-    def _poll_done(self, token: str, result: str, error: str = "", failure: str = "") -> None:
+    def _poll_done(self, token: str, result: str, error: str = "", failure: str = "", stage: str = "") -> None:
         with self._facts_lock:
             if result == "failed":
                 self._runtime_state = "provider_error"
             self._poll_attempt = {"token": token, "result": result, "at": time.time(), "error": error,
-                                  "failure": failure}
+                                  "failure": failure, "stage": stage if result == "failed" else ""}
 
     async def _poll_loop(self) -> None:
-
         backoff = 2.0
         while not self._stopping:
-            # The token this attempt runs with; its result counts only while that token stays configured.
-            token, answered = str(self.token_provider() or "").strip(), False
+            # The token this attempt runs with is the one _ready_client picks under the client lock (``picked``);
+            # its result counts only while that token stays configured. ``stage`` says where a failure stopped.
+            token, picked, stage = str(self.token_provider() or "").strip(), {}, "identity"
             try:
-                client = await self._ready_client()
+                client = await self._ready_client(picked)
                 if client is None:
                     await self._pause(5.0)
                     continue
-                token = self._client_token
+                token, stage = picked.get("token", self._client_token), "updates"
                 # The bot this client answers for, even if another worker confirms a new token meanwhile.
                 account, username = self._bot_id, self._bot_username
                 self._runtime_state = "polling"
@@ -337,7 +349,7 @@ class TelegramTransportRuntime:
                     offset=self.store.telegram_offset(), timeout_sec=25
                 )
                 self._provider_ok_at = time.time()
-                answered = True
+                stage = "record"
                 for update in updates:
                     update_id = _update_id(update)
                     if update_id is None:
@@ -359,20 +371,28 @@ class TelegramTransportRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                token = picked.get("token", token)  # a refusal of the token picked under the lock is that token's
                 self._last_error = _error(exc)
                 # The state and this attempt's result change together (one read of them never splits).
-                self._poll_done(token, "failed", self._last_error, _poll_failure(exc, answered))
+                self._poll_done(token, "failed", self._last_error, _poll_failure(exc, stage), stage)
                 self._log(
                     "warning", f"telegram-bot: provider poll failed: {self._last_error}"
                 )
                 await self._pause(backoff)
                 backoff = min(60.0, backoff * 1.7)
 
-    async def _ready_client(self) -> Optional[TelegramClient]:
+    async def _ready_client(self, picked: Optional[Dict[str, Any]] = None) -> Optional[TelegramClient]:
+        """The client for the token configured now, confirming it with getMe once per token.
+
+        ``picked`` (the poll loop's) receives the token read here, under the lock, before any request: a result or a
+        refusal of this call belongs to that token, whatever the caller read before it waited for the lock.
+        """
         if self._client_lock is None:
             self._client_lock = asyncio.Lock()
         async with self._client_lock:
             token = str(self.token_provider() or "").strip()
+            if picked is not None and token:
+                picked["token"] = token
             if not token:
                 with self._facts_lock:
                     self._runtime_state = "waiting_for_token"
@@ -1495,9 +1515,10 @@ def _poll_facts(attempt: Dict[str, Any], token: str) -> Dict[str, Any]:
     error and side (``_poll_failure``), never another loop's newest error.
     """
     if not attempt or not token or attempt.get("token") != token:
-        return {"poll_result": "", "poll_at": "", "poll_error": "", "poll_failure": ""}
+        return {"poll_result": "", "poll_at": "", "poll_error": "", "poll_failure": "", "poll_stage": ""}
     return {"poll_result": attempt["result"], "poll_at": _iso(attempt["at"]),
-            "poll_error": attempt.get("error", ""), "poll_failure": attempt.get("failure", "")}
+            "poll_error": attempt.get("error", ""), "poll_failure": attempt.get("failure", ""),
+            "poll_stage": attempt.get("stage", "")}
 
 
 def _iso(epoch: float) -> str:

@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -178,6 +179,8 @@ def served(request):
             if name in api.routes:
                 if self.command == 'POST':
                     state['posts'].append((name, json.loads(payload or b'null')))
+                    if state.get('post_delay'):
+                        time.sleep(state['post_delay'])  # a slow save: the reader keeps typing meanwhile
                 try:
                     query = {k: v[-1] for k, v in parse_qs(url.query).items()}
                     result = asyncio.run(api.routes[name](Request(self.command, payload, query)))
@@ -395,9 +398,27 @@ def test_the_hold_reason_that_needs_the_owner_is_shown_first(served, kind):
             browser.close()
 
 
+def synthetic_status(**facts):
+    """A route answer made by the route's own summary from synthetic facts (states a fixture store cannot reach)."""
+    sys.path.insert(0, str(ROOT / 'skills' / 'telegram-bot'))
+    from telegram_bot.status_summary import link_state, summarize
+    body = {'runtime_state': 'polling', 'poll_result': 'ok', 'host_checked': True, 'places_version': 1,
+            'binding_state': 'missing', 'reaction_context': 'available', 'bot_label': '@example_bot',
+            'connect': [], 'bot_unconfirmed': False, 'held_reasons': [], 'management_group_id': '',
+            'recent_problems': {'window_seconds': 86400,
+                                'outbound': {'failed': 0, 'uncertain': 0, 'failed_partly_confirmed': 0,
+                                             'uncertain_partly_confirmed': 0, 'last_failed_at': '',
+                                             'last_uncertain_at': '', 'last_error': None},
+                                'inbound': {'failed': 0, 'last_failed_at': '', 'last_error': None}}}
+    outbound = facts.pop('outbound', {})
+    body['recent_problems']['outbound'].update(outbound)
+    body.update(facts)
+    return {**body, **summarize(body), 'link': link_state(body), 'title': 'Telegram transport'}
+
+
 def test_sends_confirmed_in_part_point_to_the_receipt_never_a_blind_resend(served):
-    """An incomplete album answer is a partial confirmation, not a lost answer; a refusal after a delivered first part
-    is fixed and sent only where missing."""
+    """An album whose answer named no message was not lost: its delivery could not be established. One confirmed in
+    part says so apart; a refusal after a delivered first part is fixed and sent only where missing."""
     from playwright.sync_api import sync_playwright, expect
     state, url = served
     store = store_of(state)
@@ -405,6 +426,11 @@ def test_sends_confirmed_in_part_point_to_the_receipt_never_a_blind_resend(serve
     lease = store.claim_outbox()
     store.checkpoint_outbox(lease.delivery_id, {**lease.payload, '_sent_media': [{'message_id': 501}, {'ok': True}]})
     store.mark_outbox_failed(lease.delivery_id, reason='AlbumIncomplete: Telegram answered 1 of 2 items', state='uncertain')
+    store.enqueue_outbox('album-no-ids', {'kind': 'album', 'chat_id': '1000000203'})
+    lease = store.claim_outbox()
+    store.checkpoint_outbox(lease.delivery_id, {**lease.payload, '_sent_media': [{'ok': True}, {'ok': True}]})
+    store.mark_outbox_failed(lease.delivery_id, reason='AlbumIncomplete: Telegram answered ok without message ids',
+                             state='uncertain')
     store.enqueue_outbox('long', {'kind': 'message', 'chat_id': '1000000202'})
     lease = store.claim_outbox()
     store.checkpoint_outbox(lease.delivery_id, {**lease.payload, '_sent_messages': [{'message_id': 502}]})
@@ -413,16 +439,30 @@ def test_sends_confirmed_in_part_point_to_the_receipt_never_a_blind_resend(serve
         browser, page, frame = open_card(pw, url)
         try:
             unknown = frame.locator('.tc-item[data-kind=outcome_unknown]')
-            expect(unknown).to_contain_text('Telegram confirmed part of it, but nobody knows whether the rest arrived',
-                                            timeout=15000)
-            expect(unknown).not_to_contain_text('was lost')
+            expect(unknown).to_contain_text('Telegram confirmed part of 1 item; for the other, delivery could not be '
+                                            'established', timeout=15000)
             expect(unknown).to_contain_text('confirmed_messages')
             failed = frame.locator('.tc-item[data-kind=not_delivered]')
             # The seeded refusal (the fixture's own) confirmed nothing; this one did: one of two in part.
             expect(failed).to_contain_text('Telegram confirmed part of 1 item before the failure')
             expect(failed).to_contain_text('send only what is missing')
-            for text in (unknown.inner_text(), failed.inner_text()):
-                assert 'confirmed_parts' not in text and 'send it again' not in text
+            texts = [unknown.inner_text(), failed.inner_text()]
+            # One send, nothing confirmed (an ok naming no message, or no answer at all): not established, never "lost".
+            state['status_body'] = synthetic_status(outbound={'uncertain': 1, 'last_uncertain_at': '2026-11-22T18:00:00Z'})
+            frame.locator('.tc-fresh button').click()
+            expect(unknown).to_contain_text('Delivery could not be established, so nobody knows whether it arrived',
+                                            timeout=15000)
+            texts.append(unknown.inner_text())
+            # One send confirmed in part.
+            state['status_body'] = synthetic_status(outbound={'uncertain': 1, 'uncertain_partly_confirmed': 1,
+                                                              'last_uncertain_at': '2026-11-22T18:00:00Z'})
+            frame.locator('.tc-fresh button').click()
+            expect(unknown).to_contain_text('Telegram confirmed part of it, but nobody knows whether the rest arrived',
+                                            timeout=15000)
+            expect(unknown).to_contain_text('confirmed_messages')
+            texts.append(unknown.inner_text())
+            for text in texts:
+                assert 'was lost' not in text and 'confirmed_parts' not in text and 'send it again' not in text
         finally:
             browser.close()
 
@@ -461,92 +501,168 @@ def test_a_saved_group_survives_a_repaint_from_older_status(served, engine):
             browser.close()
 
 
-def test_unknown_facts_read_as_unknown_never_as_none_or_unsupported(served):
-    """Ouroboros not asked yet and custody counts not read: "not checked yet" and "—", never "none yet"."""
+_ZERO_COUNTS = {key: 0 for key in (
+    'inbox_waiting', 'inbox_leased', 'inbox_submitted', 'inbox_retained', 'inbox_failed', 'reactions_withheld',
+    'outbox_waiting', 'outbox_held', 'outbox_leased', 'outbox_delivered', 'outbox_failed', 'outbox_uncertain',
+    'work_waiting', 'work_leased', 'work_terminal', 'delivery_reports_pending', 'delivery_reports_held',
+    'telegram_offset', 'group_backfill_unreadable')}
+_CHECKED = {'host_checked': True, 'host_checked_at': '2026-11-22T18:00:00Z', 'delivery_reporting': 'supported',
+            'reaction_context': 'available', 'reaction_history': 'available', 'presence_continuation_version': 2,
+            'places_version': 1}
+
+
+def test_degraded_states_claim_no_more_than_the_status_records(served):
+    """Counts unknown, the bot stopped, Ouroboros not checked or not answering, a fresh install, an inbound refusal:
+    each reads as what the status records, never as zero, a total, a current delivery or an outbound failure."""
     from playwright.sync_api import sync_playwright, expect
     state, url = served
-    state['status_body'] = {
-        'text': 'Starting…', 'tone': 'muted', 'attention': [], 'title': 'Telegram transport',
-        'runtime_state': 'not_started', 'bot_label': 'not connected', 'host_checked': False,
-        'presence_continuation_version': 2, 'reaction_context': 'available', 'reaction_history': 'available',
-        'delivery_reporting': 'unknown', 'binding_state': 'missing', 'places_version': 0, 'management_group_id': '',
-        'connect': None, 'connect_unavailable': 'Telegram bot not running', 'bot_unconfirmed': False,
-        'last_event_at': '', 'last_delivery_at': '', 'last_error': '', 'recent_problems': None, 'held_reasons': [],
-    }
+    previous = {'sends_as': {'id': '77', 'label': '@example_bot', 'kind': 'bot'}}
     with sync_playwright() as pw:
+        state['status_body'] = synthetic_status(
+            runtime_state='stopped', bot_label='@example_bot', identity=previous, connect=None,
+            connect_unavailable='Telegram bot not running', recent_problems=None, **_CHECKED)
         browser, page, frame = open_card(pw, url)
         try:
-            expect(frame.locator('.tc-facts').first).to_contain_text('unknown: the custody counts were not read',
-                                                                     timeout=15000)
-            frame.locator('details.tc-det > summary').click()
+            card = frame.locator('.tc')
 
             def fact(label):
                 return frame.locator('.tc-det dt', has_text=label).first.locator('xpath=following-sibling::dd[1]')
-            expect(fact('Early answers')).to_have_text('not checked yet')
-            expect(fact('Reactions in Host context')).to_have_text('not checked yet')
+
+            def show(body, first_line):
+                state['status_body'] = body
+                frame.locator('.tc-fresh button').click()
+                expect(frame.locator('.tc-status .tc-st-text')).to_have_text(first_line, timeout=15000)
+
+            # Counts unknown (the store was not read) while the bot is stopped; Ouroboros was checked earlier.
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text('Stopped · the bot is not running', timeout=15000)
+            frame.locator('details.tc-det > summary').click()
+            expect(frame.locator('.tc-facts').first).to_contain_text('unknown: the custody counts were not read')
+            expect(frame.locator('.tc-det')).to_contain_text('The custody counts were not read, so the queues are unknown.')
             expect(fact('Last update')).to_have_text('—')
-            expect(fact('Last delivery')).to_have_text('—')
-            assert 'none yet' not in frame.locator('.tc-det').inner_text()
+            expect(fact('Sends as')).to_contain_text('@example_bot (77) · last confirmed bot; the bot is not running')
+            expect(fact('Delivery history')).to_contain_text('supported by Ouroboros (checked ')
+            expect(fact('Early answers')).to_contain_text('supported by Ouroboros (checked ')
+            for claim in ('Totals since install', 'Counts not listed are zero', 'none yet', 'recorded in Ouroboros',
+                          'passed to Ouroboros'):
+                assert claim not in card.inner_text(), claim
+            # Ouroboros not asked yet.
+            show(synthetic_status(host_checked=False, delivery_reporting='unknown', recent_problems=None),
+                 'Connected · state partly known')
+            for label in ('Delivery history', 'Reactions in Host context', 'Reaction history', 'Early answers'):
+                expect(fact(label)).to_have_text('not checked yet')
+            # Ouroboros did not answer the check.
+            show(synthetic_status(host_checked=False, delivery_reporting='unavailable',
+                                  host_checked_at='2026-11-22T18:00:00Z', recent_problems=None),
+                 'Connected · state partly known')
+            expect(fact('Delivery history')).to_contain_text('not known: Ouroboros didn’t answer the check (checked ')
+            expect(fact('Reactions in Host context')).to_contain_text('not known: Ouroboros didn’t answer the check')
+            # A fresh install: counts known and zero, no chats yet; the check is a past check, never a delivery.
+            show(synthetic_status(**_ZERO_COUNTS, **_CHECKED), 'Connected · nothing needs attention')
+            expect(frame.locator('.tc-note').first).to_have_text('No messages received or sent yet.')
+            expect(fact('Chats to connect')).to_have_text('no chats available')
+            expect(fact('Delivery history')).to_contain_text('supported by Ouroboros (checked ')
+            assert 'recorded in Ouroboros' not in card.inner_text()
+            # An update Ouroboros refused: not passed to Ouroboros, never "not delivered".
+            show(synthetic_status(**{**_ZERO_COUNTS, 'inbox_failed': 1}, **_CHECKED,
+                                  recent_problems={'window_seconds': 86400,
+                                                   'outbound': {'failed': 0, 'uncertain': 0},
+                                                   'inbound': {'failed': 1, 'last_failed_at': '2026-11-22T18:00:00Z',
+                                                               'last_error': {'at': '2026-11-22T18:00:00Z',
+                                                                              'state': 'failed', 'text': 'rejected'}}}),
+                 'Connected · 1 Telegram update not passed to Ouroboros')
+            handed = frame.locator('.tc-item[data-kind=not_handed]')
+            expect(handed).to_contain_text('Ouroboros refused it for good')
+            expect(frame.locator('.tc-facts').first).to_contain_text('1 refused')
+            expect(fact('Incoming updates')).to_contain_text('1 refused by Ouroboros')
+            assert 'not delivered' not in handed.inner_text()
+            assert 'not delivered' not in frame.locator('.tc-facts').first.inner_text()
         finally:
             browser.close()
 
 
+# Counts every Refresh button the card takes out of the page from now on, and marks the one focused now.
+_WATCH_REFRESH = """() => {
+    window.__refreshRemoved = 0;
+    new MutationObserver(records => {
+        for (const record of records) for (const node of record.removedNodes) {
+            if (node.nodeType === 1 && (node.matches('button[data-focus=refresh]')
+                    || node.querySelector('button[data-focus=refresh]'))) window.__refreshRemoved++;
+        }
+    }).observe(document.getElementById('root') || document.body, {childList: true, subtree: true});
+    const button = document.querySelector('.tc-fresh button');
+    button.__probe = 'the-focused-one';
+    button.focus();
+}"""
+
+
 @pytest.mark.parametrize('engine', ['webkit', 'chromium'])
-def test_refresh_keeps_keyboard_focus(served, engine):
-    """Enter on Refresh, and the next tick, replace only the freshness line: focus stays on Refresh."""
+def test_refresh_keeps_the_same_focused_button_and_repaints_a_bounded_number_of_times(served, engine):
+    """Enter on Refresh, then a 10-second tick: the freshness line changes in place. Replacing the focused button
+    blurred it, the blur scheduled another paint, and that paint replaced it again: 112 replacements in 500 ms."""
     from playwright.sync_api import sync_playwright, expect
     state, url = served
     with sync_playwright() as pw:
         browser, page, frame = open_card(pw, url, engine=engine)
         try:
             expect(frame.locator('.tc-fresh')).to_contain_text('Updated', timeout=15000)
-            frame.locator('.tc-fresh button').focus()
             inner = next(f for f in page.frames if f is not page.main_frame)
-
-            def focused():
-                return inner.evaluate("document.activeElement && document.activeElement.getAttribute('data-focus')")
+            inner.evaluate(_WATCH_REFRESH)
             page.keyboard.press('Enter')
+            page.wait_for_timeout(500)
+            assert inner.evaluate('window.__refreshRemoved') <= 1
             expect(frame.locator('.tc-fresh')).to_contain_text('Updated', timeout=15000)
-            page.wait_for_timeout(300)
-            assert focused() == 'refresh'
             page.wait_for_timeout(10500)  # one 10-second tick repaints the freshness line
-            assert focused() == 'refresh'
+            assert inner.evaluate("document.activeElement && document.activeElement.__probe") == 'the-focused-one'
+            assert inner.evaluate('window.__refreshRemoved') == 0
         finally:
             browser.close()
 
 
-@pytest.mark.parametrize('failure,text,headline', [
-    ('token', 'Check TELEGRAM_PUBLIC_BOT_TOKEN', 'Connection error · new messages are not being received'),
-    ('local', 'Not a token or network problem', 'Error on this computer · new messages are not being processed'),
+_TOKEN_ADVICE, _NETWORK_ADVICE = 'Check TELEGRAM_PUBLIC_BOT_TOKEN', 'network connection'
+
+
+@pytest.mark.parametrize('failure,stage,says,never,headline', [
+    ('token', 'identity', _TOKEN_ADVICE, [_NETWORK_ADVICE], 'Connection error · new messages are not being received'),
+    ('network', 'updates', 'check this computer’s network connection', [_TOKEN_ADVICE],
+     'Connection error · new messages are not being received'),
+    ('telegram', 'updates', 'Telegram’s own explanation', [_TOKEN_ADVICE, _NETWORK_ADVICE],
+     'Connection error · new messages are not being received'),
+    ('local', 'record', 'recording the new messages on this computer', [_TOKEN_ADVICE, _NETWORK_ADVICE],
+     'Error on this computer · new messages are not being processed'),
+    ('local', 'identity', 'Telegram confirmed the bot, but recording it on this computer failed',
+     [_TOKEN_ADVICE, _NETWORK_ADVICE], 'Error on this computer · new messages are not being processed'),
 ])
-def test_the_link_item_dates_the_last_successful_answer_and_names_its_side(served, failure, text, headline):
-    """The route's own summary of a failed attempt for the token set now, rendered as the card shows it."""
+def test_the_link_item_dates_the_last_successful_answer_and_names_its_side(served, failure, stage, says, never,
+                                                                          headline):
+    """A failed attempt for the token set now, by the side and stage it stopped at: only that side's advice."""
     from playwright.sync_api import sync_playwright, expect
-    sys.path.insert(0, str(ROOT / 'skills' / 'telegram-bot'))
-    from telegram_bot.status_summary import summarize
     state, url = served
-    body = {'runtime_state': 'provider_error', 'poll_result': 'failed', 'poll_failure': failure,
-            'poll_error': 'TelegramApiError: synthetic', 'poll_at': '2026-11-22T18:05:00Z',
-            'provider_ok_at': '2026-11-22T18:00:00Z', 'host_checked': True, 'places_version': 1,
-            'binding_state': 'missing', 'reaction_context': 'available', 'bot_label': '@example_bot',
-            'connect': None, 'connect_unavailable': 'Observed chats could not be read', 'bot_unconfirmed': False,
-            'recent_problems': None, 'held_reasons': [], 'management_group_id': ''}
-    summary = summarize(body)
-    state['status_body'] = {**body, **summary, 'title': 'Telegram transport'}
+    state['status_body'] = synthetic_status(
+        runtime_state='provider_error', poll_result='failed', poll_failure=failure, poll_stage=stage,
+        poll_error='TelegramApiError: synthetic', poll_at='2026-11-22T18:05:00Z', provider_ok_at='2026-11-22T18:00:00Z')
     with sync_playwright() as pw:
         browser, page, frame = open_card(pw, url)
         try:
             expect(frame.locator('.tc-status .tc-st-text')).to_have_text(headline, timeout=15000)
             link = frame.locator('.tc-item[data-kind=link]')
             expect(link.locator('.tc-ih-at')).to_contain_text('last successful answer')
-            expect(link).to_contain_text(text)
+            expect(link).to_contain_text(says)
             if failure == 'local':
-                expect(link).not_to_contain_text('TELEGRAM_PUBLIC_BOT_TOKEN')
+                expect(link).to_contain_text('Not a token or network problem')
+            for words in never:
+                expect(link).not_to_contain_text(words)
         finally:
             browser.close()
 
 
-@pytest.mark.parametrize('answer', [{}, None, []], ids=['empty-object', 'null', 'array'])
+# Status-shaped answers wrong in exactly one field: each fails only by its own check (text, tone), so dropping either
+# check from the kit fails a test; null and a list stand for answers that are not an object at all.
+_TONE_MISSING = {'text': 'Connected · nothing needs attention', 'attention': [], 'runtime_state': 'polling'}
+_TEXT_NOT_A_STRING = {'text': 7, 'tone': 'ok', 'attention': [], 'runtime_state': 'polling'}
+_TONE_NOT_A_STRING = {'text': 'Connected · nothing needs attention', 'tone': 5, 'attention': [], 'runtime_state': 'polling'}
+
+
+@pytest.mark.parametrize('answer', [_TONE_MISSING, _TEXT_NOT_A_STRING, None], ids=['tone-missing', 'text-number', 'null'])
 def test_a_200_that_is_not_a_status_is_a_failed_read(served, answer):
     """A 200 whose body is not a status keeps the last readable snapshot and the editor, and says the read failed."""
     from playwright.sync_api import sync_playwright, expect
@@ -566,7 +682,7 @@ def test_a_200_that_is_not_a_status_is_a_failed_read(served, answer):
             browser.close()
 
 
-@pytest.mark.parametrize('answer', [{}, None], ids=['empty-object', 'null'])
+@pytest.mark.parametrize('answer', [_TONE_NOT_A_STRING, []], ids=['tone-number', 'array'])
 def test_a_first_answer_that_is_not_a_status_reads_as_unreadable_with_the_editor(served, answer):
     from playwright.sync_api import sync_playwright, expect
     state, url = served
@@ -578,5 +694,73 @@ def test_a_first_answer_that_is_not_a_status_reads_as_unreadable_with_the_editor
                                                                          timeout=15000)
             expect(frame.locator('.tc-fresh')).to_contain_text('Couldn’t read the status')
             expect(frame.locator('details.tc-setting > summary')).to_be_visible()
+        finally:
+            browser.close()
+
+
+def test_a_save_confirms_the_value_it_sent_while_a_newer_draft_waits(served):
+    """While Save sent -1000000000002 the reader typed -1000000000003: the answer names what was saved and keeps the
+    draft, never "Saved." beside a value the server does not have."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            expect(frame.locator('.tc-fresh')).to_contain_text('Updated', timeout=15000)
+            frame.locator('details.tc-setting > summary').click()
+            field = frame.locator('#tc-mgid')
+            field.fill('-1000000000002')
+            state['post_delay'] = 1.5
+            frame.locator('.tc-setting .tc-btn').click()
+            expect(frame.locator('.tc-result')).to_have_text('Saving…')
+            field.fill('-1000000000003')
+            result = frame.locator('.tc-result')
+            expect(result).to_contain_text('-1000000000002', timeout=10000)
+            expect(result).to_contain_text('not saved yet')
+            assert result.inner_text() != 'Saved.'
+            expect(field).to_have_value('-1000000000003')
+            saved = json.loads((state['root'] / 'settings.json').read_text(encoding='utf-8'))
+            assert saved['management_group_id'] == '-1000000000002'
+            # The summary names what is saved; the draft stays until the reader saves it.
+            expect(frame.locator('details.tc-setting > summary')).to_contain_text('-1000000000002', timeout=15000)
+            page.wait_for_timeout(500)
+            expect(field).to_have_value('-1000000000003')
+        finally:
+            state['post_delay'] = 0
+            browser.close()
+
+
+def test_details_word_the_link_as_the_first_line_does_and_mark_the_last_confirmed_bot(served):
+    """Details › State reads the route's own link judgement: during a token rotation it says connecting (never
+    "requests failing"), and the bot it still names is the last confirmed one; a local failure reads as local."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    old_bot = {'sends_as': {'id': '77', 'label': '@previous_bot', 'kind': 'bot'}}
+    state['status_body'] = synthetic_status(
+        runtime_state='provider_error', poll_result='', bot_label='@previous_bot', identity=old_bot,
+        connect=None, connect_unavailable='Bot identity is unconfirmed; check the transport status',
+        bot_unconfirmed=True, last_error='TelegramApiError: Telegram getMe failed (401): Unauthorized',
+        last_error_source='polling')
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text('Connecting…', timeout=15000)
+            frame.locator('details.tc-det > summary').click()
+
+            def fact(label):
+                return frame.locator('.tc-det dt', has_text=label).first.locator('xpath=following-sibling::dd[1]')
+            expect(fact('State')).to_have_text('connecting: no completed answer from Telegram for this token yet')
+            expect(fact('Sends as')).to_contain_text('@previous_bot (77) · last confirmed bot; the current token is not '
+                                                     'confirmed yet')
+            expect(frame.locator('.tc-facts').first).to_contain_text('@previous_bot (last confirmed bot')
+            state['status_body'] = synthetic_status(
+                runtime_state='provider_error', poll_result='failed', poll_failure='local', poll_stage='record',
+                poll_error='sqlite3.OperationalError: database is locked', provider_ok_at='2026-11-22T18:00:00Z',
+                identity={'sends_as': {'id': '9', 'label': '@example_bot', 'kind': 'bot'}})
+            frame.locator('.tc-fresh button').click()
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(
+                'Error on this computer · new messages are not being processed', timeout=15000)
+            expect(fact('State')).to_have_text('failing on this computer, retrying')
+            expect(fact('Sends as')).to_have_text('@example_bot (9)')
         finally:
             browser.close()

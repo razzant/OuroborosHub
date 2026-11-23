@@ -178,11 +178,18 @@ _SEND_KINDS = _FILE_SEND_KINDS | {"message"}
 REACTION_WITHHELD = "reaction_host_context_unavailable"
 # The Widgets card lists terminal problems of the last day as attention; older ones are history in the totals.
 RECENT_PROBLEM_WINDOW_S = 86400
-# A waiting inbox row whose last attempt failed and is retried by itself. ``last_stage`` says where that attempt
-# stopped (written by release_inbox): "download" (an attachment from Telegram), "submit" (the handoff to Ouroboros)
-# or "" (a row from an older version, or a failure after the handoff answered). Not counted: a busy deferral
+# A mark 0.13.1 writes with a row's settlement (an inbox row's ``last_stage``, an outbox hold's ``hold_kind``) counts
+# only while the row still has the ``available_at`` written with it (``last_stage_due`` / ``hold_kind_due``). After a
+# rollback 0.13.0 claims and settles rows without touching the marks, and each of its releases, deferrals and holds
+# writes a new available_at: its rows then read as unrecorded (plain waiting, an ordinary hold), never by a stale mark.
+_STAGE = "(CASE WHEN last_stage_due=available_at THEN last_stage ELSE '' END)"
+_STAGE_AT = "(CASE WHEN last_stage_due=available_at THEN last_stage_at ELSE 0 END)"
+_HOLD_KIND = "(CASE WHEN hold_kind_due=available_at THEN hold_kind ELSE '' END)"
+# A waiting inbox row whose last attempt failed and is retried by itself. Its stage says where that attempt stopped
+# (written by release_inbox): "download" (an attachment from Telegram), "submit" (the handoff to Ouroboros) or ""
+# (not recorded: a row from an older version, or a failure after the handoff answered). Not counted: a busy deferral
 # ("deferred": defer_inbox gives the attempt back), a lease released at runtime start or by a cancelled worker.
-_INBOX_RETRYING = ("state='pending' AND attempts>0 AND last_stage<>'deferred' "
+_INBOX_RETRYING = (f"state='pending' AND attempts>0 AND {_STAGE}<>'deferred' "
                    "AND last_error NOT IN ('', 'released_at_runtime_start', 'worker_cancelled')")
 INBOX_STAGES = frozenset({"download", "submit"})
 # A failed outbox row's outcome is unknown when its payload marks _terminal_outcome uncertain (IFNULL: a row without the
@@ -191,11 +198,19 @@ _UNCERTAIN = "IFNULL(json_extract(payload_json,'$._terminal_outcome'),'')='uncer
 
 
 def _confirms(key: str) -> str:
-    """SQL: the row's stored answers under ``key`` (a list, or one answer) name a message (delivery.names_message)."""
-    named = "json_type({v},'$.message_id')='integer' AND json_extract({v},'$.message_id')>0"
-    return (f"(json_type(payload_json,'$.{key}')='array' AND EXISTS(SELECT 1 FROM json_each(payload_json,'$.{key}') "
-            f"WHERE {named.format(v='value')})) OR (json_type(payload_json,'$.{key}')='object' AND "
-            f"{named.format(v=f'json_extract(payload_json,{chr(39)}$.{key}{chr(39)})')})")
+    """SQL: the row's stored answers under ``key`` (a list, or one answer) name a message (delivery.names_message).
+
+    Every branch checks a value's JSON type before reading inside it, and CASE (unlike AND/OR) fixes the order: an
+    answer stored by any version (an object with a text caption, a bare string, a number, a list of mixed items) is
+    read as "names no message", never handed to a JSON function as text, which SQLite refuses as malformed JSON.
+    """
+    return (f"CASE json_type(payload_json,'$.{key}') "
+            f"WHEN 'array' THEN EXISTS(SELECT 1 FROM json_each(payload_json,'$.{key}') AS answer WHERE "
+            f"CASE WHEN answer.type='object' THEN json_type(answer.value,'$.message_id')='integer' "
+            f"AND json_extract(answer.value,'$.message_id')>0 ELSE 0 END) "
+            f"WHEN 'object' THEN json_type(payload_json,'$.{key}.message_id')='integer' "
+            f"AND json_extract(payload_json,'$.{key}.message_id')>0 "
+            f"ELSE 0 END")
 
 
 # Some part of the row was confirmed: its stored answers name a message, as delivery.stored_answers reads them
@@ -572,16 +587,19 @@ class CustodyStore:
     def release_inbox(
         self, event_id: str, *, reason: str, retry_after_sec: float, stage: str = ""
     ) -> None:
-        """Return a leased event to its queue; ``stage`` (INBOX_STAGES or "") says where its attempt stopped."""
+        """Return a leased event to its queue; ``stage`` (INBOX_STAGES or "") says where its attempt stopped, and is
+        stamped with this attempt's end and the available_at it sets (_STAGE)."""
+        now = time.time()
+        due = now + max(0.0, retry_after_sec)
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE inbox
-                SET state='pending', available_at=?, lease_until=0, last_error=?, last_stage=?
+                SET state='pending', available_at=?, lease_until=0, last_error=?, last_stage=?,
+                    last_stage_at=?, last_stage_due=?
                 WHERE event_id=? AND state='leased'
                 """,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500],
-                 stage if stage in INBOX_STAGES else "", event_id),
+                (due, str(reason)[:500], stage if stage in INBOX_STAGES else "", now, due, event_id),
             )
 
     def defer_inbox(
@@ -592,15 +610,17 @@ class CustodyStore:
         The Host admitted nothing, so this is neither custody nor a failure: the same
         event retries after the Host's hint, while other conversations proceed.
         """
+        now = time.time()
+        due = now + max(0.0, retry_after_sec)
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE inbox
                 SET state='pending', available_at=?, lease_until=0, last_error=?, last_stage='deferred',
-                    attempts=MAX(0, attempts-1)
+                    last_stage_at=?, last_stage_due=?, attempts=MAX(0, attempts-1)
                 WHERE event_id=? AND state='leased'
                 """,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
+                (due, str(reason)[:500], now, due, event_id),
             )
 
     def release_own_leases(self) -> Dict[str, int]:
@@ -1113,15 +1133,16 @@ class CustodyStore:
         # A hold returns its attempt to the count; stamps for that attempt move with it. ``kind`` names the Host
         # answer type of a hold only the owner can end (host.OWNER_HOLD_KINDS), "" otherwise.
         held, args = _held_by(attempts)
+        due = time.time() + 5
         with self._connect() as conn:
             updated = conn.execute(
-                "UPDATE outbox SET state='pending',available_at=?,lease_until=0,hold_kind=?,"
+                "UPDATE outbox SET state='pending',available_at=?,lease_until=0,hold_kind=?,hold_kind_due=?,"
                 "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE "
                 "WHEN json_extract(payload_json,?)=attempts "
                 "THEN json_set(payload_json,?,MAX(0,attempts-1),?,MAX(0,attempts-1)) "
                 "WHEN json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
                 "ELSE payload_json END WHERE delivery_id=? AND state='leased'" + held,
-                (time.time() + 5, str(kind or ""), reason, _FILE_STAMP_PATH, _FILE_STAMP_PATH, _STAMP_PATH,
+                (due, str(kind or ""), due, reason, _FILE_STAMP_PATH, _FILE_STAMP_PATH, _STAMP_PATH,
                  _STAMP_PATH, _STAMP_PATH, delivery_id, *args))
             return updated.rowcount == 1
 
@@ -1375,7 +1396,7 @@ class CustodyStore:
             "WHERE state='failed'", (REACTION_WITHHELD, REACTION_WITHHELD, since)).fetchone())
         # Each reason once, with the Host answer type it came from (hold_kind; a row held before 0.13.1 kept none).
         held = conn.execute(
-            "SELECT last_error, COUNT(*), MAX(hold_kind) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%' "
+            f"SELECT last_error, COUNT(*), MAX({_HOLD_KIND}) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%' "
             "GROUP BY last_error ORDER BY COUNT(*) DESC, last_error").fetchall()
         return {"failed": failed, "inbox_failed": inbox_failed, "held": held}
 
@@ -1389,23 +1410,24 @@ class CustodyStore:
             return conn.execute(sql, params).fetchone()
 
         # Each kind's newest row gives its last time and error. outbox_failed_idx walks the failed rows newest first,
-        # so each query reads the outcome mark only until its first match.
+        # so each query reads the outcome mark only until its first match; a kind the shared pass counted none of
+        # (same snapshot) is not looked for, since that walk would read every failed row to find nothing.
         newest_failed = one(f"SELECT failed_at, last_error, rowid FROM outbox WHERE state='failed' AND NOT ({_UNCERTAIN}) "
-                            "ORDER BY failed_at DESC, rowid DESC LIMIT 1")
+                            "ORDER BY failed_at DESC, rowid DESC LIMIT 1") if failed[0] - failed[1] else None
         newest_uncertain = one(f"SELECT failed_at, last_error, rowid FROM outbox WHERE state='failed' AND {_UNCERTAIN} "
-                               "ORDER BY failed_at DESC, rowid DESC LIMIT 1")
+                               "ORDER BY failed_at DESC, rowid DESC LIMIT 1") if failed[1] else None
         # The newest failed send of either kind, by the same order the two queries use.
         newest_send = max((row for row in (newest_failed, newest_uncertain) if row is not None),
                           key=lambda row: (row["failed_at"] or 0, row["rowid"]), default=None)
         newest_in = one("SELECT failed_at, last_error FROM inbox WHERE state='failed' AND last_error<>? "
                         "ORDER BY failed_at DESC, update_id DESC LIMIT 1", (REACTION_WITHHELD,))
-        # Waiting updates whose last attempt failed, by where it stopped (_INBOX_RETRYING); the newest such update
-        # carries the error and its stage.
+        # Waiting updates whose last attempt failed, by where it stopped (_INBOX_RETRYING). The error shown is the
+        # latest failed attempt's (by when it ended; rows whose end was not recorded come after, newest update first).
         handoff = one(
-            f"SELECT COUNT(*), MIN(received_at), MIN(available_at), SUM(last_stage='submit'), "
-            f"SUM(last_stage='download') FROM inbox WHERE {_INBOX_RETRYING}")
-        newest_wait = one(f"SELECT last_error, last_stage FROM inbox WHERE {_INBOX_RETRYING} "
-                          "ORDER BY update_id DESC LIMIT 1")
+            f"SELECT COUNT(*), MIN(received_at), MIN(available_at), SUM({_STAGE}='submit'), "
+            f"SUM({_STAGE}='download') FROM inbox WHERE {_INBOX_RETRYING}")
+        newest_wait = one(f"SELECT last_error, {_STAGE} AS stage, {_STAGE_AT} AS ended FROM inbox "
+                          f"WHERE {_INBOX_RETRYING} ORDER BY ended DESC, update_id DESC LIMIT 1")
         return {
             "recent_problems": {
                 "window_seconds": int(window_s),
@@ -1437,7 +1459,9 @@ class CustodyStore:
                 "since": _timestamp(handoff[1]) if handoff[0] else "",
                 "next_attempt_at": _timestamp(handoff[2]) if handoff[0] else "",
                 "last_error": str(newest_wait["last_error"] or "") if newest_wait else "",
-                "last_stage": str(newest_wait["last_stage"] or "") if newest_wait else "",
+                "last_stage": str(newest_wait["stage"] or "") if newest_wait else "",
+                # When that attempt ended, where recorded ("" for a row whose end was not recorded).
+                "last_error_at": _timestamp(newest_wait["ended"]) if newest_wait else "",
             },
             "held_reasons": [{"reason": str(row[0])[len("Held:"):].strip(), "note": str(row[0]), "count": int(row[1]),
                               **({"kind": str(row[2])} if row[2] else {})}
@@ -1576,10 +1600,15 @@ class CustodyStore:
             # 0.13.1: the status reads each kind's newest failed send by walking this index from the newest end,
             # instead of reading the outcome mark of every failed row (measured: perf_status_read.py).
             conn.execute("CREATE INDEX IF NOT EXISTS outbox_failed_idx ON outbox(state, failed_at)")
-            if "hold_kind" not in {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}:
-                conn.execute("ALTER TABLE outbox ADD COLUMN hold_kind TEXT NOT NULL DEFAULT ''")
-            if "last_stage" not in inbox_columns:  # 0.13.1: where a waiting row's last attempt stopped
-                conn.execute("ALTER TABLE inbox ADD COLUMN last_stage TEXT NOT NULL DEFAULT ''")
+            # 0.13.1 marks and their stamps (see _STAGE): additive, with defaults, so 0.13.0's inserts still work.
+            outbox_columns = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
+            for column, kind in (("hold_kind", "TEXT NOT NULL DEFAULT ''"), ("hold_kind_due", "REAL NOT NULL DEFAULT 0")):
+                if column not in outbox_columns:
+                    conn.execute(f"ALTER TABLE outbox ADD COLUMN {column} {kind}")
+            for column, kind in (("last_stage", "TEXT NOT NULL DEFAULT ''"), ("last_stage_at", "REAL NOT NULL DEFAULT 0"),
+                                 ("last_stage_due", "REAL NOT NULL DEFAULT 0")):
+                if column not in inbox_columns:
+                    conn.execute(f"ALTER TABLE inbox ADD COLUMN {column} {kind}")
             if "role" not in {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}:
                 self._key_work_by_reference(conn)
             conn.commit()

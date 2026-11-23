@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import pathlib
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -223,6 +224,8 @@ class PresenceHostClient:
         self.transport = transport or UrllibPresenceHostTransport()
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
+        # When the last /identity check ended (answered or not): the card words its capabilities as that past check.
+        self.identity_checked_at = 0.0
         self.places_version = 0
         self.presence_wake_signals = 0
         self.presence_identity = 0
@@ -261,6 +264,7 @@ class PresenceHostClient:
             self.continuation_version = 0
             self.presence_reaction_context = 0
             self.presence_explicit_completion = 0
+        self.identity_checked_at = time.time()
         return self.delivery_reporting_version
 
     async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:

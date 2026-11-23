@@ -113,23 +113,3 @@ def test_requests_go_only_through_the_bridge():
     # No fallback to the frame's own fetch: without the bridge the card says so (and Save says why it failed).
     assert "window.fetch" not in source and "fetch(" not in source.replace("bridge.fetch", "")
     assert "The widget bridge is unavailable" in source
-
-
-def test_link_advice_matches_the_side_the_poll_failed_on():
-    source = _source()
-    lines = source.split("var POLL_LINES = {")[1].split("};")[0]
-    sides = {side: lines.split(f"{side}: [")[1].split("]")[0] for side in ("token", "network", "telegram", "local")}
-    assert "TELEGRAM_PUBLIC_BOT_TOKEN" in sides["token"] and "network" not in sides["token"]
-    assert "network" in sides["network"] and "token" not in sides["network"].lower()
-    assert "Not a token or network problem" in sides["local"] and "Telegram answered" in sides["local"]
-    # Without a known side the generic words name neither the token nor the network.
-    generic = source.split("provider_error: [")[1].split("]")[0]
-    assert "token" not in generic and "network" not in generic
-    assert "POLL_LINES[item.failure]" in source
-
-
-def test_empty_wording_says_what_is_actually_known():
-    source = _source()
-    # Membership updates move the offset without any message; a removed bot offers no chats.
-    assert "Nothing received or sent yet" not in source and "none seen yet" not in source
-    assert "No messages received or sent yet." in source and "'no chats available'" in source

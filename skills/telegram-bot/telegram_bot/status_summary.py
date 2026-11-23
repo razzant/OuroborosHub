@@ -65,6 +65,12 @@ def _link(payload: Mapping[str, Any]) -> str:
     return "connecting"
 
 
+def link_state(payload: Mapping[str, Any]) -> str:
+    """The link's state as the first line judges it (``_link``): the route returns it as ``link``, so every reader
+    (the card's Details) words the same state, never a second reading of ``runtime_state``."""
+    return _link(payload)
+
+
 _PROPER_NOUNS = ("Telegram", "Ouroboros")
 
 
@@ -111,6 +117,7 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
             # never an earlier token's.
             if payload.get("poll_result") == "failed":
                 item["failure"] = str(payload.get("poll_failure") or "")
+                item["stage"] = str(payload.get("poll_stage") or "")
                 if payload.get("poll_error"):
                     item["error"] = {"text": str(payload["poll_error"]), "at": payload.get("poll_at") or None}
         items.append(item)
@@ -190,7 +197,7 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "headline": f"{_plural(waiting, 'Telegram update')} {'waits' if waiting == 1 else 'wait'} to be passed to Ouroboros",
             "at": retrying.get("since") or None, "next_at": retrying.get("next_attempt_at") or None}
         if retrying.get("last_error"):
-            handoff["error"] = {"text": str(retrying["last_error"]), "at": None,
+            handoff["error"] = {"text": str(retrying["last_error"]), "at": retrying.get("last_error_at") or None,
                                 "stage": str(retrying.get("last_stage") or "")}
         items.append(handoff)
     if link == "connected":

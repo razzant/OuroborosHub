@@ -21,7 +21,7 @@ from .telegram_bot.formatting import prepare_text
 from .telegram_bot.host import PresenceHostClient
 from .telegram_bot.runtime import BOT_NOT_RUNNING, BOT_UNCONFIRMED, TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
-from .telegram_bot.status_summary import summarize as summarize_status
+from .telegram_bot.status_summary import link_state, summarize as summarize_status
 from .telegram_bot.tools import (
     album_items,
     discard_files,
@@ -110,7 +110,10 @@ def _status_payload() -> Dict[str, Any]:
         "poll_at": runtime.get("poll_at", ""),
         "poll_error": runtime.get("poll_error", ""),
         "poll_failure": runtime.get("poll_failure", ""),
+        # Where that failed attempt stopped: "identity" (getMe, recording its bot), "updates" or "record".
+        "poll_stage": runtime.get("poll_stage", ""),
         "host_checked": bool(runtime.get("host_checked", False)),
+        "host_checked_at": runtime.get("host_checked_at", ""),
         "places_version": runtime.get("places_version", 0),
         # null when the custody store was not read: unknown, never zero.
         "recent_problems": card.get("recent_problems"),
@@ -126,7 +129,7 @@ async def _status_route(_request: Any) -> JSONResponse:
     # One rule for the Places line and the card's first line: the same words, the worst current tone.
     summary = summarize_status(payload)
     payload.update(text=summary["text"], tone=summary["tone"], attention=summary["attention"],
-                   title="Telegram transport")
+                   link=link_state(payload), title="Telegram transport")
     return JSONResponse(payload)
 
 
