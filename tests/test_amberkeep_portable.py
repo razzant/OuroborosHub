@@ -254,14 +254,17 @@ def test_excluded_records_are_not_admitted_and_nothing_of_them_is_returned():
 
 
 def test_pending_records_are_reported_but_not_imported():
-    """A record that is not settled memory is named as a gap, not imported."""
+    """A record that is not settled memory is counted as a gap, not imported,
+    and its name stays as withheld as an excluded one's."""
     pending = record("r-pending", value="Ещё не проверено", decision="pending")
     settled = record("r-ok", value="Проверенное суждение")
 
     rows, gaps = portable.read_portable(package([pending, settled]), "p.zip")
 
     assert [row["locator"] for row in rows] == ["memory.json#r-ok"]
-    assert "r-pending" in gap_about(gaps, "pending record")
+    assert "1 pending record" in gap_about(gaps, "pending record")
+    assert "r-pending" not in json.dumps([rows, gaps], ensure_ascii=False)
+    assert "Ещё не проверено" not in json.dumps([rows, gaps], ensure_ascii=False)
 
 
 def test_optional_files_are_verified_by_digest_only_and_are_not_unpacked():
@@ -616,8 +619,9 @@ def test_a_genuine_review_checks_every_non_excluded_record_and_no_excluded_one()
     rows, gaps = portable.read_portable(package([late, waiting, gone]), "p.zip")
 
     assert [row["locator"] for row in rows] == ["memory.json#b-second"]
-    assert "a-first" in gap_about(gaps, "pending record")
+    assert "1 pending record" in gap_about(gaps, "pending record")
     assert "1 excluded record" in gap_about(gaps, "excluded record")
+    assert "a-first" not in json.dumps(gaps, ensure_ascii=False)
 
 
 def test_last_import_is_left_out_of_the_projected_memory_digest():
@@ -841,3 +845,166 @@ def test_empty_structures_and_null_stay_structured_values():
         assert by_id[key]["origin"]["text_kind"] == "projection"
     # The same characters as plain text are verbatim, not a projection.
     assert by_id["txt"]["text"] == "null" and "text_kind" not in by_id["txt"]["origin"]
+
+
+# ------------------------------------------- one cleaned structure per record
+
+def test_dropped_fields_are_named_by_the_schema_canonical_names_only():
+    """A stripped field is reported by its canonical name, and a stated list of
+    names keeps only the names this schema knows."""
+    assert len(portable.CREDENTIAL_FIELD_NAMES) == len(portable.CREDENTIAL_FIELDS)
+    parts = portable.clean_parts({"API-Key": "invented", "Refresh Token": "invented", "грядка": "север"},
+                                 [{"id": "s1", "accessToken": "invented"}])
+    assert parts["value"] == {"грядка": "север"}
+    assert parts["dropped_fields"] == ["access_token", "api_key", "refresh_token"]
+    assert portable.credential_name("Client_Secret") == "client_secret"
+    assert portable.credential_name("грядка") is None
+    assert portable.known_dropped(["api_token", "Api-Token", "полив по средам", "password", 7]) == [
+        "api_token", "password"]
+    assert portable.known_dropped(None) == [] and portable.known_dropped("api_key") == []
+
+
+def test_clean_parts_keeps_the_contract_shape_and_tells_stated_empty_from_emptied():
+    """The one cleaning rule every view is built from, on plain values."""
+    parts = portable.clean_parts(
+        {"примечание": "ключ у входа", "api_key": "invented"},
+        [{"id": "s1", "locator": "chat-1", "observed_at": None, "label": "Беседа"}],
+        [{"target": "memory.json#r2", "relation": "near", "basis": "рядом", "note": "лишнее"}])
+    assert parts["value"] == {"примечание": "ключ у входа"}
+    assert parts["sources"] == [{"id": "s1", "locator": "chat-1", "observed_at": None}]
+    assert parts["links"] == [{"target": "memory.json#r2", "relation": "near", "basis": "рядом"}]
+    assert parts["dropped_fields"] == ["api_key"]
+    # The fields outside the shape are counted; only the package states their names.
+    assert parts["unshaped_count"] == 2
+    assert "label" not in json.dumps(parts) and "note" not in json.dumps(parts)
+    assert parts["value_emptied"] is False
+
+    # A value the source stated empty is a value; only one the strip left
+    # with nothing in it is "emptied". Free text is never judged.
+    for stated in ({}, [], None, "", "пароль от теплицы на листке", {"a": {}}):
+        assert portable.clean_parts(stated)["value_emptied"] is False, stated
+        assert portable.clean_parts(stated)["value"] == stated
+    for emptied in ({"token": "invented"}, {"creds": {"password": "invented"}},
+                    [{"secret": "invented"}]):
+        assert portable.clean_parts(emptied)["value_emptied"] is True, emptied
+    # Names stripped from a citation never make a stated {} look emptied.
+    beside = portable.clean_parts({}, [{"id": "s1", "access_token": "invented"}])
+    assert beside["value_emptied"] is False and beside["dropped_fields"] == ["access_token"]
+    # A collection the source itself stated empty stays, and keeps the value a value;
+    # one that held only credential fields is emptied by the strip.
+    stated = portable.clean_parts({"полки": {}, "token": "invented"})
+    assert (stated["value"], stated["value_emptied"]) == ({"полки": {}}, False)
+    assert portable.clean_parts({"полки": [], "creds": {"password": "invented"}})[
+        "value_emptied"] is False
+    assert portable.clean_parts({"creds": {"password": "invented"}, "keys": [{"otp": "1"}]})[
+        "value_emptied"] is True
+
+    # Only a full chain hop keeps the hop's fields; a citation keeps its own.
+    def is_hop(entry: dict) -> bool:
+        return all(entry.get(key) for key in ("source_sha256", "read_via", "locator"))
+
+    hops = portable.clean_parts("x", [
+        {"id": "s1", "locator": "chat-1", "source_label": "half.zip"},
+        {"id": "s2", "locator": "memory.json#r1", "observed_at": "", "source_label": "full.zip",
+         "source_sha256": "0" * 64, "read_via": "portable.read_portable"}],
+        hop_fields=("source_label", "source_sha256", "read_via"), is_hop=is_hop)
+    assert hops["sources"][0] == {"id": "s1", "locator": "chat-1"}
+    assert hops["sources"][1]["source_label"] == "full.zip"
+    assert hops["unshaped_count"] == 1
+
+    # A link left out by keep_link is only counted: none of its fields is named.
+    links = portable.clean_parts("x", None, [
+        {"target": "r-kept", "relation": "near", "extra": "лишнее"},
+        {"target": "r-closed", "relation": "near", "api_key": "invented", "label": "тайное"}],
+        keep_link=lambda link: link["target"] != "r-closed")
+    assert links["links"] == [{"target": "r-kept", "relation": "near"}]
+    assert (links["withheld_links"], links["unshaped_count"], links["dropped_fields"]) == (
+        1, 1, [])
+
+
+def test_citations_and_links_keep_their_shape_and_a_withheld_name_never_appears():
+    """A row's sources and links are the cleaned contract shape; a link into
+    a withheld record is counted, never shown."""
+    kept = record("r-kept", value="Огурцы у теплицы.",
+                  sources=[{"id": "s1", "locator": "chat-5", "observed_at": "2026-11-02T08:00:00Z",
+                            "label": "Беседа о поливе", "access_token": "invented"}],
+                  links=[{"target": "memory.json#r-mate", "relation": "same_bed", "basis": "рядом",
+                          "note": "лишнее поле"},
+                         {"target": "memory.json#r-draft", "relation": "next", "basis": "черновик"},
+                         {"target": "r-closed", "relation": "near", "basis": "закрытая грядка",
+                          "closed_token": "invented", "closed_label": "ярлык закрытой"}])
+    mate = record("r-mate", value="Укроп рядом с огурцами.")
+    draft = record("r-draft", value="Черновой план осени.", decision="pending")
+    closed = record("r-closed", value="Закрытая грядка.", decision="exclude")
+
+    rows, gaps = portable.read_portable(package([kept, mate, draft, closed]), "p.zip")
+
+    row = rows[0]
+    assert row["sources"] == [{"id": "s1", "locator": "chat-5",
+                               "observed_at": "2026-11-02T08:00:00Z"}]
+    assert row["links"] == [{"target": "memory.json#r-mate", "relation": "same_bed",
+                             "basis": "рядом"}]
+    assert row["origin"]["dropped_fields"] == ["access_token"]
+    assert row["date"] == "2026-11-02T08:00:00Z"
+    assert "2 link(s) into records this package withholds" in gap_about(gaps, "withholds")
+    # The citation's "label" and the link's "note" are counted, never named.
+    unshaped = gap_about(gaps, "outside the shape")
+    assert unshaped.startswith("2 field(s) outside the shape") and "names are not shown" in unshaped
+    assert "label" not in unshaped and "note" not in unshaped
+    assert "access_token" in gap_about(gaps, "credential fields")
+    shown = json.dumps([rows, gaps], ensure_ascii=False)
+    for withheld in ("r-draft", "r-closed", "черновик", "закрытая грядка", "invented",
+                     "Беседа о поливе", "лишнее поле", "closed_token", "closed_label",
+                     "ярлык закрытой"):
+        assert withheld not in shown, withheld
+
+
+def test_a_null_digest_is_no_digest_and_every_carried_digest_is_checked():
+    """A pending record may carry no digest of its own (null); one that does,
+    whatever its verdict, is checked and the package reads."""
+    open_question = record("r-open", value="Когда сеять редис?", decision="pending", digest=False)
+    open_question["review"]["content_sha256"] = None
+    reviewed = record("r-later", value="Редис сеем в апреле.", decision="historical")
+    rows, gaps = portable.read_portable(package([open_question, reviewed]), "p.zip")
+    assert [row["locator"] for row in rows] == ["memory.json#r-later"]
+    assert rows[0]["origin"]["decision"] == "historical"
+    assert "1 pending record" in gap_about(gaps, "pending record")
+
+
+def test_metadata_is_shown_by_its_public_type_and_a_plain_status_as_it_stands():
+    """A diagnostic shows a plain scalar status and a plain integer version
+    as they stand; any other metadata value only by its type."""
+    assert portable._status_shown("ready") == "'ready'"
+    assert portable._status_shown("needs review") == "'needs review'"
+    assert portable._status_shown(None) == "none"
+    assert portable._status_shown({"stage": "черновик"}) == "that is not a plain status (an object)"
+    assert portable._status_shown(["ready"]) == "that is not a plain status (a list)"
+    assert portable._status_shown("ready " * 40) == "that is not a plain status (text)"
+    assert (portable._version_shown(2), portable._version_shown(1.0),
+            portable._version_shown(True)) == ("2", "(a number)", "(true or false)")
+    assert portable._kind_of("portable-memory-package-v2") == "text"
+
+
+def test_coverage_is_complete_only_when_all_three_lists_are_stated():
+    """An empty object states nothing: a read is never called complete on
+    lists it does not state, while a known unavailable source still counts."""
+    full = portable._coverage_lists(
+        "p.zip", {"read": ["chat-1"], "unavailable": [], "excluded": []}, "memory.json")
+    assert full["stated"] == frozenset({"read", "unavailable", "excluded"})
+    assert portable._coverage_gaps(full, True, None, False) is False
+    empty_object = portable._coverage_lists("p.zip", {}, "memory.json")
+    assert empty_object["stated"] == frozenset() and empty_object["unavailable"] == []
+    assert portable._coverage_gaps(empty_object, True, None, False) is None
+    known_gap = portable._coverage_lists("p.zip", {"unavailable": ["chat-2"]}, "memory.json")
+    assert portable._coverage_gaps(known_gap, True, None, False) is True
+    # A manifest block that leaves a list out does not contradict memory.json.
+    restated = portable._coverage_lists("p.zip", {"read": ["chat-1"]}, "the manifest")
+    assert portable._coverage_gaps(full, True, restated, False) is False
+
+    memory = memory_document([record("r1", value="Факт")], {"coverage": {}})
+    files = {"memory.json": json.dumps(memory, ensure_ascii=False).encode("utf-8"),
+             "profile-review.json": json.dumps(genuine_profile(memory["records"], memory),
+                                               ensure_ascii=False).encode("utf-8")}
+    rows, gaps, status = portable.read_portable_with_coverage(package([], files=files), "p.zip")
+    assert len(rows) == 1 and status is None
+    assert "leaves read, unavailable, excluded unstated" in gap_about(gaps, "unstated")

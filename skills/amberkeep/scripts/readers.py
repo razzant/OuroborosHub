@@ -1,4 +1,4 @@
-"""Offline export readers for Amberkeep Community (stdlib-only, pure bytes-in).
+"""Offline export readers for Amberkeep (stdlib-only, pure bytes-in).
 
 ``read_source`` reads plain JSON/JSONL bytes, and — for the two vendors whose
 official exports ship as an archive — a raw ChatGPT or Claude export ZIP: only
@@ -8,9 +8,35 @@ uncompressed bytes is refused before it is read, with a way to hand over a
 smaller file. Pasted literal material (``text``, ``summary``) is carried
 verbatim: no content filter, so a JSON-shaped summary, or one quoting harness
 markup, stays exactly what the person supplied.
+
+An export's own markers decide who spoke, what was visible, where one
+conversation ends and what was left out — never a display title or a look-alike
+copy of the same words. These are rules about the shape of the data, not a
+reading of anyone's intent:
+
+* a known harness block is not given to the person: the two record forms of
+  one Codex reply are paired on their whole text first, then on an item's
+  visible parts alone (an explicit ``kind`` on one form also covers its paired
+  copy), and only what is no harness block is kept, once: the item's other
+  parts, or the event before it when that event is exactly those parts and
+  holds no known block itself, so that row stays where it was;
+  Codex text that still holds a known block beside other words, with nothing
+  to separate them, is attributed to no one; a Claude Code wrapper element that
+  starts a line is cut out in one pass, nested elements of its tag balanced;
+  the person's words around it stay separate continuous excerpts, never
+  joined, and an excerpt whose shape cannot tell the harness from the
+  person — or a record whose type and message role disagree — is attributed
+  to no one;
+* hidden reasoning is left out, visible commentary stays;
+* a conversation is named by its real identifier, never by its title; one Codex
+  file may hold several sessions, each told apart by its own header, and what
+  has no identifier is addressed by its position in the file, with a note;
+* what is left out is counted in ``gaps`` as records; plain bookkeeping goes to
+  ``gaps.notes``.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter
 from datetime import datetime, timezone
 import io
@@ -43,10 +69,19 @@ _REASONING_PARTS = frozenset({"thinking", "redacted_thinking", "reasoning", "rea
 _ANALYSIS_TAGS = frozenset({"analysis", "reasoning", "thinking", "thought", "thoughts", "cot", "inner_monologue", "reasoning_recap"})
 _TOOL_PARTS = frozenset({"tool_use", "tool_result", "server_tool_use", "web_search_tool_result", "mcp_tool_use", "mcp_tool_result", "function_call", "function_call_output"})
 _CC_TAGS = "system-reminder|local-command-caveat|local-command-stdout|command-name|command-message|command-args"
-_CC_WRAPPER_RE = re.compile(rf"\s*<({_CC_TAGS})\b[^>]*>(?:(?!</\1>).)*</\1>\s*", re.DOTALL)
-_CC_LINE_REM_RE = re.compile(rf"(?:^|\r?\n)[ \t]*<({_CC_TAGS})\b[^>]*>(?:(?!</\1>).)*</\1>[ \t]*(?=\r?\n|\Z)", re.DOTALL)
-_CODE_SPAN_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\r\n]+`", re.DOTALL)
-_CODEX_CTX_RE = re.compile(r"\A\s*<(environment_context|permissions instructions|user_instructions|collaboration_mode|subagent_notification|turn_aborted)\b[^>]*>(?:(?!</\1>).)*</\1>\s*\Z", re.DOTALL)
+# One scan finds the only two things that matter on a line start: a code fence or
+# the opening tag of a known harness wrapper. Anything else is the person's text.
+_CC_LINE_RE = re.compile(rf"^[ \t]*(?:(`{{3,}}|~{{3,}})|<({_CC_TAGS})(?=[\s>])[^>\n]*>)", re.MULTILINE)
+_CC_NEXT_RE = re.compile(rf"[ \t]*<({_CC_TAGS})(?=[\s>])[^>\n]*>")
+# The elements Codex wraps its own context in: _CODEX_CTX_RE takes a text that is one whole element,
+# _CODEX_OPEN_RE finds where one opens (for _codex_holds_block).
+_CODEX_TAGS = ("environment_context", "permissions instructions", "user_instructions", "collaboration_mode", "subagent_notification", "turn_aborted")
+_CODEX_CTX_RE = re.compile(rf"\A\s*<({'|'.join(_CODEX_TAGS)})\b[^>]*>(?:(?!</\1>).)*</\1>\s*\Z", re.DOTALL)
+_CODEX_OPEN_RE = re.compile(rf"<({'|'.join(_CODEX_TAGS)})\b")
+_CODEX_AGENTS = "# AGENTS.md instructions for "
+# A ``user_message`` event may name its ``kind``; these two are the harness's own context, mirrored as an event.
+_CODEX_SERVICE_KINDS = frozenset({"user_instructions", "environment_context"})
+_CG_VISIBLE_CHANNELS = frozenset({"final", "commentary"})
 
 
 class Gaps(list):
@@ -244,6 +279,34 @@ def _id_str(val: Any, fallback: str) -> str:
     return str(val) if isinstance(val, int) and not isinstance(val, bool) else (_s(val) or fallback)
 
 
+def _conv_id(*vals: Any) -> str | None:
+    """A conversation's real identifier: the first non-empty string or integer among ``vals``.
+
+    A title or name is never offered here: titles repeat ("New chat"), so they
+    cannot tell two conversations apart.
+    """
+    for val in vals:
+        if isinstance(val, int) and not isinstance(val, bool):
+            return str(val)
+        if text := _s(val):
+            return text
+    return None
+
+
+def _conv_keys(cid: str | None, label: str, idx: int) -> tuple[str, str]:
+    """``(conversation, locator part)`` of the ``idx``-th conversation of an export.
+
+    The real identifier names both. Without one the conversation is addressed by
+    its position in this file, never by its title; the reader says so in a note.
+    """
+    return (cid, cid) if cid else (f"{label}:{idx + 1}", f"conv-{idx + 1}")
+
+
+def _positional_note(kind: str, count: int, what: str = "conversation(s) carry no identifier") -> list[str]:
+    return [f"{kind}: {count} {what} and are addressed by their position in this file; "
+            "a re-export may number them differently"] if count else []
+
+
 def _try_json(txt: str) -> Any:
     try:
         return json.loads(txt)
@@ -381,7 +444,10 @@ def _chatgpt_node(node_obj: Any) -> tuple[str, list[tuple[int, str]], int]:
     meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
     cnt = msg.get("content") if isinstance(msg.get("content"), dict) else {}
     ct, role = _s(cnt.get("content_type")) or "", _s((msg.get("author") or {}).get("role")) if isinstance(msg.get("author"), dict) else ""
-    if ct in {"thoughts", "reasoning_recap"} or (_s(msg.get("channel")) or "final") != "final":
+    # Only the hidden channels are reasoning. "commentary" is what the person
+    # saw while the answer was being worked on; when it is addressed to a tool
+    # the recipient check below sets it aside as tool traffic.
+    if ct in {"thoughts", "reasoning_recap"} or (_s(msg.get("channel")) or "final").lower() not in _CG_VISIBLE_CHANNELS:
         return "reasoning/analysis node(s)", [], 0
     if ct in {"user_editable_context", "model_editable_context"} or meta.get("is_user_system_message") is True:
         return "context metadata node(s)", [], 0
@@ -399,14 +465,17 @@ def _chatgpt_node(node_obj: Any) -> tuple[str, list[tuple[int, str]], int]:
 def _read_chatgpt(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     items = _load_conv_list(decoded, "chatgpt", "mapping", dict, "chat_messages")
     rows, gaps = [], ([] if items else ["chatgpt: conversations list is empty"])
+    positional = 0
     for idx, conv in enumerate(items):
         if not isinstance(conv, dict) or not isinstance(conv.get("mapping"), dict):
             gaps.append(f"chatgpt: conversation {idx}: skipped malformed entry")
             continue
-        cid = _s(conv.get("id")) or _s(conv.get("conversation_id"))
-        cname, lconv = cid or _s(conv.get("title")) or f"{safe_label}:{idx + 1}", cid or f"conv-{idx + 1}"
+        cid = _conv_id(conv.get("id"), conv.get("conversation_id"))
+        cname, lconv = _conv_keys(cid, safe_label, idx)
+        positional += 0 if cid else 1
         scope, omitted = f"chatgpt ({lconv})", Counter()
         nodes = {nid: obj for nid, obj in conv["mapping"].items() if isinstance(obj, dict)}
+        omitted["malformed node(s)"] += len(conv["mapping"]) - len(nodes)
         parents = {nid: _s(nobj.get("parent")) for nid, nobj in nodes.items()}
         for nid, nobj in nodes.items():
             for ch in (nobj["children"] if isinstance(nobj.get("children"), list) else ()):
@@ -424,31 +493,39 @@ def _read_chatgpt(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], 
             elif tag != "empty":
                 omitted[tag] += 1
         _flush_gaps(omitted, scope, gaps)
-    return rows, gaps, []
+    return rows, gaps, _positional_note("chatgpt", positional)
 
 
 def _read_claude(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     items = _load_conv_list(decoded, "claude", "chat_messages", list, "mapping")
     rows, gaps = [], ([] if items else ["claude: conversations list is empty"])
+    positional = 0
     for idx, conv in enumerate(items):
         if not isinstance(conv, dict) or not isinstance(conv.get("chat_messages"), list):
             gaps.append(f"claude: conversation {idx}: skipped malformed entry")
             continue
-        cid = _s(conv.get("uuid")) or _s(conv.get("id"))
-        cname, lconv = cid or _s(conv.get("name")) or _s(conv.get("title")) or f"{safe_label}:{idx + 1}", cid or f"conv-{idx + 1}"
+        cid = _conv_id(conv.get("uuid"), conv.get("id"))
+        cname, lconv = _conv_keys(cid, safe_label, idx)
+        positional += 0 if cid else 1
         scope, msgs, omitted = f"claude ({lconv})", conv["chat_messages"], Counter()
-        by_uid = {uid: (i, m) for i, m in enumerate(msgs) if isinstance(m, dict) and (uid := _s(m.get("uuid")))}
+        by_uid: dict[str, tuple[int, Any]] = {}
+        for i, m in enumerate(msgs):
+            if isinstance(m, dict) and (uid := _s(m.get("uuid"))) and uid not in by_uid:
+                by_uid[uid] = (i, m)
         if by_uid and any(isinstance(m, dict) and "parent_message_uuid" in m for m in msgs):
             parents = {uid: (None if (p := _s(m.get("parent_message_uuid"))) == _CLAUDE_ROOT else p) for uid, (_, m) in by_uid.items()}
             vis = {uid for uid, (_, m) in by_uid.items() if (_s(m.get("sender")) or _s(m.get("role"))) in {"human", "user", "assistant"}}
             selected = [by_uid[u] for u in _resolve_chain(list(by_uid), parents, vis, _s(conv.get("current_leaf_message_uuid")), "current_leaf_message_uuid" in conv, scope, gaps)]
+            # The tree can place only a message with a distinct uuid: the rest are counted, never dropped unseen.
+            omitted["message(s) without a distinct identifier, which the conversation tree cannot place"] += len(msgs) - len(by_uid)
         else:
             selected = list(enumerate(msgs))
         for m_idx, msg in selected:
             if not isinstance(msg, dict):
                 omitted["malformed message(s)"] += 1
             elif (sender := _s(msg.get("sender")) or _s(msg.get("role")) or "") not in {"human", "user", "assistant"}:
-                omitted["non-dialogue message(s)"] += 1
+                # A message that names no sender is not called "non-dialogue": its speaker is unknown, not absent.
+                omitted["non-dialogue message(s)" if sender else "message(s) with no sender"] += 1
             else:
                 cnt, raw_txt = msg.get("content"), msg.get("text")
                 parts = _typed_parts(cnt, _TEXT_ONLY, omitted) if isinstance(cnt, list) and cnt else ([(0, raw_txt)] if isinstance(raw_txt, str) and raw_txt.strip() else [])
@@ -457,7 +534,7 @@ def _read_claude(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], l
                 spk = "assistant" if sender == "assistant" else "user"
                 rows.extend(_row("claude", cname, lconv, mid, p_idx, spk, txt, date) for p_idx, txt in parts)
         _flush_gaps(omitted, scope, gaps)
-    return rows, gaps, []
+    return rows, gaps, _positional_note("claude", positional)
 
 
 def _is_cc_record(obj: dict[str, Any]) -> bool:
@@ -470,11 +547,140 @@ def _is_cc_record(obj: dict[str, Any]) -> bool:
     return (isinstance(msg, dict) and ("content" in msg or "role" in msg)) or _flag(obj.get("isCompactSummary"))
 
 
+_CC_TAG_RE = {tag: re.compile(rf"</{tag}>|<{tag}(?=[\s>])[^>\n]*>") for tag in _CC_TAGS.split("|")}
+
+
+def _cc_close(text: str, tag: str, at: int) -> int:
+    """Where the element of ``tag`` opened just before ``at`` closes, or -1.
+
+    Nested elements of the same tag are balanced: each opening tag inside
+    needs its own closing tag first, so the harness text after a nested
+    element is never taken for the end of the outer one. A self-closing tag
+    opens nothing. An element that never balances has no known end."""
+    depth = 1
+    for m in _CC_TAG_RE[tag].finditer(text, at):
+        token = m.group(0)
+        if token.startswith("</"):
+            depth -= 1
+            if not depth:
+                return m.start()
+        elif not token.endswith("/>"):
+            depth += 1
+    return -1
+
+
+def _cc_element(text: str, m: re.Match[str]) -> tuple[int, int, int | None]:
+    """The wrapper element ``m`` opens, with any chained after it on its line.
+
+    Returns the number of balanced elements, their end, and where an
+    element that never closes begins (``None`` when every one closes). A
+    closing tag is searched for from where its own element opened, counting
+    nested elements of the same tag (``_cc_close``)."""
+    tag, at, end, count = m.group(2), m.end(), m.end(), 0
+    opened = m.start(2) - 1
+    while True:
+        close = _cc_close(text, tag, at)
+        if close < 0:
+            return count, end, opened
+        end, count = close + len(tag) + 3, count + 1
+        if not (nxt := _CC_NEXT_RE.match(text, end)):
+            return count, end, None
+        tag, at, opened = nxt.group(1), nxt.end(), nxt.start(1) - 1
+
+
+def _cc_spans(text: str, pos: int, doubtful: bool) -> tuple[list[tuple[int, int, str]], int, int | None]:
+    """The spans of one user text that are not the person's, from ``pos``.
+
+    Each span is ``(start, finish, what)``: ``what`` is ``cut`` (a harness
+    wrapper, left out) or ``unknown`` (an excerpt that may be the harness's or
+    the person's). A wrapper is a balanced element of a known harness tag whose
+    opening tag starts a line, outside a code fence. An opening tag that never
+    closes makes the rest of the text ``unknown``. In ``doubtful`` mode (the
+    rest of a code fence that never closes) fences are not judged, and a
+    balanced element is ``unknown`` rather than cut. Returns the spans, the
+    number of elements cut, and where a fence left open began."""
+    spans: list[tuple[int, int, str]] = []
+    removed = 0
+    fence: tuple[str, int, int] | None = None
+    while m := _CC_LINE_RE.search(text, pos):
+        pos = m.end()
+        if mark := m.group(1):
+            if doubtful:
+                continue
+            if fence is None:
+                fence = (mark[0], len(mark), m.start())
+            elif mark[0] == fence[0] and len(mark) >= fence[1]:
+                fence = None
+            continue
+        if fence:
+            continue
+        count, end, unclosed = _cc_element(text, m)
+        if count:
+            eol = text.find("\n", end)
+            stop = len(text) if eol < 0 else eol
+            whole = unclosed is None and not text[end:stop].strip(" \t\r")
+            if doubtful:
+                spans.append((m.start(2) - 1, end, "unknown"))
+            elif whole:  # the line is the wrapper's alone: it goes with its line break
+                spans.append((m.start(), stop + 1 if eol >= 0 else stop, "cut"))
+                removed += count
+            else:  # other characters share the line: the element(s) only, spacing stays
+                spans.append((m.start(2) - 1, end, "cut"))
+                removed += count
+            pos = max(pos, spans[-1][1])
+        if unclosed is not None:
+            spans.append((unclosed if count else m.start(), len(text), "unknown"))
+            return spans, removed, None
+    return spans, removed, fence[2] if fence else None
+
+
+def _cc_split_wrappers(text: str) -> tuple[list[tuple[str, str]], int]:
+    """Split one user text around the harness's wrapper elements.
+
+    Returns ``(pieces, number of elements cut)``: each piece is ``(speaker,
+    excerpt)``, a continuous excerpt of the text as written, in order —
+    ``user`` for the person's words, ``unknown`` where the shape cannot tell
+    the harness from the person (an opening tag that never closes, or a
+    wrapper inside a code fence that never closes). Nothing is joined across a
+    cut: words a wrapper interrupts become separate excerpts, never one
+    certified splice. Blank pieces are left out; a piece loses only the line
+    break, and the indent, that led to a span, never the person's own spacing. With
+    nothing cut and nothing in doubt, the one piece is the very same text.
+
+    This is a rule about the shape of the text, not a reading of who meant it:
+    a tag quoted in prose, in inline code or in a closed fence stays the
+    person's, a person who starts a line with a balanced element loses it, and
+    the count is reported in ``gaps``. The scan is linear: every step moves
+    forward, and an unclosed tag ends it.
+    """
+    spans, removed, open_at = _cc_spans(text, 0, False)
+    if open_at is not None:
+        spans += _cc_spans(text, open_at, True)[0]
+    if not spans:
+        return [("user", text)], 0
+    pieces: list[tuple[str, str]] = []
+    cut = 0
+    for start, finish, what in sorted(spans):
+        before = text[cut:start]
+        head, brk, indent = before.rpartition("\n")
+        if brk and not indent.strip(" \t"):  # the break (and indent) that led to a span is no excerpt's end
+            before = head.removesuffix("\r")
+        if before.strip():
+            pieces.append(("user", before))
+        if what == "unknown" and text[start:finish].strip():
+            pieces.append(("unknown", text[start:finish]))
+        cut = finish
+    if text[cut:].strip():
+        pieces.append(("user", text[cut:]))
+    return pieces, removed
+
+
 def _read_claude_code(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     records, valid_lines, bad = _parse_jsonl(decoded, "claude-code", _is_cc_record, lambda o: _s(o.get("type")) in _CODEX_ENV)
     default_sid = next((_s(o.get("sessionId")) or _s(o.get("session_id")) for ln, o in records if ln in valid_lines and (_s(o.get("sessionId")) or _s(o.get("session_id")))), None)
     scope, omitted = f"claude-code ({default_sid or safe_label})", Counter()
     rows, replays, gaps = [], set(), [f"{scope}: line {ln}: skipped malformed JSONL line" for ln in bad]
+    replayed = split = doubtful = disagreed = 0
     for ln, obj in records:
         rt = _s(obj.get("type")) or ""
         msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
@@ -494,26 +700,46 @@ def _read_claude_code(decoded: str, safe_label: str) -> tuple[list[dict[str, Any
             if role not in {"user", "assistant"}:
                 omitted["non-dialogue message(s)"] += 1
                 continue
+            if role != rt:
+                # The record's type and its message's role name different
+                # speakers: neither is taken over the other. Its text is kept,
+                # attributed to no one, and no wrapper is cut from it.
+                role = "unknown"
+                disagreed += 1
             conv = _s(obj.get("sessionId")) or _s(obj.get("session_id")) or default_sid or safe_label
             rec_id, date, uid = _id_str(obj.get("uuid"), f"L{ln}"), _format_date(obj.get("timestamp")), _s(obj.get("uuid"))
             for p_idx, txt in _typed_parts(msg.get("content"), _TEXT_ONLY, omitted):
-                spk = role
-                if role == "user":
-                    pos = 0
-                    while pos < len(txt) and (m := _CC_WRAPPER_RE.match(txt, pos)):
-                        pos = m.end()
-                    if pos > 0 and pos == len(txt):
-                        omitted["wrapper/reminder block(s)"] += 1
-                        continue
-                    if _CC_LINE_REM_RE.search(_CODE_SPAN_RE.sub("", txt)):
-                        spk = "unknown"
-                        omitted["inseparable reminder block(s) marked unknown"] += 1
-                if not uid or (uid, p_idx, txt) not in replays:
-                    if uid:
-                        replays.add((uid, p_idx, txt))
-                    rows.append(_row("claude-code", conv, conv, rec_id, p_idx, spk, txt, date))
+                # A resumed session replays records: the same part of the same record, in the same session, by the same speaker.
+                if uid and (conv, role, uid, p_idx, txt) in replays:
+                    replayed += 1
+                    continue
+                if uid:
+                    replays.add((conv, role, uid, p_idx, txt))
+                if role != "user":
+                    rows.append(_row("claude-code", conv, conv, rec_id, p_idx, role, txt, date))
+                    continue
+                # Known wrapper elements are cut out, and the words around them stay apart; see _cc_split_wrappers.
+                pieces, wrappers = _cc_split_wrappers(txt)
+                omitted["wrapper/reminder block(s)"] += wrappers
+                doubtful += sum(1 for spk, _ in pieces if spk == "unknown")
+                if len(pieces) == 1:
+                    rows.append(_row("claude-code", conv, conv, rec_id, p_idx, pieces[0][0], pieces[0][1], date))
+                    continue
+                split += bool(pieces)
+                rows.extend(_row("claude-code", conv, conv, rec_id, f"{p_idx}.{n}", spk, piece, date)
+                            for n, (spk, piece) in enumerate(pieces, start=1))
     _flush_gaps(omitted, scope, gaps)
-    return rows, gaps, []
+    notes = [f"{scope}: deduplicated {replayed} replayed record(s) (same session, speaker, identifier and text; each kept once)"] if replayed else []
+    if split:
+        notes.append(f"{scope}: {split} user text(s) interrupted by harness elements are kept as separate "
+                     "continuous excerpts (locators /pN.M), never joined into one")
+    if doubtful:
+        notes.append(f"{scope}: {doubtful} excerpt(s) cannot be told apart from harness text by their shape "
+                     "and are attributed to no one (speaker unknown)")
+    if disagreed:
+        notes.append(f"{scope}: {disagreed} record(s) whose type and message role name different speakers "
+                     "are kept whole and attributed to no one (speaker unknown)")
+    return rows, gaps, notes
 
 
 def _is_codex_record(obj: dict[str, Any]) -> bool:
@@ -521,6 +747,63 @@ def _is_codex_record(obj: dict[str, Any]) -> bool:
     if rt in _CODEX_ENV:
         return rt == "compacted" or isinstance(obj.get("payload"), dict)
     return rt in _CODEX_ITEMS and (rt != "message" or (_s(obj.get("role")) in {"user", "assistant", "developer", "system"} and isinstance(obj.get("content"), list) and any(isinstance(p, dict) and _s(p.get("type")) in _CODEX_PARTS for p in obj["content"])))
+
+
+def _codex_is_service(text: str, kind: Any = None) -> bool:
+    """Is this user-role text one harness block rather than the person's words?
+
+    Each record form is judged by the markers it carries: a ``response_item``
+    part and an ``event_msg`` ``user_message`` are asked alike about the text
+    (one whole harness block: environment context, user or AGENTS.md
+    instructions, a mode, abort or sub-agent notice), and an event may also say
+    so itself through its ``kind``. The person's own words are not service text,
+    even when they mention such a tag. A mark found on one form reaches the
+    other only through the pairing in ``_read_codex``.
+    """
+    if not (s := text.strip()):
+        return False
+    if (_s(kind) or "").lower() in _CODEX_SERVICE_KINDS:
+        return True
+    return bool(_CODEX_CTX_RE.match(s)) or (s.startswith(_CODEX_AGENTS) and "<INSTRUCTIONS>" in s and s.endswith("</INSTRUCTIONS>"))
+
+
+def _codex_holds_block(text: str) -> bool:
+    """Does this text hold, anywhere in it, a harness block of a shape ``_codex_is_service``
+    takes whole: a known element whose closing tag follows its opening tag, or the AGENTS.md
+    instructions heading with a closed ``<INSTRUCTIONS>`` after it?
+
+    A rule about shape only; text with no such block is not judged. The scan is linear: an
+    opening tag ends at the first ``>`` after it — an end every opening before that ``>``
+    shares — and only a closing tag that starts after that end can close the block.
+    """
+    closes = {tag: text.rfind(f"</{tag}>") for tag in _CODEX_TAGS}
+    end = -1
+    for m in _CODEX_OPEN_RE.finditer(text):
+        if m.end() > end and (end := text.find(">", m.end())) < 0:
+            break
+        if closes[m.group(1)] > end:
+            return True
+    at = text.find(_CODEX_AGENTS)
+    return at >= 0 and (opened := text.find("<INSTRUCTIONS>", at)) >= 0 and text.find("</INSTRUCTIONS>", opened) >= 0
+
+
+def _codex_pair(recs: list[tuple[str, Any, bool]], partner: list[int | None], key: Callable[[str, Any], str | None]) -> None:
+    """Pair the two record forms of one speech on ``key``, in file order, one to one.
+
+    One event covers ONE equal item: the pairing is spent, never a set that keeps matching
+    every equal record. Only the two forms pair — equal records of one form are repeats, and
+    both stay. A record already paired, or one ``key`` gives no text, takes no part.
+    """
+    unmatched: dict[str, list[int]] = {}
+    for i, (form, payload, _) in enumerate(recs):
+        if partner[i] is not None or (text := key(form, payload)) is None:
+            continue
+        earlier = next((j for j in unmatched.get(text, ()) if recs[j][0] != form), None)
+        if earlier is None:
+            unmatched.setdefault(text, []).append(i)
+        else:
+            unmatched[text].remove(earlier)
+            partner[i], partner[earlier] = earlier, i
 
 
 def _read_codex(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
@@ -538,50 +821,130 @@ def _read_codex(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], li
     The pairing is spent, one event per equal item: equal records of one form
     are genuine repeats and stay visible, and an item no event mirrors (a last
     reply of an export cut mid-turn, say) stays visible with its own parts and
-    locator. Both forms keep their original line order. Developer/system items,
-    analysis and harness-context blocks are dropped before a record reaches the
-    pending list, so nothing kept here resurrects them.
+    locator. Both forms keep their original line order. Developer/system items
+    and analysis are dropped before a record reaches the pending list, so nothing
+    kept here resurrects them.
+
+    Service text. The pair is found before anything is left out, and Codex
+    echoes an item in one of two shapes: its whole text (every text part
+    joined, harness parts included) or its visible parts alone. Whole texts
+    pair first; only then may an event left over meet, by those visible parts,
+    an item left over that holds both harness and other parts. An item part
+    that is one whole harness block (``_codex_is_service``) is omitted; when
+    an item holds one, its pair is emitted once. An earlier event that is
+    exactly the item's other parts, echoed by those visible parts alone, and
+    holds no known block itself, stays the row it was, with its own locator,
+    date and text. Any other pair is emitted as the item's other parts only,
+    each a continuous excerpt with its own locator, never the event's mixed
+    text (an echo of the whole item holds the harness block). An item of
+    harness parts alone leaves out its pair. An event that names a service
+    ``kind``, or is one whole block, is omitted with its paired item. Each is
+    counted as omitted, one record each — every event, and every part of an
+    item. A mark covers only its pair: the other form,
+    equal text, in the same turn, spent one to one. A second equal item is a
+    repeat and stays the person's, and so does the same text in another turn
+    or session. User text that still holds a known block beside other words
+    (``_codex_holds_block``), with no part of the export to separate them —
+    an echo no item meets, say — is kept whole and attributed to no one, with
+    a note; text that holds no known block is not judged.
+
+    A file may hold several sessions. Each ``session_meta`` header ends the
+    session before it — its pending speech is settled, its gap lines and notes
+    are written — and starts the next one under its own identifier, so an
+    event of one session never mirrors an item of another, and a repeat in the
+    second session is not taken for a copy of the first. Records before the
+    first header are a segment of their own. A session is named by its
+    identifier; a file of one segment keeps its old address (the identifier, else
+    the file's label), and in a file of several, each segment without an
+    identifier is addressed by its position (``conv-N``, shown as ``label:N``),
+    with a note.
     """
     records, valid_lines, bad = _parse_jsonl(decoded, "codex", _is_codex_record, lambda o: _s(o.get("type")) in {"user", "assistant"} and isinstance(o.get("message"), dict))
-    sid = next((_s(o["payload"].get("id")) or _s(o["payload"].get("conversation_id")) for ln, o in records if ln in valid_lines and _s(o.get("type")) == "session_meta" and isinstance(o.get("payload"), dict) and (_s(o["payload"].get("id")) or _s(o["payload"].get("conversation_id")))), None)
-    conv, scope, omitted = sid or safe_label, f"codex ({sid or safe_label})", Counter()
+    heads = [(ln, _conv_id(o["payload"].get("id"), o["payload"].get("conversation_id"))) for ln, o in records if ln in valid_lines and _s(o.get("type")) == "session_meta"]
+    # Records before the first header are a segment of their own, not part of that session.
+    lead = not heads or min(valid_lines) < heads[0][0]
+    ids = ([None] if lead else []) + [sid for _, sid in heads]
+    if len(ids) == 1:  # a file of one segment keeps its old address: the identifier, else the file's label
+        names = [(ids[0], ids[0]) if ids[0] else (safe_label, safe_label)]
+    else:  # (conversation, locator part); a segment with no identifier is addressed by its position
+        names = [(sid, sid) if sid else _conv_keys(None, safe_label, n) for n, sid in enumerate(ids)]
+    starts = ([0] if lead else []) + [ln for ln, _ in heads]
+    # A malformed line is reported under the segment its position falls in (before every header: the first one).
+    gaps: list[str] = [f"codex ({names[max(bisect_right(starts, ln) - 1, 0)][1]}): line {ln}: skipped malformed JSONL line" for ln in bad]
+    cname, lconv = names[0]
+    later = iter(names[1:] if lead else names)  # each header opens the next segment
+    omitted = Counter()
     rows: list[dict[str, Any]] = []
-    gaps: list[str] = [f"{scope}: line {ln}: skipped malformed JSONL line" for ln in bad]
     notes: list[str] = []
-    # This turn's pending speech, per speaker, in file order: ("event", row) or
-    # ("item", (locator id, date, visible parts)).
-    pend: dict[str, list[tuple[str, Any]]] = {"user": [], "assistant": []}
-    mirrored, r_counts = 0, [0, 0]
+    # This turn's pending speech, per speaker, in file order: (form, payload, service) with ("event", row) or
+    # ("item", (locator id, date, visible parts)); service is the harness mark the record carries itself.
+    pend: dict[str, list[tuple[str, Any, bool]]] = {"user": [], "assistant": []}
+    mirrored = mixed = 0
 
     def flush() -> None:
-        nonlocal mirrored
+        nonlocal mirrored, mixed
         for r in ("user", "assistant"):
-            keep = [True] * len(pend[r])
-            unmatched: dict[str, list[int]] = {}
-            for i, (form, payload) in enumerate(pend[r]):
-                text = payload["text"] if form == "event" else "\n".join(txt for _, txt in payload[2])
-                # One event covers ONE equal item: the pairing is spent, never a
-                # set that keeps matching every equal record. Only the two forms
-                # pair — equal records of one form are repeats, and both stay.
-                earlier = next((j for j in unmatched.get(text, ()) if pend[r][j][0] != form), None)
-                if earlier is None:
-                    unmatched.setdefault(text, []).append(i)
-                else:
-                    unmatched[text].remove(earlier)
-                    keep[i] = False  # the later form of one speech: a mirror, not a repeat
-                    mirrored += 1
-            for i, (form, payload) in enumerate(pend[r]):
-                if not keep[i]:
+            recs = pend[r]
+            # partner[i]: the other form of the same speech, once paired. Codex echoes an item whole —
+            # every text part, its harness blocks included — or by its visible parts alone: whole texts
+            # pair first, and only then may an event left over meet, by those parts, an item left over
+            # that holds both harness and other parts.
+            partner: list[int | None] = [None] * len(recs)
+            _codex_pair(recs, partner, lambda form, p: p["text"] if form == "event" else "\n".join(t for _, t, _ in p[2]))
+            _codex_pair(recs, partner, lambda form, p: p["text"] if form == "event" else (
+                "\n".join(t for _, t, s in p[2] if not s) if 0 < sum(s for _, _, s in p[2]) < len(p[2]) else None))
+            for i, (form, payload, own_mark) in enumerate(recs):
+                j = partner[i]
+                if j is not None and j < i:
+                    continue  # the later form of one speech: settled with the earlier one
+                event = payload if form == "event" else (recs[j][1] if j is not None else None)
+                item = payload if form == "item" else (recs[j][1] if j is not None else None)
+                # A mark the event carries itself covers its pair, and only its pair.
+                marked = (own_mark if form == "event" else (j is not None and recs[j][2]))
+                if marked:  # one event, and every part of its item
+                    omitted["harness context record(s)"] += int(event is not None) + (len(item[2]) if item else 0)
                     continue
-                if form == "event":
-                    rows.append(payload)
-                else:
-                    iid, idate, parts = payload
-                    rows.extend(_row("codex", conv, conv, iid, p_idx, r, txt, idate) for p_idx, txt in parts)
+                harness = sum(1 for _, _, s in item[2] if s) if item else 0
+                visible = [(p_idx, txt) for p_idx, txt, s in item[2] if not s] if item else []
+                omitted["harness context record(s)"] += harness
+                if item is not None and not visible:  # the whole speech is harness text
+                    omitted["harness context record(s)"] += int(event is not None)
+                    continue
+                if j is not None:
+                    mirrored += 1
+                # An earlier event that is all speech stays the row it was, so a later copy moves nothing already read:
+                # its item holds no harness part, or the event is exactly the item's visible parts and holds no known
+                # block itself. Any other earlier event holds a block beside other words; the item's visible parts,
+                # which separate them, speak instead.
+                event_speaks = form == "event" and (not harness or (
+                    event["text"] == "\n".join(txt for _, txt in visible) and not _codex_holds_block(event["text"])))
+                if event_speaks:
+                    spoken = [event]
+                else:  # the item's visible parts only, once: each one a continuous excerpt as written
+                    iid, idate, _parts = item
+                    spoken = [_row("codex", cname, lconv, iid, p_idx, r, txt, idate) for p_idx, txt in visible]
+                for row in spoken:
+                    # A known harness block beside other words, which no part of the export separates, is no one's.
+                    if r == "user" and _codex_holds_block(row["text"]):
+                        row["speaker"] = "unknown"
+                        mixed += 1
+                rows.extend(spoken)
             pend[r] = []
-        if max(r_counts):
-            omitted["reasoning item(s)"] += max(r_counts)
-            r_counts[0] = r_counts[1] = 0
+
+    def close() -> None:
+        """The end of one segment: its speech is settled, its notes and gap lines are written."""
+        nonlocal mirrored, mixed
+        flush()
+        if mirrored:
+            notes.append(f"codex ({lconv}): deduplicated {mirrored} mirrored duplicate record(s) "
+                         "(each text kept once, at its first-seen record)")
+            mirrored = 0
+        if mixed:
+            notes.append(f"codex ({lconv}): {mixed} text(s) hold a known harness block beside other words, with no "
+                         "part of the export to separate them, and are attributed to no one (speaker unknown)")
+            mixed = 0
+        _flush_gaps(omitted, f"codex ({lconv})", gaps)
+        omitted.clear()
 
     for ln, obj in records:
         rt, date = _s(obj.get("type")) or "", _format_date(obj.get("timestamp"))
@@ -590,57 +953,57 @@ def _read_codex(decoded: str, safe_label: str) -> tuple[list[dict[str, Any]], li
         elif rt == "compacted":
             flush()
             omitted["compacted summary item(s)"] += 1
+        elif rt == "session_meta":
+            close()
+            cname, lconv = next(later)
         elif rt == "event_msg":
             pl = obj["payload"]
             et = _s(pl.get("type")) or ""
             if et in {"task_started", "turn_aborted"}:
                 flush()
             elif et in {"agent_reasoning", "agent_reasoning_raw_content", "reasoning", "thinking", "analysis"}:
-                r_counts[1] += 1
+                omitted["reasoning record(s)"] += 1
             elif et in {"user_message", "agent_message"}:
                 if _is_analysis_marked(obj) or _is_analysis_marked(pl):
-                    r_counts[1] += 1
+                    omitted["reasoning record(s)"] += 1
                 elif (_s(pl.get("recipient")) or "all") != "all":
                     omitted["tool call/output item(s)"] += 1
                 else:
-                    role = "user" if et == "user_message" else "assistant"
+                    role, txt = "user" if et == "user_message" else "assistant", pl.get("message")
                     if role == "user" and pend["assistant"]:
                         flush()
                     if role == "user":
                         omitted["image attachment(s)"] += sum(len(pl[k]) for k in ("images", "local_images") if isinstance(pl.get(k), list))
-                    txt = pl.get("message")
                     if isinstance(txt, str) and txt.strip():
-                        pend[role].append(("event", _row("codex", conv, conv, f"L{ln}", 0, role, txt, date)))
-        elif rt not in {"session_meta", "turn_context"}:
+                        # The event's own marks (its text, its ``kind``) are read now; a paired item shares them at the flush.
+                        pend[role].append(("event", _row("codex", cname, lconv, f"L{ln}", 0, role, txt, date),
+                                           role == "user" and _codex_is_service(txt, pl.get("kind"))))
+        elif rt != "turn_context":
             item = obj["payload"] if rt == "response_item" else obj
             it, role = _s(item.get("type")) or "", _s(item.get("role")) or ""
             if it == "reasoning":
-                r_counts[0] += 1
+                omitted["reasoning record(s)"] += 1
             elif it != "message":
                 omitted["tool call/output item(s)"] += 1
             elif _is_analysis_marked(obj) or _is_analysis_marked(item):
-                r_counts[0] += 1
+                omitted["reasoning record(s)"] += 1
             elif (_s(item.get("recipient")) or "all") != "all":
                 omitted["tool call/output item(s)"] += 1
             elif role not in {"user", "assistant"}:
                 omitted["developer/system item(s)" if role in {"developer", "system"} else "non-dialogue item(s)"] += 1
             else:
-                vis: list[tuple[int, str]] = []
-                for p_idx, txt in _typed_parts(item.get("content"), _TEXT_IO, omitted):
-                    s = txt.strip()
-                    if role == "user" and s and (_CODEX_CTX_RE.match(s) or (s.startswith("# AGENTS.md instructions for ") and "<INSTRUCTIONS>" in s and s.endswith("</INSTRUCTIONS>"))):
-                        omitted["harness context block(s)"] += 1
-                    else:
-                        vis.append((p_idx, txt))
-                if vis:
-                    if role == "user" and pend["assistant"]:
+                # Every text part, each with its own harness mark; the pairing reads the whole item,
+                # and only the parts that are not harness blocks are ever emitted (see flush).
+                parts = [(p_idx, txt, role == "user" and _codex_is_service(txt))
+                         for p_idx, txt in _typed_parts(item.get("content"), _TEXT_IO, omitted)]
+                if parts:
+                    if role == "user" and pend["assistant"] and not all(s for _, _, s in parts):
                         flush()
-                    pend[role].append(("item", (_id_str(item.get("id"), f"L{ln}"), date or _format_date(item.get("timestamp")), vis)))
-    flush()
-    if mirrored:
-        notes.append(f"{scope}: deduplicated {mirrored} mirrored duplicate record(s) "
-                     "(each text kept once, at its first-seen record)")
-    _flush_gaps(omitted, scope, gaps)
+                    pend[role].append(("item", (_id_str(item.get("id"), f"L{ln}"), date or _format_date(item.get("timestamp")), parts), False))
+    close()
+    # A file of one segment keeps its old address; in a file of several, each segment without an identifier says so here.
+    notes += _positional_note("codex", sum(1 for sid in ids if not sid) if len(ids) > 1 else 0,
+                              "segment(s) carry no session identifier (speech before the first session header, or a header without one)")
     return rows, gaps, notes
 
 

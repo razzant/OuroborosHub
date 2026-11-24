@@ -11,6 +11,11 @@
       "recommended": false
     },
     {
+      "digest": "016adc3ff651401f5cd51d42bfd89a178b41aa4de49b7630811efaf12c746027",
+      "name": "amberkeep",
+      "recommended": false
+    },
+    {
       "digest": "c22d40aeb5ea6232370242584ca48a8ac069161f8b5bbed6a3f9a99d184b710b",
       "name": "anti-slop",
       "recommended": true
