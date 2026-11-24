@@ -145,13 +145,15 @@ class AtomicReplayTests(unittest.TestCase):
         ext, addressed = instance(ctx, server, eid)
         server.lose_response.add('PATCH')
         result = json.loads(tools.cal_update(ctx, id=addressed, location='Owner room', confirm=True))
-        self.assertEqual(result['status'], 'pending')
-        old = ctx.store.open_intents()[0]['expected_etag']; self.assertTrue(old)
+        self.assertEqual(result['status'], 'uncertain')   # Google applied the PATCH; only its answer was lost
+        exc_id = ctx.store.exceptions_for(eid)[0]['id']
+        lost = ctx.store.intents_for_event(exc_id)[-1]; self.assertTrue(lost['expected_etag'])
         server.events[ext].update(location='Other room', etag=server._etag())
         reopen(ctx); run_open_intents(ctx)
-        self.assertEqual(server.events[ext]['location'], 'Other room')
-        self.assertEqual(ctx.store.open_intents()[0]['expected_etag'], old)
-        self.assertEqual(ctx.store.open_intents()[0]['state'], 'conflict')
+        self.assertEqual(server.events[ext]['location'], 'Other room')   # not resent over the newer version
+        self.assertTrue(inspection(ctx, exc_id)['delivery_outcome_unknown'])
+        kept = ctx.store.get_intent(lost['id'])
+        self.assertEqual((kept['state'], kept['expected_etag']), ('uncertain', lost['expected_etag']))   # nor rebased on it
 
     def test_preleased_google_batch_rereads_own_ack_version(self):
         ctx, cid, server = google_context(); eid = create(ctx, cid)

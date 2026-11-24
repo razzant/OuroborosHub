@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import links
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -25,14 +26,24 @@ from model import (
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
 MAX_ATTEMPTS = len(RETRY_BACKOFF_SEC)
 LEASE_SECONDS = 90
+SIGN_IN_WAIT_SEC = 600   # the host refused the preliminary token: nothing was sent; re-probe the cheap loopback answer after this
 
 
 class ProviderError(Exception):
-    """Typed adapter failure. ``kind`` ∈ network|server|retry (transient: deferred and retried) | auth|forbidden|not_found|gone|conflict|http|parse|unsupported."""
+    """Typed adapter failure. ``network|server|retry`` defer, ``uncertain`` requires reconciliation.
+    ``unsent`` marks a failure before any write of the operation could take effect (reads and refusals change nothing)."""
 
-    def __init__(self, kind: str, message: str, status: int = 0):
+    def __init__(self, kind: str, message: str, status: int = 0, unsent: bool = False, reason: str = ''):
         super().__init__(message)
         self.kind, self.message, self.status = kind, message, status
+        self.unsent = bool(unsent)
+        self.reason = str(reason or '')
+
+
+def never_connected(error) -> bool:
+    """urllib reports a failed connection and a reset or timeout while sending alike; only a failed name
+    lookup or a refused connection prove that no byte of the request left."""
+    return isinstance(getattr(error, 'reason', None), (socket.gaierror, ConnectionRefusedError))
 
 
 def lease_owner() -> str:
@@ -1210,9 +1221,34 @@ def _blocked_by(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _fail_after_predecessor(store, intent: Dict[str, Any], pred: Dict[str, Any]) -> Dict[str, Any]:
     message = f"предыдущая операция по событию не выполнена ({pred.get('state')}): сначала разберись с ней"
-    store.settle_intent(intent["id"], INTENT_FAILED, {"error": message, "blocked_by": pred["id"]})
-    store.update_event(intent["event_id"], {"sync_state": "failed"})
-    return {"status": INTENT_FAILED, "message": message}
+    return (_finish(store, intent, INTENT_FAILED, {"error": message, "blocked_by": pred["id"]}, "failed")
+            or {"status": INTENT_FAILED, "message": message})
+
+
+def _kept_outcome(store, intent: Dict[str, Any]) -> Dict[str, Any]:
+    """This attempt no longer holds the row: report the outcome recorded there, never a new one."""
+    current = store.get_intent(intent['id']) or {}
+    return {'status': current.get('state') or 'uncertain',
+            'message': 'операция больше не принадлежит этой попытке; записанный исход не изменён'}
+
+
+def _finish(store, intent: Dict[str, Any], state: str, result: Dict[str, Any], event_state: str = '') -> Optional[Dict[str, Any]]:
+    """Settle the pending row this caller holds, in one write transaction. A refusal or supersession says nothing
+    about an earlier write of it that may have taken effect: such a row becomes uncertain, its slot disputed."""
+    with store.transaction() as tx:
+        current = tx.current_leased_intent(intent, allow_uncertain=True)
+        if current is None or current['state'] != INTENT_PENDING:
+            return _kept_outcome(tx, intent)
+        unknown = tx.unknown_delivery(current)
+        if unknown:
+            state, event_state = 'uncertain', 'conflict'
+            result = {**result, **unknown, 'previous_result': json.loads(current['result_json'] or '{}')}
+        tx.settle_intent(intent['id'], state, result)
+        if event_state:
+            tx.update_event(intent['event_id'], {'sync_state': event_state})
+    if unknown:
+        return {'status': 'uncertain', 'message': 'исход прежней записи неизвестен; сравни версии до повтора'}
+    return None
 
 
 def _superseded_exception_write(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1313,14 +1349,18 @@ def _matches_unversioned_baseline(payload, remote, adapter):
 def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any]:
     current = store.current_leased_intent(intent)
     if current is None:
-        return {'status': INTENT_PENDING, 'message': 'операция больше не принадлежит этой попытке'}
+        return _kept_outcome(store, intent)
     intent = current
     if _superseded_exception_write(store, intent) is not None:
-        store.settle_intent(intent["id"], INTENT_DONE, {"note": "superseded by deletion"})
-        return {"status": INTENT_DONE, "message": "исключение или серия удалены"}
+        return (_finish(store, intent, INTENT_DONE, {"note": "superseded by deletion"})
+                or {"status": INTENT_DONE, "message": "исключение или серия удалены"})
     event = store.get_event(intent["event_id"])
     cal = store.get_calendar(intent["calendar_id"])
     adapter = providers.adapter_for(intent["account_id"]) if providers else None
+    if adapter is not None:
+        begin = getattr(adapter, 'begin_operation', None)   # one outgoing operation: its unsent marks stay honest
+        if callable(begin):
+            begin()
     if event is None or cal is None:
         store.settle_intent(intent["id"], INTENT_FAILED, {"error": "event or calendar vanished"})
         return {"status": INTENT_FAILED, "message": "событие или календарь исчезли"}
@@ -1328,11 +1368,13 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
     if pred is not None:
         if pred.get("state") != INTENT_PENDING:
             return _fail_after_predecessor(store, intent, pred)
-        store.park_intent(intent["id"], 60, "waiting for an earlier write")   # waiting is not an attempt
+        if not store.park_intent(intent["id"], 60, "waiting for an earlier write", intent):   # waiting is not an attempt
+            return _kept_outcome(store, intent)
         return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
     if adapter is None:
         reason = (getattr(providers, "errors", {}) or {}).get(cal["account_id"]) or "нет секрета или гранта"
-        store.park_intent(intent["id"], 300, f"аккаунт не подключён: {reason}")   # waiting for a secret/grant is not an attempt
+        if not store.park_intent(intent["id"], 300, f"аккаунт не подключён: {reason}", intent):   # waiting for a secret/grant is not an attempt
+            return _kept_outcome(store, intent)
         return {"status": INTENT_PENDING, "message": f"аккаунт не подключён: {reason}"}
     try:
         payload = json.loads(intent.get("payload_json") or "{}")
@@ -1369,16 +1411,14 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                     raise ProviderError('conflict', 'событие изменилось до первой отправки; сравни версии перед выбором')
                 pinned = store.pin_provider_version(intent, remote['external_id'], observed['etag'])
                 if pinned is None:
-                    return {'status': INTENT_PENDING, 'message': 'lease изменилась; запись не отправлена'}
+                    return _kept_outcome(store, intent)
                 intent = pinned
                 payload.update(json.loads(intent['payload_json']))
                 expected = intent['expected_etag']
                 event['external_id'] = payload.get('_provider_external_id') or event.get('external_id')
             payload['_expected_etag'] = expected
         if store.current_leased_intent(intent) is None:
-            current = store.get_intent(intent['id']) or {}
-            return {'status': current.get('state') or INTENT_PENDING,
-                    'message': 'операция отозвана до записи; сохранён её текущий исход'}
+            return _kept_outcome(store, intent)
         if intent["kind"] == "create":
             res = adapter.create(cal, event, payload)
             # The provider may answer after an owner delete. CAS the new identity
@@ -1388,7 +1428,7 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                 if res.get('cancelled') and (int(intent['attempts']) == 1 or expected):
                     pinned = store.pin_provider_version(intent, res.get('external_id') or '', res.get('etag') or '')
                     if pinned is None:
-                        return {'status': INTENT_PENDING, 'message': 'lease изменилась; восстановление не отправлено'}
+                        return _kept_outcome(store, intent)
                     intent, expected = pinned, pinned.get('expected_etag') or ''
                     written = adapter.update(cal, {**event, **res}, expected,
                                              {**payload, '_revive_cancelled': True, 'send_updates': False})
@@ -1417,7 +1457,8 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                         return {"status": INTENT_DONE, "message": "создание было отклонено, локальная запись удалена"}
                     if any(create["state"] == INTENT_PENDING for create in creates):
                         # A create that may still be in flight is settled only by its own outcome.
-                        store.park_intent(intent["id"], 60, "waiting for the create outcome")
+                        if not store.park_intent(intent["id"], 60, "waiting for the create outcome", intent):
+                            return _kept_outcome(store, intent)
                         return {"status": INTENT_PENDING, "message": "ждёт исхода создания у провайдера"}
                     lookup = getattr(adapter, "lookup_created", None)
                     if not callable(lookup):
@@ -1434,7 +1475,7 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                     event = {**event, **found}
                     pinned = store.pin_provider_version(intent, found.get('external_id') or '', found.get('etag') or '')
                     if pinned is None:
-                        return {'status': INTENT_PENDING, 'message': 'lease изменилась; удаление не отправлено'}
+                        return _kept_outcome(store, intent)
                     intent, expected = pinned, pinned.get('expected_etag') or ''
             adapter.delete(cal, event, expected, payload)
             if not store.acknowledge_write(intent, event, {}, expected, delete=True):
@@ -1448,25 +1489,48 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
             store.settle_intent(intent["id"], INTENT_FAILED, {"error": f"unknown intent kind {intent['kind']}"})
             return {"status": INTENT_FAILED, "message": "неизвестная операция"}
     except ProviderError as exc:
+        lost = not exc.unsent and getattr(adapter, '_sent', False) is True   # a write of this attempt left and was not refused
         with store.transaction() as receipt:
-            if receipt.current_leased_intent(intent, allow_uncertain=True) is None:
+            current = receipt.current_leased_intent(intent, allow_uncertain=True)
+            if current is None:
                 return {'status': 'uncertain', 'message': 'Provider result no longer belongs to this attempt; compare before retrying'}
+            if current['state'] == 'uncertain' and exc.unsent:
+                return _defer(receipt, intent, exc.message, kind=exc.kind)  # do not requeue a withdrawn attempt
             if exc.kind == "conflict":
                 receipt.update_event(event["id"], {"sync_state": "conflict"})
-                receipt.settle_intent(intent["id"], INTENT_CONFLICT, {"error": exc.message})
+                receipt.settle_intent(intent["id"], INTENT_CONFLICT, {"error": exc.message, **receipt.unknown_delivery(current)})
                 return {"status": INTENT_CONFLICT, "message": exc.message}
             if exc.kind in ("not_found", "gone") and intent["kind"] == "delete":
                 receipt.acknowledge_write(intent, event, {'note': 'already gone'}, expected, delete=True)
                 return {"status": INTENT_DONE, "message": "уже удалено на сервере"}
-            if exc.kind in ("network", "server", "retry"):
-                return _defer(receipt, intent, exc.message, kind=exc.kind)
-            receipt.update_event(event["id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
-            receipt.settle_intent(intent["id"], INTENT_FAILED, {"error": exc.message, "kind": exc.kind})
+            if (getattr(exc, "unsent", False) and exc.kind == "auth"
+                    and exc.status != 404
+                    and getattr(exc, "reason", "") not in ("connection_changed", "unknown_account", "not_signed_in", "account_disconnected")):
+                # The host refused the token before a write of this attempt could take effect (reads and
+                # refusals, the first 401 included, change nothing): nothing of this attempt was applied,
+                # so nothing failed at the provider. The intent keeps its id, desired snapshot and
+                # expected version; the event keeps its row id and sync_state (pending / pending_delete).
+                # Waiting is not an attempt; the companion delivers the write after the owner's
+                # ordinary sign-in on the card. A disconnected or replaced connection never parks here,
+                # so a future connection never inherits the write. An operation whose send may already
+                # have gone out never comes here — uncertain stays uncertain, its outcome is never substituted.
+                receipt.set_account_status(intent["account_id"], "auth_failed", exc.message)
+                if not receipt.park_intent(intent["id"], SIGN_IN_WAIT_SEC, exc.message, intent):
+                    return _kept_outcome(receipt, intent)
+                return {"status": INTENT_PENDING,
+                        "message": exc.message + f"; эта попытка не отправлена, запись сохранена, повтор через {SIGN_IN_WAIT_SEC} с после входа"}
+            if exc.kind in ('network', 'server', 'retry', 'uncertain'):
+                return _defer(receipt, intent, exc.message, kind=exc.kind, unsent=exc.unsent, lost=lost)
+            outcome = _finish(receipt, intent, INTENT_FAILED,
+                              {"error": exc.message, "kind": exc.kind,
+                               **({"unsent": True} if exc.unsent else {}),
+                               **({"reason": exc.reason} if getattr(exc, "reason", "") else {})},
+                              "pending_delete" if intent["kind"] == "delete" else "failed")
             if exc.kind == "auth":
                 receipt.set_account_status(intent["account_id"], "auth_failed", exc.message)
-            return {"status": INTENT_FAILED, "message": exc.message}
+            return outcome or {"status": INTENT_FAILED, "message": exc.message}
     except Exception as exc:  # adapter bug: disclose, do not loop forever
-        result = _defer(store, intent, f"{type(exc).__name__}: {exc}", kind='adapter_error')
+        result = _defer(store, intent, f"{type(exc).__name__}: {exc}", kind='adapter_error', lost=getattr(adapter, '_sent', False) is True)
         result['message'] = f"внутренняя ошибка адаптера: {type(exc).__name__}"
         return result
     if intent['kind'] in ('create','update','rsvp'):
@@ -1475,7 +1539,7 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
     return {"status": INTENT_DONE}
 
 
-def _defer(store, intent: Dict[str, Any], message: str, kind: str = "network") -> Dict[str, Any]:
+def _defer(store, intent: Dict[str, Any], message: str, kind: str = "network", *, unsent: bool = False, lost: bool = False) -> Dict[str, Any]:
     with store.transaction() as receipt:
         current = receipt.current_leased_intent(intent, allow_uncertain=True)
         if current is None:
@@ -1484,14 +1548,26 @@ def _defer(store, intent: Dict[str, Any], message: str, kind: str = "network") -
             receipt.settle_intent(intent['id'], 'uncertain', {'error': message, 'kind': kind,
                 'previous_result': json.loads(current.get('result_json') or '{}')})
             return {'status': 'uncertain', 'message': message + '; disconnected attempt was not requeued'}
+        unknown = {'delivery': 'unknown', 'delivery_error': message} if lost else {}
+        unknown.update(receipt.unknown_delivery(current))   # an earlier unknown write keeps its own reason
         attempts = int(intent.get("attempts") or 1)
-        if kind == 'adapter_error' or kind == "retry" and attempts >= MAX_ATTEMPTS:
+        final = kind == 'adapter_error' or kind == 'retry' and not unsent and attempts >= MAX_ATTEMPTS
+        if kind == 'uncertain' or lost and intent['kind'] != 'create' or unknown and final:
+            # A write that may have taken effect is not resent blindly, failed or forgotten: it waits for comparison.
+            # Only a creation's stable identity lets a retry read the first write back.
+            receipt.settle_intent(intent['id'], 'uncertain', {'error': message, 'kind': kind, **unknown,
+                                                             'previous_result': json.loads(current.get('result_json') or '{}')})
+            receipt.update_event(intent['event_id'], {'sync_state': 'conflict'})
+            return {'status': 'uncertain', 'message': message + '; compare before retrying'}
+        if final:
             receipt.settle_intent(intent["id"], INTENT_FAILED, {"error": message, "kind": kind, "attempts": attempts})
             receipt.update_event(intent["event_id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
             return {"status": INTENT_FAILED, "message": message if kind == 'adapter_error' else f"{message} (попытки исчерпаны)"}
         delay = RETRY_BACKOFF_SEC[min(max(attempts, 1), len(RETRY_BACKOFF_SEC)) - 1]
-        receipt.settle_intent(intent["id"], INTENT_PENDING, {"error": message, "kind": kind}, retry_in_sec=delay)
-        return {"status": INTENT_PENDING, "message": f"{message}; повтор через {delay} с"}
+        receipt.settle_intent(intent['id'], INTENT_PENDING, {'error': message, 'kind': kind, **({'unsent': True} if unsent else {}),
+                                                             **(unknown or {'delivery': 'none'})}, retry_in_sec=delay)
+        phase = '; эта попытка не отправлена' if unsent else '; ответ на создание не получен, повтор по его постоянному адресу' if lost else ''
+        return {'status': INTENT_PENDING, 'message': f'{message}{phase}; повтор через {delay} с'}
 
 
 def retry_due_intents(store, providers, owner: str = "companion", limit: int = 20) -> List[Dict[str, Any]]:

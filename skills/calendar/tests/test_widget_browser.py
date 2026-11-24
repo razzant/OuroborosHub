@@ -468,7 +468,7 @@ class AccountsBrowserTests(SkillCase):
 
     def test_google_sign_in_is_confirmed_only_by_the_account_list(self):
         existing = account('google', 'First')
-        self.mount_skill(accounts=[existing])
+        self.mount_skill(accounts=[existing], options={'google_sign_in': 'skill'})
         self.begin_route()
         self.open_accounts()
         self.page.locator('section.acc summary').click()
@@ -497,7 +497,7 @@ class AccountsBrowserTests(SkillCase):
 
     def test_signing_in_again_counts_when_an_account_becomes_ready(self):
         broken = account('google', 'Broken', status='auth_failed', last_error='token revoked')
-        self.mount_skill(accounts=[broken])
+        self.mount_skill(accounts=[broken], options={'google_sign_in': 'skill'})
         self.begin_route()
         self.open_accounts()
         self.page.get_by_role('button', name='Подключить Google').click()
@@ -508,7 +508,7 @@ class AccountsBrowserTests(SkillCase):
         expect(self.page.locator('.msg.ok')).to_contain_text('Broken')
 
     def test_a_link_that_could_not_be_opened_stays_available_by_hand_and_proves_nothing(self):
-        self.mount_skill(accounts=[])
+        self.mount_skill(accounts=[], options={'google_sign_in': 'skill'})
         self.begin_route()
         self.page.evaluate("backend.openResult = new Error('Opening a link requires a user action')")
         self.open_accounts()
@@ -533,7 +533,7 @@ class AccountsBrowserTests(SkillCase):
 
     def test_failures_of_google_start_and_disconnect_survive_list_and_agenda_refreshes(self):
         google = account('google', 'Ready')
-        self.mount_skill(accounts=[google], options={'google_client_configured': False})
+        self.mount_skill(accounts=[google], options={'google_sign_in': 'skill', 'google_client_configured': False})
         expect(self.page.get_by_role('button', name='Аккаунты', exact=True)).to_be_visible()
         self.open_accounts()
         expect(self.page.locator('section.acc')).to_contain_text('GOOGLE_OAUTH_CLIENT_ID')   # said up front, without blocking the click
@@ -574,6 +574,41 @@ class AccountsBrowserTests(SkillCase):
         expect(self.page.locator('section.acc .acc-row')).to_have_count(1)
         self.assertEqual([c['body'] for c in self.sent('accounts/disconnect')], [{'account_id': google['id']}])
 
+    def test_google_points_to_the_card_only_where_ouroboros_holds_the_sign_in(self):
+        held = account('google', 'Held', sign_in='ouroboros')
+        own = account('google', 'Own', handover_refused='identity_mismatch')
+        dav = account('caldav', 'Dav')
+        pointer = self.page.locator('section.acc .acc-sub', has_text='добавляются на карточке Календаря')
+        for sign_in in ('skill', 'ouroboros', 'unreachable'):   # every answer of a core, in the same widget
+            self.mount_skill(accounts=[held if sign_in == 'ouroboros' else account('google', 'Held'), own, dav],
+                             options={'google_sign_in': sign_in, 'google_client_configured': False})
+            self.open_accounts()
+            start = self.page.get_by_role('button', name='Подключить Google')
+            unconfigured = self.page.locator('section.acc .acc-sub.err', has_text='GOOGLE_OAUTH_CLIENT_ID')
+            if sign_in == 'skill':
+                expect(start).to_be_visible()
+                expect(unconfigured).to_be_visible()
+                expect(pointer).to_be_hidden()
+                expect(self.row(held).get_by_role('button', name='Отключить Held')).to_be_visible()
+                continue
+            if sign_in == 'unreachable':   # no usable answer: neither panel claims the sign-in's home
+                unknown = self.page.locator('section.acc .acc-sub', has_text='не ответила')
+                expect(start).to_be_hidden()
+                expect(pointer).to_be_hidden()
+                expect(unknown).to_be_visible()
+                continue
+            expect(pointer).to_be_visible()
+            expect(pointer).to_contain_text('Extensions › Skills')
+            expect(start).to_be_hidden()
+            expect(unconfigured).to_be_hidden()           # the client is chosen on the card, not in Settings
+            expect(self.page.locator('section.acc summary')).to_be_hidden()   # no address field: the card owns returns
+            expect(self.row(held).get_by_role('button', name='Отключить Held')).to_have_count(0)
+            expect(self.row(held)).to_contain_text('Вход хранит Ouroboros')
+            expect(self.row(own).get_by_role('button', name='Отключить Own')).to_be_visible()   # still its own sign-in
+            expect(self.row(own)).to_contain_text('identity_mismatch')
+            expect(self.row(dav).get_by_role('button', name='Отключить Dav')).to_be_visible()
+        self.assertEqual(self.sent('oauth/begin'), [])
+
     def test_typed_form_survives_every_render_and_the_poll_waits_for_focus(self):
         self.mount_skill(clock=True, accounts=[account('google', 'Ready')])
         self.open_accounts()
@@ -603,7 +638,7 @@ class AccountsBrowserTests(SkillCase):
         expect(password).to_have_value('S3cret')
 
     def test_dispose_releases_the_theme_and_stops_every_timer(self):
-        self.mount_skill(clock=True, accounts=[])
+        self.mount_skill(clock=True, accounts=[], options={'google_sign_in': 'skill'})
         self.begin_route()
         self.open_accounts()
         self.page.get_by_role('button', name='Подключить Google').click()

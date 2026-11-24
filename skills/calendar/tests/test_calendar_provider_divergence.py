@@ -56,6 +56,7 @@ class FakeCalDAV:
 
     def attach(self, adapter):
         adapter._request = self.request
+        self.adapter = adapter   # the transport's send mark lives on the adapter; the queue reads it after a failure
         return adapter
 
     def _etag(self):
@@ -65,12 +66,15 @@ class FakeCalDAV:
     def request(self, method, url, body=None, headers=None):
         headers = headers or {}
         self.calls.append((method, url, dict(headers)))
-        if self.down:
-            raise ops.ProviderError("network", "fake caldav unreachable")
+        adapter = getattr(self, 'adapter', None)
+        if self.down:   # the connection never forms: nothing of this request leaves (providers.py, never_connected)
+            raise ops.ProviderError("network", "fake caldav unreachable", unsent=not getattr(adapter, '_sent', False))
         result = self._apply(method, url, body, headers)
         if method in self.lose_response:
             self.lose_response.discard(method)
-            raise ops.ProviderError("network", "fake caldav response lost after apply")
+            if adapter is not None and method not in ('GET', 'HEAD', 'PROPFIND', 'REPORT'):
+                adapter._sent = True   # the write left and took effect; only its answer is lost
+            raise ops.ProviderError("network", "fake caldav response lost after apply", unsent=not getattr(adapter, '_sent', False))
         return result
 
     def _apply(self, method, url, body, headers):
@@ -125,6 +129,7 @@ class FakeGoogle:
 
     def attach(self, adapter):
         adapter._request = self.request
+        self.adapter = adapter   # the transport's send mark lives on the adapter; the queue reads it after a failure
         return adapter
 
     def _etag(self):
@@ -133,8 +138,9 @@ class FakeGoogle:
 
     def request(self, method, path, params=None, body=None, headers=None, _retry=True):
         self.calls.append((method, path, dict(params or {}), body))
-        if self.down:
-            raise ops.ProviderError("network", "fake google unreachable")
+        adapter = getattr(self, 'adapter', None)
+        if self.down:   # the connection never forms: nothing of this request leaves (providers_google.py, never_connected)
+            raise ops.ProviderError("network", "fake google unreachable", unsent=not getattr(adapter, '_sent', False))
         if method in ('PATCH', 'PUT', 'DELETE') and (headers or {}).get('If-Match'):
             eid = urllib.parse.unquote(path.split('/')[4])
             if (self.events.get(eid) or {}).get('etag') != headers['If-Match']:
@@ -142,7 +148,9 @@ class FakeGoogle:
         result = self._apply(method, path, params or {}, body)
         if method in self.lose_response:
             self.lose_response.discard(method)
-            raise ops.ProviderError("network", "fake google response lost after apply")
+            if adapter is not None and method not in ('GET', 'HEAD'):
+                adapter._sent = True   # the write left and took effect; only its answer is lost
+            raise ops.ProviderError("network", "fake google response lost after apply", unsent=not getattr(adapter, '_sent', False))
         return result
 
     def _apply(self, method, path, params, body):

@@ -61,7 +61,8 @@ TOOL_DESCRIPTIONS = {
     "cal_settings": (
         "Настройки и источники: get; set (working_hours '09:00-19:00', timezone IANA, preferences — текстовые пожелания владельца); "
         "set_calendar (visible / busy_source / publish_busy / publish_mode full|busy / default / name); new_local_calendar; reload_yandex "
-        "(прежний YANDEX_CALDAV_ACCOUNTS); connect_google (ссылка для входа в браузере, public_base_url для удалённой установки/префикса); reload_google; disconnect; sync_now. "
+        "(прежний YANDEX_CALDAV_ACCOUNTS); connect_google (ссылка для входа в браузере, public_base_url для удалённой установки/префикса; "
+        "где вход хранит сам Ouroboros — status=sign_in_on_card: вход и отключение на карточке Календаря); reload_google; disconnect; sync_now. "
         "Обычная форма аккаунтов находится в виджете. Изменения — confirm=true; для чтения в Advises доступны cal_status/cal_calendars."
     ),
     'cal_calendars': ('Читать подключённые календари и возможности аккаунтов; account_id/calendar_id — точные ID. refresh=true обновляет список у провайдера. '

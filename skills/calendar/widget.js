@@ -4,7 +4,8 @@
  * Click on the grid creates, a card edits, drag moves, the bottom edge resizes; narrow screens use
  * buttons and fields instead of drag. Hidden (service) events are hatched busy time until the toggle
  * reveals them; «обычно» (soft) preferences are dotted bands, never solid bookings.
- * «Аккаунты» shows what is connected and ready, signs in to Google through the host's link opener, connects
+ * «Аккаунты» shows what is connected and ready, signs in to Google through the host's link opener (on an Ouroboros
+ * that holds Google sign-ins it points to Calendar's card instead), connects
  * CalDAV/Яндекс with an ordinary form and disconnects. A card shows how an event relates to its copies and offers
  * the explicit link actions; nothing is resolved on its own.
  */
@@ -929,6 +930,8 @@
     var ACC_STATUS = { ok: 'готов', connected: 'готов', connecting: 'подключается…', auth_failed: 'нужно войти заново', error: 'ошибка' };
     var ACC_PROVIDER = { google: 'Google', yandex: 'Яндекс', caldav: 'CalDAV' };
     var ACC_CAPS = [['create', 'создавать календари'], ['update', 'менять календари'], ['delete', 'удалять календари'], ['sharing', 'делиться доступом']];
+    /* An Ouroboros that holds Google sign-ins (status connection_options.google_sign_in) signs in on the skill's card. */
+    var ACC_CARD = 'карточке Календаря в Ouroboros (Extensions › Skills)';
     var acc = { open: false, node: null, refs: null, data: null, loading: false, listError: '', seq: 0, msgs: {}, google: null,
         base: '', disc: null, busy: false, timer: 0, checking: false };
 
@@ -1038,13 +1041,17 @@
             if (ev.key === 'Enter' && !ev.isComposing && ev.target.tagName === 'INPUT' && ev.target.type !== 'radio') { ev.preventDefault(); accSubmit(); }
         });
         acc.refs = r;
+        r.googleHost = el('div', { class: 'acc-sub', hidden: 'hidden', text: 'Google-аккаунты здесь добавляются на ' + ACC_CARD
+            + ': там для каждого аккаунта выбирается клиент — личный или одобренный ИТ — до того, как откроется Google. Новый аккаунт появится здесь после следующего прохода фонового процесса.' });
+        r.googleUnknown = el('div', { class: 'acc-sub', hidden: 'hidden', text: 'Служба входа Ouroboros не ответила: неизвестно, где сейчас подключаются Google-аккаунты. Существующие подключения не изменились; повтори позже.' });
+        r.googleSkill = el('div', {}, [
+            el('details', {}, [el('summary', { text: 'Адрес установки — только для удалённого доступа' }),
+                field('base', 'Адрес установки', r.base, 'Оставь пустым, если Уроборос открыт на этом компьютере. Для удалённой установки укажи адрес вместе с префиксом пути.'), r.baseNote]),
+            el('div', { class: 'acc-actions' }, [r.googleBtn]), r.googleNote, r.googleMsg, r.wait]);
         acc.node = el('section', { class: 'acc', 'aria-label': 'Аккаунты' }, [
             el('div', { class: 'acc-head' }, [el('h3', { text: 'Аккаунты' }), r.refresh, el('button', { type: 'button', text: 'Закрыть', onclick: accToggle })]),
             r.listMsg, r.list,
-            el('h4', { text: 'Добавить Google' }),
-            el('details', {}, [el('summary', { text: 'Адрес установки — только для удалённого доступа' }),
-                field('base', 'Адрес установки', r.base, 'Оставь пустым, если Уроборос открыт на этом компьютере. Для удалённой установки укажи адрес вместе с префиксом пути.'), r.baseNote]),
-            el('div', { class: 'acc-actions' }, [r.googleBtn]), r.googleNote, r.googleMsg, r.wait,
+            el('h4', { text: 'Добавить Google' }), r.googleHost, r.googleUnknown, r.googleSkill,
             el('h4', { text: 'Добавить CalDAV или Яндекс' }), form
         ]);
     }
@@ -1069,6 +1076,9 @@
         var problem = broken ? a.adapter_error : ready ? '' : (a.last_error || '');   // a stale error of a ready account is not shown
         var caps = accCaps(a.capabilities);
         var armed = acc.disc && acc.disc.id === a.id;
+        /* Ouroboros holds this account's sign-in: signing in again and disconnecting live on the skill's card, and the
+         * calendar follows what happens there; nothing here can revoke or drop that sign-in. */
+        var onCard = a.sign_in === 'ouroboros';
         var row = el('div', { class: 'acc-row' + (tone === 'err' ? ' bad' : ''), 'data-id': a.id }, [
             el('div', { class: 'acc-main' }, [
                 el('div', { class: 'acc-name' }, [el('span', { text: title }), el('span', { class: 'tag', text: ACC_PROVIDER[a.provider] || a.provider })]),
@@ -1077,9 +1087,12 @@
                     el('span', { text: broken && ACC_OK[a.status] ? 'не работает' : ACC_STATUS[a.status] || String(a.status || 'неизвестно') })]),
                 problem ? el('div', { class: 'acc-sub err', text: problem }) : null,
                 el('div', { class: 'acc-sub', text: meta.join(' · ') }),
-                caps ? el('div', { class: 'acc-sub caps', title: (a.capabilities && a.capabilities.note) || '', text: 'Возможности: ' + caps }) : null
+                caps ? el('div', { class: 'acc-sub caps', title: (a.capabilities && a.capabilities.note) || '', text: 'Возможности: ' + caps }) : null,
+                a.handover_refused ? el('div', { class: 'acc-sub', text: 'Пока на собственном входе навыка: Ouroboros не принял перенос ('
+                    + a.handover_refused + '); навык предложит его снова при следующем запуске.' }) : null
             ]),
-            el('div', { class: 'acc-actions' }, [el('button', { type: 'button', class: 'danger', text: 'Отключить', 'aria-label': 'Отключить ' + title, disabled: acc.disc ? 'disabled' : null,
+            el('div', { class: 'acc-actions' }, [onCard ? el('div', { class: 'acc-sub', text: 'Вход хранит Ouroboros: войти заново или отключить — на ' + ACC_CARD + '.' })
+                : el('button', { type: 'button', class: 'danger', text: 'Отключить', 'aria-label': 'Отключить ' + title, disabled: acc.disc ? 'disabled' : null,
                 onclick: function () {
                     acc.disc = { id: a.id }; accPaint();
                     var go = acc.node.querySelector('.acc-confirm .danger'); if (go) go.focus();
@@ -1161,6 +1174,10 @@
         }
         r.googleBtn.disabled = !!(g && (g.phase === 'starting' || g.phase === 'awaiting'));
         r.googleNote.hidden = !(d && d.connection_options && d.connection_options.google_client_configured === false);   // unknown is not «no»
+        var kind = d && d.connection_options && d.connection_options.google_sign_in;
+        var onCard = kind === 'ouroboros', onSkill = kind === 'skill';
+        r.googleHost.hidden = !onCard; r.googleSkill.hidden = !onSkill;
+        r.googleUnknown.hidden = !d || onCard || onSkill;
         var saved = d && d.settings && d.settings.public_base_url;
         r.baseNote.textContent = saved ? 'Сейчас сохранён адрес: ' + saved + '. Если поле пустое, используется он.' : '';
         r.submit.disabled = acc.busy; r.submit.textContent = acc.busy ? 'Проверяю…' : 'Подключить';

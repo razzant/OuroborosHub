@@ -4,7 +4,7 @@ import json
 import urllib.request
 from email.message import Message
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +12,7 @@ import pytest
 from test_calendar_temporal_roundtrip import context
 from test_recurrence_until_semantics import native_context
 from test_calendar_provider_divergence import caldav_context, _day, run_open_intents
-from test_calendar_round2 import add_external_calendar
+from test_calendar_round2 import OneAdapterProviders, add_external_calendar
 import accounts
 import management
 import model
@@ -243,7 +243,8 @@ def test_local_oauth_probe_is_direct_without_restricting_public_redirect(tmp_pat
     monkeypatch.setattr(urllib.request,'getproxies',lambda:{'http':'http://synthetic-proxy.example:3128'})
     monkeypatch.setattr(urllib.request,'proxy_bypass',lambda host:False)
     monkeypatch.setattr(urllib.request.HTTPHandler,'http_open',transport)
-    result=accounts.connect_google(ctx,public_base_url=public_base)
+    with patch('host_sign_in.HostSignIn._call', return_value={'ok': True}):
+        result=accounts.connect_google(ctx,public_base_url=public_base)
     assert result['status']=='ok'
     assert seen==[('127.0.0.1:9876','http://127.0.0.1:9876/onboarding/static/provider-return.html','HEAD')]
     assert result['redirect_uri'].startswith(public_base or 'http://127.0.0.1:9876')
@@ -292,6 +293,71 @@ def test_active_delete_ack_is_atomic_after_disconnect():
     assert removed['status']=='deleted'
     assert ctx.store.get_event(eid) is None and server.resources=={}
     assert ctx.store.intents_for_event(eid)[-1]['state']=='done'
+
+
+def test_disconnect_between_lease_and_park_keeps_its_recorded_outcome():
+    ctx, cid, server = caldav_context(); server.down = True
+    eid = json.loads(tools.cal_create(ctx, title='Queued', start=_day(2).isoformat(), calendars=[cid], confirm=True))['event']['id']
+    leased = ctx.store.lease_intent(ctx.store.intents_for_event(eid)[-1]['id'], 'companion')
+    def gone(account_id):   # the owner disconnects after this lease and before the attempt parks
+        disconnect(ctx, cid)
+        return None
+    result = ops.run_leased_intent(ctx.store, SimpleNamespace(adapter_for=gone, errors={}), leased)
+    assert (result['status'], ctx.store.get_intent(leased['id'])['state']) == ('uncertain', 'uncertain')
+
+
+def test_disconnect_treats_an_older_unproven_network_failure_as_unknown():
+    ctx, cid, server = caldav_context(); server.down = True
+    made = [json.loads(tools.cal_create(ctx, title=title, start=_day(2).isoformat(), calendars=[cid], confirm=True))['event']['id']
+            for title in ('Recorded earlier', 'Offline now')]
+    legacy, offline = (ctx.store.intents_for_event(eid)[-1] for eid in made)
+    ctx.store.settle_intent(legacy['id'], 'pending', {'error': 'connection lost', 'kind': 'network'})   # the shape earlier versions wrote
+    count, _, _ = disconnect(ctx, cid)
+    assert (count, [ctx.store.get_intent(i['id'])['state'] for i in (legacy, offline)]) == (1, ['uncertain', 'resolved'])
+
+
+@pytest.mark.parametrize('failure', [ConnectionResetError('the reply broke off after the PUT left'),
+                                     urllib.error.URLError(ConnectionRefusedError('offline'))])
+def test_a_caldav_create_is_withdrawn_on_disconnect_only_when_it_never_left(failure):
+    ctx, cid, _ = caldav_context()
+    ctx.providers = OneAdapterProviders(providers.YandexAdapter('round2@example.test', 'app-password'))   # the real transport
+    lost = isinstance(failure, ConnectionResetError)
+    with patch('urllib.request.build_opener') as build:
+        build.return_value.open.side_effect = failure
+        made = json.loads(tools.cal_create(ctx, title='Sent once', start=_day(2).isoformat(), calendars=[cid], confirm=True))
+    intent = ctx.store.intents_for_event(made['event']['id'])[-1]
+    assert (made['status'], json.loads(intent['result_json'])['delivery']) == ('pending', 'unknown' if lost else 'none')
+    free = json.loads(tools.cal_free(ctx, start=_day(2, 0).isoformat(), end=_day(3, 0).isoformat()))
+    assert (made['event']['id'] in free['conflict_event_ids']) is lost   # a create that may exist is not a settled slot
+    count, _, _ = disconnect(ctx, cid)
+    assert (count, ctx.store.get_intent(intent['id'])['state']) == ((0, 'uncertain') if lost else (1, 'resolved'))
+
+
+def test_lost_caldav_update_is_not_resent_and_keeps_its_slot_disputed():
+    ctx, cid, server = caldav_context()
+    eid = json.loads(tools.cal_create(ctx, title='Planned', start=_day(2).isoformat(), calendars=[cid], confirm=True))['event']['id']
+    puts = []
+    def transport(request, timeout=None):
+        text, etag = server.resources[request.full_url]
+        if request.get_method() == 'PUT':   # the server applies the write, then the reply breaks off
+            puts.append(request.full_url)
+            server.resources[request.full_url] = (request.data.decode(), server._etag())
+            raise ConnectionResetError('the reply broke off after the PUT was applied')
+        reply = MagicMock()
+        reply.__enter__.return_value, reply.status, reply.headers = reply, 200, {'ETag': etag}
+        reply.read.return_value = text.encode()
+        return reply
+    ctx.providers = OneAdapterProviders(providers.YandexAdapter('round2@example.test', 'app-password'))   # the real transport
+    with patch('urllib.request.build_opener') as build:
+        build.return_value.open.side_effect = transport
+        changed = json.loads(tools.cal_update(ctx, id=eid, title='Moved', confirm=True))
+        run_open_intents(ctx, 2)
+    intent = ctx.store.intents_for_event(eid)[-1]
+    assert (changed['status'], intent['state'], len(puts)) == ('uncertain', 'uncertain', 1)   # never sent again
+    free = json.loads(tools.cal_free(ctx, start=_day(2, 0).isoformat(), end=_day(3, 0).isoformat()))
+    assert free['availability_complete'] is False and eid in free['conflict_event_ids']
+    count, _, _ = disconnect(ctx, cid)
+    assert (count, ctx.store.get_intent(intent['id'])['state'], ctx.store.get_event(eid)['title']) == (0, 'uncertain', 'Moved')
 
 
 @pytest.mark.parametrize('applied', [False, True])

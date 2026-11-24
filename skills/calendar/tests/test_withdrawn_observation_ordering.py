@@ -30,7 +30,7 @@ def queued_series(provider, *, lost_response=False):
         server.edit(source['href'], lambda wire: wire.walk('VEVENT')[0].__setitem__('LOCATION', 'Captured location'))
     worker.reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(source['calendar_id']), ctx.tz)
     prior = ctx.store.intents_for_event(target['id'])[-1]
-    assert prior['state'] == 'pending'
+    assert prior['state'] == ('uncertain' if lost_response else 'pending'), prior   # a lost answer: the write may have landed
     return ctx, source, target, target_adapter, target_server, prior
 
 
@@ -82,12 +82,14 @@ def test_independent_structural_command_keeps_captured_snapshot(provider, action
 @pytest.mark.parametrize('provider', ['caldav', 'google'])
 def test_withdrawn_observation_does_not_rebase_changed_provider_version(provider):
     ctx, source, target, adapter, server, prior = queued_series(provider, lost_response=True)
-    own = owner_command(ctx, target, 'move_all')
+    # The derived write reached the target and only its answer was lost: an owner command first needs the comparison.
+    answer = json.loads(tools.cal_update(ctx, id=target['id'], title='Independent owner edit', scope='all', confirm=True,
+                                         start=model.iso_utc(model.parse_stored(target['start_utc']) + timedelta(hours=1))))
+    assert answer['status'] == 'conflict', answer
     disconnect(ctx, source['calendar_id'])
     run_open_intents(ctx, 2)
-    assert ctx.store.get_intent(prior['id'])['state'] == 'resolved'
-    assert ctx.store.get_intent(own[0]['id'])['state'] == 'conflict'
-    assert ctx.store.get_intent(own[0]['id'])['expected_etag'] == own[0]['expected_etag']
+    kept = ctx.store.get_intent(prior['id'])
+    assert (kept['state'], kept['expected_etag']) == ('uncertain', prior['expected_etag'])
     native = adapter.read_current(ctx.store.get_calendar(target['calendar_id']), target)['event']
     assert native['title'] == 'Observed title' and native['location'] == 'Captured location'
     assert native['start_utc'] == target['start_utc']

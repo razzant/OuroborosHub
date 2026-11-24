@@ -70,6 +70,7 @@ SUITES = {
     'calendar-skill': {'skills': ['calendar'],
                        'tests': ['skills/calendar/tests', 'tests/test_calendar_skill.py',
                                  'tests/test_calendar_host_browser.py'],
+                       'shared': ['tests/calendar_sign_in/test_host_sign_in_core.py'],
                        'dependencies': ['icalendar', 'python-dateutil', 'cryptography'],
                        'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
     # Suites that list a Presence consumer (tests/test_*_core_consumer.py): catalog-check.yml gives them the pinned

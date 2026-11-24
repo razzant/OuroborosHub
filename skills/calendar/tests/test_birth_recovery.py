@@ -11,6 +11,8 @@ for path in (HERE, HERE.parent):
         sys.path.insert(0, str(path))
 from test_calendar_provider_divergence import caldav_context, google_context, _day, exhaust_create_retries, run_open_intents, sync
 from test_conflict_resolution import remote_edit
+from test_calendar_lifecycle_custody import disconnect
+from test_calendar_round2 import OneAdapterProviders
 from store import Store
 import tools
 
@@ -144,3 +146,26 @@ class BirthRecoveryTests(unittest.TestCase):
         self.assertTrue(put[1].get('If-Match')); self.assertNotIn('id', put[2])
         birth = ctx.store.intents_for_event(result['event']['id'])[0]
         self.assertEqual(birth['expected_etag'], put[1]['If-Match'])
+
+    def test_unknown_birth_survives_an_owner_edit_a_sign_in_wait_and_disconnect(self):
+        ctx, cid, server, eid, birth = self.lost(caldav_context, 'PUT')
+        unknown = {'delivery': 'unknown', 'delivery_error': 'legacy exhausted retry fixture'}
+        ctx.providers, calls = OneAdapterProviders(None), len(server.calls)   # the account waits for its sign-in
+        self.assertEqual(json.loads(tools.cal_update(ctx, id=eid, title='After', confirm=True))['status'], 'pending')
+        waiting = ctx.store.get_intent(birth['id'])
+        self.assertEqual((len(server.calls), waiting['state'], ctx.store.unknown_delivery(waiting)), (calls, 'pending', unknown))
+        self.assertIn(eid, ctx.store.disputed_events([cid]))
+        disconnect(ctx, cid)
+        kept = ctx.store.get_intent(birth['id'])
+        self.assertEqual((kept['state'], json.loads(kept['result_json'])['previous_result']['delivery_error']),
+                         ('uncertain', unknown['delivery_error']))
+        self.assertEqual(ctx.store.get_event(eid)['sync_state'], 'conflict')
+
+    def test_a_requeued_birth_record_still_owes_its_unknown_delivery(self):
+        ctx, cid, server, eid, birth = self.lost(caldav_context, 'PUT')
+        # The record an owner edit leaves until the creation's next attempt, as earlier versions also stored it.
+        ctx.store.settle_intent(birth['id'], 'pending', {'note': 'owner edit requests original creation recovery',
+                                                         'previous': json.loads(birth['result_json'])})
+        self.assertEqual(ctx.store.unknown_delivery(ctx.store.get_intent(birth['id'])),
+                         {'delivery': 'unknown', 'delivery_error': 'legacy exhausted retry fixture'})
+        self.assertIn(eid, ctx.store.disputed_events([cid]))

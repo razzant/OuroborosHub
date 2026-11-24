@@ -28,6 +28,8 @@ if PAYLOAD not in sys.path:
 import ops  # noqa: E402
 import links  # noqa: E402
 import reminders as rem  # noqa: E402
+import google_host  # noqa: E402
+from host_sign_in import HostSignIn  # noqa: E402
 from model import PROVIDER_GOOGLE, PROVIDER_LOCAL, CALDAV_PROVIDERS, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored, civil_in_basis, has_recurrence  # noqa: E402
 from providers import Providers, sync_window  # noqa: E402
 from store import Store  # noqa: E402
@@ -615,15 +617,20 @@ def main() -> int:
     _log("companion started", state_dir=state_dir, deps=deps, secrets_present=secrets_present, host_service=bool(os.environ.get("HOST_SERVICE_URL")))
     last_sync: Dict[str, float] = {}
     tick = 0
+    handed_over = None
     while not _stop:
         tick += 1
         tz = get_tz(store.get_setting("timezone") or "")
         health: Dict[str, Any] = {"deps": deps, "secrets_present": secrets_present, "tick": tick, "sync": [], "intents": None, "reminders": None, "channel": None}
         try:
-            providers = Providers(secrets, state_dir)  # reconnect/disconnect applies on the next pass, not after a process restart
             # reminders first: a slow provider must not delay a due notice
             channel.state(refresh=(tick % 10 == 1 or channel.state() != "ready"))
             stats = rem.deliver_due(store, channel, tz)
+            sign_in = HostSignIn()
+            handed_over, signed_in = google_host.worker_pass(store, secrets, state_dir, sign_in, handed_over, _log)
+            if signed_in:   # only on an Ouroboros that holds sign-ins
+                health['sign_in'] = signed_in
+            providers = Providers(secrets, state_dir, host=sign_in)  # reconnect/disconnect applies on the next pass, not after a process restart
             requested = parse_stored(store.get_setting("sync_requested_at") or "")
             for account in store.list_accounts():
                 if account['provider'] == PROVIDER_LOCAL:

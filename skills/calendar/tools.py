@@ -11,6 +11,7 @@ import ops
 import links
 import conflicts as conflict_ops
 import reminders as rem
+import google_host
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
     PROVIDER_LOCAL, REMINDERS_DEFAULT, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN,
@@ -19,7 +20,7 @@ from model import (
     parse_stored, parse_working_hours, tz_name, has_recurrence,
 )
 from providers import Providers
-from accounts import connect_google, reload_google, reload_yandex, _public_base
+from accounts import connect_google, reload_google, reload_yandex, withdraw_account, _public_base
 from store import Store
 
 CONFIRM_MESSAGE = "Это предварительный просмотр. Если действие входит в разовое или постоянное поручение, примени его с confirm=true; при неясности уточни у владельца."
@@ -182,18 +183,31 @@ def cal_status(ctx: Context, **kwargs) -> str:
     if ctx.providers.yandex_error:
         next_steps.append(ctx.providers.yandex_error)
     import providers_google as gp
+    sign_in = google_host.sign_in_kind(ctx.providers)   # ouroboros | skill | unreachable: who holds Google sign-ins
+    refused = (st.get_setting(google_host.REFUSED) or {}) if sign_in != 'skill' else {}
     for a in accounts:
         if a["provider"] == PROVIDER_LOCAL:
             account_details[a['id']] = {'capabilities': {'create': True, 'update': True, 'delete': True, 'sharing': False}}
             continue
         adapter = ctx.providers.adapter_for(a["id"])   # fills providers.errors with the concrete reason when there is none
+        not_moved = (refused.get(a['id'].split(':', 1)[-1]) or {}).get('reason') if a['provider'] == PROVIDER_GOOGLE else None
+        if not_moved in (google_host.UNCONFIRMED, 'account_disconnected') or isinstance(adapter, google_host.HostGoogleAdapter):
+            not_moved = None  # the adapter error describes the hold; it is not a working legacy sign-in
         account_details[a['id']] = {'capabilities': adapter.calendar_capabilities() if adapter and hasattr(adapter, 'calendar_capabilities') else None,
-                                    'server_url': getattr(adapter, 'server_url', '') if adapter else ''}
+                                    'server_url': getattr(adapter, 'server_url', '') if adapter else '',
+                                    **({'sign_in': 'ouroboros'} if google_host.held_by_host(ctx.providers, a['id']) else {}),
+                                    **({'handover_refused': not_moved} if not_moved else {})}
         reason = ctx.providers.errors.get(a["id"])
         if reason:
             next_steps.append(f"{a['alias'] or a['id']}: адаптер недоступен — {reason}")
         elif a["status"] != "ok":
             next_steps.append(f"{a['alias'] or a['id']}: {a['status']} — {a.get('last_error') or ''}".strip())
+        if a["provider"] == PROVIDER_GOOGLE and a["status"] == "auth_failed" and google_host.held_by_host(ctx.providers, a["id"]):
+            next_steps.append(f"{a['alias'] or a['id']}: записи, не ушедшие из-за входа, сохранены в очереди; "
+                              'после повторного входа на карточке они уходят сами')
+        if not_moved:
+            next_steps.append(f"{a['alias'] or a['id']}: Calendar could not move this Google account to Ouroboros's sign-in "
+                              f"({not_moved}); it keeps its own sign-in and is offered again at the next start")
     sync_warnings = {c['id']: st.get_sync_state(c['id']).get('last_error') or '' for c in cals}
     next_steps.extend(f"{c['name']}: {sync_warnings[c['id']]}" for c in cals if sync_warnings[c['id']])
     if counts.get("conflict"):
@@ -213,7 +227,7 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "weekday": WEEKDAY_LABELS[now.weekday()],
         "accounts": [{"id": a["id"], "provider": a["provider"], "alias": a["alias"], "status": a["status"], "last_sync": a.get("last_sync"),
                       'login': a.get('login') or '', **account_details.get(a['id'], {}),
-                      "last_error": (a.get("last_error") or "")[:160],
+                      "last_error": (a.get("last_error") or "")[:1200],   # the host's sign-in sentence and Calendar's note fit whole
                       **({"adapter_error": ctx.providers.errors[a["id"]][:160], 'status': 'unavailable',
                           'last_error': ctx.providers.errors[a['id']][:160]} if ctx.providers.errors.get(a["id"]) else {})} for a in accounts],
         "calendars": [{"id": c["id"], "name": c["name"], "account_id": c["account_id"], "provider": c["provider"], "writable": bool(c["writable"]),
@@ -232,7 +246,8 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "settings": {"working_hours": st.get_setting("working_hours") or "09:00-19:00", "preferences": st.get_setting("preferences") or "",
                      'public_base_url': st.get_setting('public_base_url') or '', 'full_preferences': 'cal_settings(action=get)',
                      "busy_publish_set": [c["id"] for c in cals if c["role_publish"]]},
-        'connection_options': {'google_client_configured': bool(gp.client_credentials(ctx.secrets)[0]), 'caldav_form': True},
+        'connection_options': {'google_client_configured': bool(gp.client_credentials(ctx.secrets)[0]), 'caldav_form': True,
+                               'google_sign_in': sign_in},
         "companion": ctx.companion_health(),
         "link_issues": st.link_issues(),
         "next_step": next_steps + _companion_secret_gap(ctx),
@@ -605,9 +620,7 @@ def cal_free(ctx: Context, start: str = "", end: str = "", duration_min: int = 6
         cal_ids = [c["id"] for c in ctx.store.list_calendars() if c["role_busy"]]
     failed = {}
     occs = ctx.occurrences(s, e, cal_ids, strict=True, failed=failed) if cal_ids else []
-    with ctx.store._conn() as c:
-        disputed = [r['id'] for r in c.execute("SELECT id,calendar_id FROM events WHERE sync_state='conflict'")
-                    if r['calendar_id'] in cal_ids]
+    disputed = ctx.store.disputed_events(cal_ids)   # conflicts and writes whose outcome is not yet known
     incomplete = bool(failed or disputed)
     hard, soft = ops.busy_intervals(occs)
     wh = parse_working_hours(working_hours or ctx.store.get_setting("working_hours") or "")
@@ -623,7 +636,7 @@ def cal_free(ctx: Context, start: str = "", end: str = "", duration_min: int = 6
         'availability_complete': not incomplete, 'conflict_event_ids': disputed, 'unexpanded_series': failed,
         "sources": cal_ids, "slots": [{"start": iso_local(a, ctx.tz), "end": iso_local(b, ctx.tz)} for a, b in slots],
         "soft_overlaps": soft_hits[:10],
-        'next_step': ('Окна предварительные: сначала проверь конфликтные события через cal_events(id) и ошибки повторений; '
+        'next_step': ('Окна предварительные: сначала проверь через cal_events(id) события с конфликтом или неизвестным исходом записи и ошибки повторений; '
                       'не считай эти окна подтверждённо свободными' if incomplete else
                       'Выбирай окно в рамках разового или постоянного поручения; предложи варианты, когда выбор нужен владельцу. Затем cal_create с confirm=true'),
     })
@@ -841,23 +854,13 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         acc = accounts[0]
         if acc['provider'] == PROVIDER_LOCAL:
             return json_dumps({'status': 'error', 'message': 'Локальный календарь не является внешним подключением; события и настройки сохранены'})
-        with st.transaction() as view:
-            cancelled = view.cancel_intents_for_account(acc["id"])
-            view.delete_account(acc["id"])
-            uncertain = sum(row['state'] == 'uncertain' for row in view.unsettled_account_intents(acc['id']))
-        forgot = False
-        if acc["provider"] == PROVIDER_GOOGLE:
-            import providers_google as gp
-            forgot = gp.forget_account(ctx.state_dir, str(ctx.secrets.get("CALENDAR_TOKEN_KEY") or ""), acc["id"].split(":", 1)[-1])
-        else:
-            from credentials import _mutate_tokens
-            def forget(vault):
-                return vault.pop(acc['id'], None) is not None
-            forgot = _mutate_tokens(ctx.state_dir, str(ctx.secrets.get('CALENDAR_TOKEN_KEY') or ''), forget)
-        ctx.providers = Providers(ctx.secrets, ctx.state_dir)
-        return json_dumps({"status": "updated", "cancelled_intents": cancelled, "uncertain_intents": uncertain, "tokens_dropped": forgot,
-                           "message": f"аккаунт {acc['id']} отключён; ожидавшие команды отозваны: {cancelled}; сохранены черновики и последние подтверждённые снимки; неизвестных результатов: {uncertain};"
-                                      + (" сохранённые токены Google удалены" if forgot else " секрет удаляет владелец")})
+        if google_host.held_by_host(ctx.providers, acc['id']):
+            return json_dumps(google_host.on_card(acc))   # «Disconnect here» on the card; Calendar follows it
+        done = withdraw_account(st, ctx.state_dir, str(ctx.secrets.get('CALENDAR_TOKEN_KEY') or ''), acc)
+        ctx.providers = Providers(ctx.secrets, ctx.state_dir, host=(getattr(ctx.providers, 'google_host', None) or {}).get('host'))
+        return json_dumps({"status": "updated", **done,
+                           "message": f"аккаунт {acc['id']} отключён; ожидавшие команды отозваны: {done['cancelled_intents']}; сохранены черновики и последние подтверждённые снимки; неизвестных результатов: {done['uncertain_intents']};"
+                                      + (" сохранённые токены Google удалены" if done['tokens_dropped'] else " секрет удаляет владелец")})
     if action == "sync_now":
         st.set_setting("sync_requested_at", iso_utc(now_utc()))
         return json_dumps({"status": "accepted", "message": "фоновая синхронизация запрошена; результат — в cal_status через минуту"})

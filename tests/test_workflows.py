@@ -189,6 +189,9 @@ class GitHubAPITests(unittest.TestCase):
 
 CORE_REPOSITORY = 'razzant/ouroboros'
 CORE_REF = '${{ env.OUROBOROS_CORE_SHA }}'
+SIGN_IN_CORE_REF = '${{ env.OUROBOROS_SIGN_IN_CORE_SHA }}'
+SIGN_IN_CORE_PATH = 'sign-in-core'
+CALENDAR_SIGN_IN_IF = "matrix.suite == 'calendar-skill'"
 # razzant/ouroboros as a whole name inside a command or URL (never razzant/OuroborosHub).
 CORE_NAMED = re.compile(r'(?<![\w.-])razzant/ouroboros(?:\.git)?(?![\w.-])', re.IGNORECASE)
 # The git commands that move or fill a checkout.
@@ -219,7 +222,7 @@ def core_git_commands(script):
         if at is None or not GIT_MOVES & set(words):
             continue
         args = words[at + 1:]
-        in_core = any(flag == '-C' and target.rstrip('/').rsplit('/', 1)[-1] == 'core'
+        in_core = any(flag == '-C' and target.rstrip('/').rsplit('/', 1)[-1] in {'core', SIGN_IN_CORE_PATH}
                       for flag, target in zip(args, args[1:]))
         if in_core or CORE_NAMED.search(command):
             found.append(command.strip())
@@ -227,11 +230,17 @@ def core_git_commands(script):
 
 
 def core_pin_violations(workflows):
-    """Every way these workflows (file name -> BaseLoader document) test against a core other than the one pin:
-    catalog-check.yml declares OUROBOROS_CORE_SHA once, every checkout of the core reads it, and no run step fetches
-    or moves a core with git. Other repositories, and actions, may be pinned however they like."""
-    pin = workflows['catalog-check.yml'].get('env', {}).get('OUROBOROS_CORE_SHA', '')
+    """Every way these workflows (file name -> BaseLoader document) test against a core other than the one pin
+    (plus the single temporary Calendar service sign-in checkout): catalog-check.yml declares both commits once,
+    every checkout of the core reads its allowed pin, and no run step fetches or moves a core with git."""
+    top = workflows['catalog-check.yml'].get('env', {})
+    pin, sign_in_pin = top.get('OUROBOROS_CORE_SHA', ''), top.get('OUROBOROS_SIGN_IN_CORE_SHA', '')
     found = [] if re.fullmatch('[0-9a-f]{40}', pin) else [f'OUROBOROS_CORE_SHA is not one full commit: {pin!r}']
+    if not re.fullmatch('[0-9a-f]{40}', sign_in_pin):
+        found.append(f'OUROBOROS_SIGN_IN_CORE_SHA is not one full commit: {sign_in_pin!r}')
+    elif sign_in_pin == pin:
+        found.append('OUROBOROS_SIGN_IN_CORE_SHA matches OUROBOROS_CORE_SHA; remove the temporary second pin')
+    sign_in_checkouts = 0
     for file, workflow in workflows.items():
         scopes = [] if file == 'catalog-check.yml' else [(file, workflow.get('env', {}))]
         for job_name, job in workflow.get('jobs', {}).items():
@@ -241,13 +250,23 @@ def core_pin_violations(workflows):
                 scopes.append((where, step.get('env', {})))
                 options = step.get('with', {})
                 if step.get('uses', '').startswith('actions/checkout@') and is_core_repository(options.get('repository', '')):
+                    calendar_sign_in = (
+                        file == 'catalog-check.yml' and job_name == 'hosted-skills'
+                        and step.get('if') == CALENDAR_SIGN_IN_IF and options.get('repository') == CORE_REPOSITORY
+                        and options.get('ref') == SIGN_IN_CORE_REF and options.get('path') == SIGN_IN_CORE_PATH
+                    )
                     if file != 'catalog-check.yml':  # where the pin is undefined: the checkout would follow a branch
                         found.append(f'{where} checks out the core outside catalog-check.yml, which holds its pin')
+                    elif calendar_sign_in:
+                        sign_in_checkouts += 1
+                        if sign_in_checkouts > 1:
+                            found.append(f'{where} duplicates the Calendar sign-in core checkout')
                     elif options.get('ref') != CORE_REF or options.get('repository') != CORE_REPOSITORY:
                         found.append(f'{where} checks out {options.get("repository")!r} at {options.get("ref")!r}, '
                                      f'not {CORE_REPOSITORY} at {CORE_REF}')
                 found += [f'{where} fetches or moves a core: {command}' for command in core_git_commands(step.get('run', ''))]
-        found += [f'{where} declares OUROBOROS_CORE_SHA again' for where, env in scopes if 'OUROBOROS_CORE_SHA' in env]
+        for key in ('OUROBOROS_CORE_SHA', 'OUROBOROS_SIGN_IN_CORE_SHA'):
+            found += [f'{where} declares {key} again' for where, env in scopes if key in env]
     return found
 
 
@@ -332,8 +351,8 @@ class WorkflowTests(unittest.TestCase):
         pin = workflows['catalog-check.yml']['env']['OUROBOROS_CORE_SHA']
         old = '9f6fe2f5f7f4d8f3e5ea58f0d04fb352181416bc'
         steps = lambda documents: documents['catalog-check.yml']['jobs']['hosted-skills']['steps']
-        [checkout] = [step for step in steps(workflows) if step.get('with', {}).get('repository') == CORE_REPOSITORY]
-        at = steps(workflows).index(checkout)
+        [checkout, sign_in_checkout] = [step for step in steps(workflows) if step.get('with', {}).get('repository') == CORE_REPOSITORY]
+        at, sign_in_at = steps(workflows).index(checkout), steps(workflows).index(sign_in_checkout)
         second = {**checkout, 'with': {**checkout['with'], 'ref': old, 'path': 'presence-core'}}
         elsewhere = {'uses': 'actions/checkout@v4', 'with': {'repository': 'razzant/OuroborosHub-fixtures', 'ref': old}}
         # Repositories other than the core may be pinned by commit, in a checkout or a script: nothing to report.
@@ -365,6 +384,13 @@ class WorkflowTests(unittest.TestCase):
                 ('a script cloning the core', lambda w: steps(w).insert(at + 1, {
                     'run': 'git clone --depth 1 https://github.com/razzant/ouroboros.git core2'})),
                 ('a pin that is not a full commit', lambda w: w['catalog-check.yml']['env'].update(OUROBOROS_CORE_SHA=pin[:12])),
+                ('the Calendar sign-in pin is not a full commit', lambda w: w['catalog-check.yml']['env'].update(OUROBOROS_SIGN_IN_CORE_SHA=pin[:12])),
+                ('the Calendar sign-in pin duplicates the main pin', lambda w: w['catalog-check.yml']['env'].update(OUROBOROS_SIGN_IN_CORE_SHA=pin)),
+                ('a job that declares the Calendar sign-in pin again', lambda w: w['catalog-check.yml']['jobs']['hosted-skills'].update(env={'OUROBOROS_SIGN_IN_CORE_SHA': old})),
+                ('the Calendar sign-in checkout widened to another suite', lambda w: steps(w)[sign_in_at].update({'if': "matrix.suite == 'email-presence'"})),
+                ('the Calendar sign-in checkout overwriting core/', lambda w: steps(w)[sign_in_at]['with'].update(path='core')),
+                ('a duplicate Calendar sign-in checkout', lambda w: steps(w).insert(sign_in_at + 1, dict(sign_in_checkout))),
+                ('a script moving the Calendar sign-in checkout', lambda w: steps(w).insert(sign_in_at + 1, {'run': f'git -C {SIGN_IN_CORE_PATH} checkout {old}'})),
         ]:
             with self.subTest(label):
                 changed = json.loads(json.dumps(workflows))
@@ -400,7 +426,7 @@ class WorkflowTests(unittest.TestCase):
 
         def selecting(suites):
             return f"contains(fromJSON('{json.dumps(sorted(suites))}'), matrix.suite)"
-        [checkout] = [step for step in steps if step.get('with', {}).get('repository') == CORE_REPOSITORY]
+        [checkout, sign_in_checkout] = [step for step in steps if step.get('with', {}).get('repository') == CORE_REPOSITORY]
         self.assertEqual(checkout['if'], selecting(needs_core))
         # The dashboard suite reads the core's historical bridge (tests/test_dashboard_theme_browser.py LEGACY_REF).
         self.assertEqual(checkout['with'], {'repository': CORE_REPOSITORY, 'ref': CORE_REF, 'path': 'core',
@@ -461,6 +487,19 @@ class WorkflowTests(unittest.TestCase):
         for step in (install, source):
             self.assertLess(steps.index(checkout), steps.index(step))
             self.assertLess(steps.index(step), len(steps) - 1)  # it precedes the suite run
+        self.assertEqual(sign_in_checkout['if'], CALENDAR_SIGN_IN_IF)
+        self.assertEqual(sign_in_checkout['with'], {'repository': CORE_REPOSITORY, 'ref': SIGN_IN_CORE_REF,
+                                                    'path': SIGN_IN_CORE_PATH, 'persist-credentials': 'false',
+                                                    'fetch-depth': '1'})
+        sign_in_run = next(step for step in steps if step.get('name') == 'Run Calendar service sign-in check')
+        self.assertEqual(sign_in_run['if'], CALENDAR_SIGN_IN_IF)
+        self.assertEqual(sign_in_run['env'], {'OUROBOROS_SIGN_IN_CORE_ROOT': f'${{{{ github.workspace }}}}/{SIGN_IN_CORE_PATH}'})
+        self.assertEqual(sign_in_run['run'],
+                         'python -B -m pytest -p no:cacheprovider -v -rs tests/calendar_sign_in/test_host_sign_in_core.py')
+        self.assertLess(steps.index(install), steps.index(sign_in_checkout))
+        self.assertLess(steps.index(sign_in_checkout), steps.index(sign_in_run))
+        self.assertLess(steps.index(sign_in_run), len(steps) - 1)
+        self.assertIn('tests/calendar_sign_in/test_host_sign_in_core.py', ci_checks.SUITES['calendar-skill']['shared'])
 
     def test_chrome_browser_workflow_installs_node_and_the_npm_closure_its_pins_record(self):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
