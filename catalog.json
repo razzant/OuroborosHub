@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/859d7dbb5153d78fd61e0b30686195fedaf02693",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5156877c0afd7436e240ef08e465a4d2b49cb185",
   "schema_version": 1,
   "skills": [
     {
@@ -33,32 +33,62 @@
       "connects": [
         "A2A"
       ],
-      "description": "Agent-to-Agent connector for peer places, with durable Presence requests, discovery, streaming status and retained task outcomes.",
+      "description": "Agent-to-Agent connector: durable letters to other agents over owner-managed links, a peer place where each link writes as itself, and delivery statuses that say whether a message was taken up.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "fa6e1aabfe8349823e69e3ad3f0d1725265b6e62f9d7562ec0f6a9cff3b72819",
-          "size": 6053
+          "sha256": "0fffa7a33723762b42d35378e4eec3877b1460c88145227dca7801024d1d6a29",
+          "size": 17868
         },
         {
           "path": "lib/client.py",
-          "sha256": "46c8a399d5f1353a381fb63c6db12266d4a5b61fb080377e3e927e5e87e6aa1c",
-          "size": 4399
+          "sha256": "f1c6b37a0fe4502b0a1e214b0c7d4784cbb8225b3bb60d4fbf6a203c3732b7ca",
+          "size": 41466
+        },
+        {
+          "path": "lib/letters.py",
+          "sha256": "154fd3872a47454cef03e979e64b96709360d09dc887c270496a20cc9cce0f34",
+          "size": 14401
+        },
+        {
+          "path": "lib/links.py",
+          "sha256": "4bb113fa60086cb2c09675f2b47bbcbc4d6cdd46abf273d64b6c4987341af7cd",
+          "size": 16540
+        },
+        {
+          "path": "lib/storage.py",
+          "sha256": "8be2687876464f7984c1d3e2f462227a3c6cc5c5aff5d4a41efe8b8e40baad6d",
+          "size": 3140
         },
         {
           "path": "plugin.py",
-          "sha256": "30817e1586b46ca2dd84c4fb6a0c94e6ddb730c71484766d9835764418c005f1",
-          "size": 5979
+          "sha256": "161cace979fc3bade6e7a186ace452e0df1c4e9022d30cc5c9364f91fd41bf9c",
+          "size": 19604
+        },
+        {
+          "path": "scripts/a2a_card.py",
+          "sha256": "b86e22243d6c814eb0ef6e4c68435fbbdd536ed6b4c948878aee520c5e73cb86",
+          "size": 13897
         },
         {
           "path": "scripts/a2a_daemon.py",
-          "sha256": "f5894b400281796829f0ee7321f520adb77d6a97864a039edc4fa5c17cf80832",
-          "size": 66465
+          "sha256": "c01f60a8dbf7a78f09f25f68c39349b5b78a7ba8f26f395a3f0c9aabf38ef26c",
+          "size": 68732
         },
         {
           "path": "scripts/a2a_presence.py",
-          "sha256": "3b14cf290615980e1b65016c0750ac45eef38cce59bc6d3793a16dca87c1ea89",
-          "size": 8139
+          "sha256": "73dfb702d6b489bac99f633ea3a2b50b4d2089dd46cf2409def1f61ea41f21c2",
+          "size": 33317
+        },
+        {
+          "path": "scripts/a2a_records.py",
+          "sha256": "ce16d867e82d912549a141d6be9069d7213fe886fa146e3227a0a6c97478dfa6",
+          "size": 21065
+        },
+        {
+          "path": "scripts/a2a_watch.py",
+          "sha256": "eb50e96403024ba0b50770107ad6b44e2bedc567044907971e26371e437db5f9",
+          "size": 14265
         },
         {
           "path": "tests/test_a2a_agent_card.py",
@@ -74,6 +104,16 @@
           "path": "tests/test_a2a_daemon_safety.py",
           "sha256": "813f87f717419576ec24eec00bfd029f420e5c0a4e1defb25055c0e85f3259b4",
           "size": 9573
+        },
+        {
+          "path": "tests/test_a2a_legacy_handoff.py",
+          "sha256": "4ae57ace179fd5b169a9003c773834b9eceea163d987912aa7cc94cd13ee4d82",
+          "size": 3751
+        },
+        {
+          "path": "tests/test_a2a_letter_flow.py",
+          "sha256": "70e0e80b89421bb783128cf95b624f3c0f67fd8ce490c45320658b74fa435834",
+          "size": 42359
         },
         {
           "path": "tests/test_a2a_operation_ownership.py",
@@ -115,7 +155,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.3",
+      "version": "2.0.0",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
