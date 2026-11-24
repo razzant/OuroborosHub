@@ -108,7 +108,7 @@ class SelectionTests(unittest.TestCase):
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
             'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
             'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'}, 'whisper-voice': {'whisper-voice'},
-            'amberkeep': {'amberkeep'},
+            'amberkeep': {'amberkeep'}, 'a2a': {'a2a'},
             'table_tools': {'table-tools'},
         }
         for skill, expected in consumers.items():
@@ -119,6 +119,7 @@ class SelectionTests(unittest.TestCase):
     def test_suite_harness_and_shared_inputs_select_the_jobs_that_depend_on_them(self):
         for name, suite in ci.SUITES.items():
             for dependency in suite['tests'] + suite.get('shared', []):
+                dependency = dependency.partition('::')[0]
                 path = dependency if dependency.endswith('.py') or dependency.endswith('.json') else dependency.rstrip('/') + '/test_example.py'
                 with self.subTest(suite=name, path=path):
                     self.assertIn(name, ci.selected_suites({path}))
@@ -188,10 +189,15 @@ class SelectionTests(unittest.TestCase):
                                  [['-hide_banner', '-encoders']] if 'ffmpeg_encoders' in suite else [])
                 self.assertEqual(install.args[0][1:6], ['-B', '-m', 'pip', 'install', 'PyYAML'])
                 self.assertTrue(set(suite.get('dependencies', [])) <= set(install.args[0]))
-                self.assertEqual(test.args[0][1:8], ['-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs'])
                 expected_paths = ([str(ROOT / path) for path in suite['tests']]
                                   if 'cwd' in suite else suite['tests'])
-                self.assertEqual(test.args[0][8:], expected_paths)
+                command = test.args[0]
+                if suite.get('offline'):
+                    self.assertEqual(command[1:5], ['-I', '-S', '-B', str(ROOT / 'scripts/ci_offline_pytest.py')])
+                    self.assertEqual(command[command.index('--') + 1:], expected_paths)
+                else:
+                    self.assertEqual(command[1:8], ['-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs'])
+                    self.assertEqual(command[8:], expected_paths)
                 self.assertEqual(test.kwargs['cwd'], ROOT / suite['cwd'] if 'cwd' in suite else None)
                 self.assertTrue(install.kwargs['check'])
                 self.assertTrue(test.kwargs['check'])
@@ -210,6 +216,28 @@ class SelectionTests(unittest.TestCase):
                     imports.assert_not_called()
                 for key, value in suite.get('env', {}).items():
                     self.assertEqual(test.kwargs['env'][key], value)
+
+    def test_a2a_ci_selects_only_explicit_offline_letter_cases(self):
+        suite = ci.SUITES['a2a']
+        self.assertTrue(suite['offline'])
+        self.assertEqual(len(set(suite['tests'])), len(suite['tests']))
+        parsed = [node.split('::') for node in suite['tests']]
+        self.assertTrue(all(len(node) == 2 and node[1].isidentifier() and node[1].startswith('test_')
+                            for node in parsed))
+        self.assertEqual({path for path, _ in parsed}, {
+            'skills/a2a/tests/test_a2a_letter_flow.py',
+            'skills/a2a/tests/test_a2a_legacy_handoff.py',
+        })
+        self.assertIn('skills/a2a/tests/test_a2a_legacy_handoff.py::test_a_15_handoff_receipt_reads_the_existing_child_answer',
+                      suite['tests'])
+        for name in ('test_fast_standard_task_returns_its_answer_without_waiting',
+                     'test_no_wait_releases_reader_and_watcher_hands_off', 'test_standard_continuation_keeps_its_own_reply',
+                     'test_two_letters_on_the_same_task_read_their_own_answers',
+                     'test_sdk_receiver_keeps_bound_answer_after_initial_wait',
+                     'test_each_pending_letter_has_its_own_delivery_window',
+                     'test_form_and_start_keep_an_explicit_public_address'):
+            self.assertIn(f'skills/a2a/tests/test_a2a_letter_flow.py::{name}', suite['tests'])
+        self.assertEqual(ci.selected_suites({'scripts/ci_offline_pytest.py'}), ['a2a'])
 
     def test_selected_consumers_refuse_absent_or_old_core_before_running_an_all_skipped_suite(self):
         pairs = [(name, key) for name, suite in ci.SUITES.items() for key in ci.core_envs(suite)]

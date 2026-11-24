@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import sysconfig
 
 if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -165,6 +166,37 @@ SUITES = {
                             'tests/test_amberkeep_readers.py', 'tests/test_amberkeep_output.py']},
     'table-tools': {'skills': ['table_tools'], 'tests': ['skills/table_tools/tests'],
                     'dependencies': ['openpyxl']},
+    # Ordinary letter delivery through the declared SDK and in-memory peers. Never collect the historical suites.
+    'a2a': {'skills': ['a2a'], 'dependencies': ['protobuf<6', 'a2a-sdk[http-server]>=1.0.0,<2.0.0'],
+            'offline': True,
+            'shared': ['scripts/ci_offline_pytest.py'],
+            'tests': [f'skills/a2a/tests/test_a2a_letter_flow.py::{case}' for case in (
+                'test_terminal_history_keeps_normal_slow_reply',
+                'test_no_wait_releases_reader_and_watcher_hands_off',
+                'test_fast_standard_task_returns_its_answer_without_waiting',
+                'test_incomplete_progress_history_keeps_the_task_snapshot_available',
+                'test_saved_named_link_keeps_its_binding_for_send_and_status',
+                'test_a_manual_environment_pair_keeps_its_exact_endpoint',
+                'test_a_direct_agent_message_keeps_its_original_call',
+                'test_two_letters_on_the_same_task_read_their_own_answers',
+                'test_standard_continuation_keeps_its_own_reply',
+                'test_overlapping_standard_letters_keep_an_unassigned_answer_unconfirmed',
+                'test_legacy_manual_receiver_keeps_its_exact_letter_receipt',
+                'test_task_snapshot_preserves_the_peer_rpc_error',
+                'test_status_listing_keeps_only_the_latest_scoped_letters',
+                'test_unaccepted_follow_up_does_not_change_the_initial_answer',
+                'test_named_discovery_reads_the_documented_card',
+                'test_sdk_receiver_keeps_bound_answer_after_initial_wait',
+                'test_sdk_expired_receipt_without_active_work_is_not_working',
+                'test_each_pending_letter_has_its_own_delivery_window',
+                'test_late_host_reference_keeps_the_earlier_letter_readable',
+                'test_legacy_pending_child_keeps_its_own_answer',
+                'test_reservation_restart_finishes_its_own_letter',
+                'test_sdk_blocking_and_streaming_repeats_follow_the_older_letter',
+                'test_public_card_and_settings_describe_the_configured_auth',
+                'test_form_and_start_keep_an_explicit_public_address',
+                'test_watcher_main_enters_normal_scan_loop',
+            )] + ['skills/a2a/tests/test_a2a_legacy_handoff.py::test_a_15_handoff_receipt_reads_the_existing_child_answer']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
@@ -178,7 +210,8 @@ def selected_suites(paths):
     return [name for name, suite in SUITES.items() if any(
         path == dependency or path.startswith(dependency.rstrip('/') + '/')
         for path in paths for dependency in (
-            [f'skills/{skill}/' for skill in suite['skills']] + suite['tests'] + suite.get('shared', [])))]
+            [f'skills/{skill}/' for skill in suite['skills']] + [test.partition('::')[0] for test in suite['tests']]
+            + suite.get('shared', [])))]
 
 
 def changed_paths(root, event):
@@ -265,6 +298,15 @@ def core_import_gaps(imports, env, cores):
                                                 for spec in imports}
 
 
+def _pytest_command(suite, tests):
+    if suite.get('offline'):
+        paths = sysconfig.get_paths()
+        libraries = dict.fromkeys((paths['purelib'], paths['platlib']))
+        runner = Path(__file__).resolve().with_name('ci_offline_pytest.py')
+        return [sys.executable, '-I', '-S', '-B', str(runner), *libraries, '--', *tests]
+    return [sys.executable, '-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs', *tests]
+
+
 def run_suite(name):
     suite = SUITES[name]
     env = {**os.environ, **suite.get('env', {}), 'PYTHONDONTWRITEBYTECODE': '1'}
@@ -292,9 +334,7 @@ def run_suite(name):
     cwd = root / suite['cwd'] if 'cwd' in suite else None
     tests = [str(root / path) for path in suite['tests']] if cwd else suite['tests']
     # Each skill gets its own interpreter; sibling test imports cannot collide.
-    subprocess.run([sys.executable, '-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs',
-                    *tests], check=True, cwd=cwd,
-                   env=env)
+    subprocess.run(_pytest_command(suite, tests), check=True, cwd=cwd, env=env)
 
 
 def main():

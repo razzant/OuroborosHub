@@ -1,92 +1,96 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
-import hashlib
+import functools
+import hmac
+import importlib
+import inspect
 import json
 import logging
 import os
 import pathlib
-import inspect
-import ipaddress
-import threading
+import ssl
+import sys
 import time
+import types
 import urllib.parse
 import uuid
-import sys
-import base64
 from typing import Any, Dict, List
 
 import httpx
-import uvicorn
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 # Companion scripts are also loaded directly by the Hub's isolated tests.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from a2a_presence import (PresenceTransport, HostWaitExpired as _HostWaitExpired,
-                          HostWorkCancelled as _HostWorkCancelled,
+from a2a_presence import (PUBLIC, PresenceTransport, public as _public, wire as _wire,
+                          HostWaitExpired as _HostWaitExpired, HostWorkCancelled as _HostWorkCancelled,
                           HostMessageConflict as _HostMessageConflict)
+from a2a_card import (CAPABILITY_LEAD, TOOLS_FETCH_ATTEMPTS, TOOLS_FETCH_ATTEMPTS_REQUEST, CardSource)
+from a2a_records import (TERMINAL_STATES, Records, TaskStateCorrupt, arrival_digest, check_same_arrival,
+                         presence_address)
 
 try:
     from a2a.server.agent_execution.agent_executor import AgentExecutor
     from a2a.server.agent_execution.context import RequestContext
+    from a2a.server.agent_execution.simple_request_context_builder import SimpleRequestContextBuilder
     from a2a.server.events.event_queue import EventQueue
     from a2a.server.request_handlers.default_request_handler import LegacyRequestHandler
     from a2a.server.routes.agent_card_routes import create_agent_card_routes
     from a2a.server.routes.jsonrpc_routes import create_jsonrpc_routes
     from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
     from a2a.server.tasks.task_updater import TaskUpdater
-    from a2a.types import (
-        AgentCapabilities,
-        AgentCard,
-        AgentSkill,
-        Artifact,
-        Part,
-        Role,
-        TaskState,
-    )
-    from a2a.utils.errors import TaskNotCancelableError
-    _A2A_SDK_AVAILABLE = True
-except Exception:
-    _A2A_SDK_AVAILABLE = False
+    from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Artifact, Part, Role, TaskState
+    from a2a.utils.errors import A2AError, InternalError, InvalidParamsError, TaskNotCancelableError
+except ImportError as exc:  # The receiving server has one implementation; without its SDK it does not start.
+    raise RuntimeError(
+        "a2a: the A2A SDK is missing (pip packages 'a2a-sdk[http-server]>=1.0.0,<2.0.0' and 'protobuf<6', "
+        "declared in SKILL.md), so the receiving server cannot start. The send, status and discover tools "
+        f"still work. Import error: {exc}"
+    ) from exc
 
-    class TaskNotCancelableError(RuntimeError):  # type: ignore[no-redef]
-        """The SDK's refusal shape (same constructor), for the no-SDK fallback."""
-
-        def __init__(self, message: "str | None" = None, data: "dict | None" = None) -> None:
-            self.message = message or "Task cannot be canceled"
-            self.data = data
-            super().__init__(self.message)
+if __name__ == "__main__":
+    try:
+        import uvicorn
+    except ImportError:
+        raise SystemExit("a2a: the standalone receiver needs uvicorn alongside the SDK declared in SKILL.md") from None
 
 logger = logging.getLogger("a2a_daemon")
 
 STATE_DIR = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
+_SKILL_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Card version — kept in step with the skill version (SKILL.md / catalog entry).
-A2A_CARD_VERSION = "1.5.3"
+A2A_CARD_VERSION = "2.0.0"
 
-# JSON-RPC error code the A2A spec assigns to TaskNotCancelableError.
-_JSONRPC_TASK_NOT_CANCELABLE = -32002
 _SUPERSEDED_CANCEL_MESSAGE = (
     "The previous host operation was cancelled, but the task now belongs to another message; "
     "the current operation was not cancelled."
 )
-_HOST_LOST_MESSAGE = "the host restarted before answering; the message was not carried over"
+_HOST_LOST_MESSAGE = PUBLIC[("lost", "failed")]
+# What a peer is told about any failure inside this server; the detail stays in the companion's log.
+_INTERNAL_ERROR = "Internal error; the details are in this agent's own log."
 
 
-def _is_loopback(host: str) -> bool:
-    clean = str(host or "").strip().strip("[]")
-    if clean == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(clean).is_loopback
-    except ValueError:
-        return False
+def _skill_lib(module):
+    """Import the skill's own library as a package under a private name."""
+    name = "_a2a_skill_payload"
+    if name not in sys.modules:
+        package = types.ModuleType(name)
+        package.__path__ = [str(_SKILL_ROOT)]
+        sys.modules[name] = package
+    return importlib.import_module(f"{name}.lib.{module}")
+
+
+links = _skill_lib("links")
+_is_loopback = links.is_loopback
+_client_message_id = _skill_lib("letters").legacy_client_message_id
 
 
 def _host_service_hostname(url: str) -> str:
@@ -97,6 +101,9 @@ def _host_service_hostname(url: str) -> str:
 
 
 HOST_SERVICE_URL = os.environ.get("HOST_SERVICE_URL", "http://127.0.0.1:8767").rstrip("/")
+# The client of every Host Service call (identity, tool schemas, Presence); tests give each install its own.
+_HOST_HTTP: Any = httpx
+_HOST_FACTS: Dict[str, Any] = {}  # the host's /identity document (feature facts)
 
 
 class _SkillToken:
@@ -128,28 +135,27 @@ if not _is_loopback(_host_service_hostname(HOST_SERVICE_URL)):
     )
 
 
-def _load_settings() -> Dict[str, Any]:
-    path = STATE_DIR / "settings.json"
-    if not path.exists():
-        return {}
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
-        # A malformed or unreadable settings file must not be indistinguishable
-        # from "never configured": defaults still apply, but say why.
-        logger.warning("a2a settings: %s is unreadable (%s); using defaults", path, exc)
-        return {}
-    if not isinstance(document, dict):
-        logger.warning(
-            "a2a settings: %s is valid JSON but not an object (%s); using defaults",
-            path,
-            type(document).__name__,
-        )
-        return {}
-    return document
+def _server_configuration() -> tuple[Dict[str, Any], str]:
+    settings = links.load_server_settings(STATE_DIR)
+    public = links.public_url(os.environ.get("A2A_PUBLIC_URL") or settings.get("A2A_PUBLIC_URL"))
+    return settings, public
 
 
-_SETTINGS = _load_settings()
+def _startup_settings() -> tuple[Dict[str, Any], str]:
+    if __name__ != "__main__":
+        return _server_configuration()
+    with links.storage.locked(STATE_DIR / links.LOCK_FILE):
+        settings, public = _server_configuration()
+        password = links.shared_password(os.environ.get(links.SHARED_PASSWORD) or settings.get(links.SHARED_PASSWORD))
+        links.record_active_shared(STATE_DIR, password)
+        return settings, public
+
+
+_SETTINGS, A2A_PUBLIC_URL = _startup_settings()
+
+
+def _setting_text(name: str) -> str:
+    return (os.environ.get(name) or str(_SETTINGS.get(name) or "")).strip()
 
 
 def _setting_int(name: str, default: int, *, minimum: int = 1, maximum: int = 600) -> int:
@@ -191,106 +197,25 @@ A2A_PORT = _setting_int("A2A_PORT", 18800, minimum=1, maximum=65535)
 # settings), that value WINS over the live /identity value. When neither is set,
 # the card is populated from the host /identity endpoint, falling back to these
 # defaults only if /identity is unavailable.
-_A2A_AGENT_NAME_EXPLICIT = (os.environ.get("A2A_AGENT_NAME") or str(_SETTINGS.get("A2A_AGENT_NAME") or "")).strip()
-_A2A_AGENT_DESCRIPTION_EXPLICIT = (os.environ.get("A2A_AGENT_DESCRIPTION") or str(_SETTINGS.get("A2A_AGENT_DESCRIPTION") or "")).strip()
+_A2A_AGENT_NAME_EXPLICIT = _setting_text("A2A_AGENT_NAME")
+_A2A_AGENT_DESCRIPTION_EXPLICIT = _setting_text("A2A_AGENT_DESCRIPTION")
 A2A_AGENT_NAME = _A2A_AGENT_NAME_EXPLICIT or "Ouroboros"
 A2A_AGENT_DESCRIPTION = _A2A_AGENT_DESCRIPTION_EXPLICIT or "Ouroboros A2A peer"
-A2A_SERVER_PASSWORD = (os.environ.get("A2A_SERVER_PASSWORD") or str(_SETTINGS.get("A2A_SERVER_PASSWORD") or "")).strip()
-
-# Bounded retry for the host tool-schema fetch: the companion routinely starts
-# before the host chat-agent is built, so GET /tools/schemas answers 200 with an
-# EMPTY tools list for the first few seconds. An empty 200 must be retried like a
-# transient failure (not accepted as final), or the card collapses to the
-# identity-only entry. The window is generous enough to survive that startup race.
-_TOOLS_FETCH_ATTEMPTS = 8
-_TOOLS_FETCH_BACKOFF_SEC = 0.5
-_HOST_FETCH_TIMEOUT_SEC = 5
-
-# Last non-empty tool list seen this process. Once the card has populated, a later
-# transient empty fetch must never regress it back to a tool-less card
-# (self-healing stability across per-request rebuilds and the startup bake).
-_LAST_GOOD_TOOLS: List[Dict[str, Any]] = []
-
-# In-request fetch is SHORT: a discovery GET must answer in seconds, not ride the
-# full warmup ladder (a cold host once held /.well-known/agent-card.json for ~57s).
-# The full ladder lives in the background refresher started with the app.
-_TOOLS_FETCH_ATTEMPTS_REQUEST = 2
-
-# Curated capability categories for the card's skill list. These are STABLE core
-# capabilities of every Ouroboros install, so the card stays honest and USEFUL for
-# integrators even while the host tool registry is warming up or unavailable —
-# the two prior regressions were a contentless "General" stub and an identity-only
-# persona entry, both useless to a consumer that reads capabilities off the card.
-_CORE_CAPABILITY_SKILLS: List[Dict[str, Any]] = [
-    {
-        "id": "code-and-files",
-        "name": "Code and files",
-        "description": (
-            "Read, search, edit and run code; structural code queries (definitions, "
-            "callers, impact), git operations, cherry-picks and code review."
-        ),
-        "tags": ["code", "files", "git"],
-    },
-    {
-        "id": "web-and-media",
-        "name": "Web and media",
-        "description": (
-            "Web search, open pages in a real browser, screenshots, PDFs, images, "
-            "video frame extraction and YouTube subtitles."
-        ),
-        "tags": ["web", "media", "research"],
-    },
-    {
-        "id": "long-running-tasks",
-        "name": "Long-running tasks and projects",
-        "description": (
-            "Background tasks with live progress across multiple rounds, and named "
-            "projects with a durable journal and memory."
-        ),
-        "tags": ["tasks", "projects", "background"],
-    },
-    {
-        "id": "self-modification",
-        "name": "Self-modification",
-        "description": (
-            "Edits its own code, prompts and configuration, landing changes through a "
-            "mandatory multi-model review and restart cycle."
-        ),
-        "tags": ["self-modification", "evolution"],
-    },
-    {
-        "id": "skills-extensions",
-        "name": "Skills (extensions)",
-        "description": (
-            "Installable skills extend the agent (A2A bridge, desktop observation and "
-            "control, and more); per-tool entries below reflect what is enabled live."
-        ),
-        "tags": ["skills", "extensions"],
-    },
-]
-
-# Capability-first top-level description. The identity file's own first line is
-# appended as flavor — personality belongs on the card, but never INSTEAD of the
-# capability summary an integrator consumes.
-_CAPABILITY_LEAD = (
-    "General-purpose autonomous AI agent: code and files (including git and code "
-    "review), web research and media, long-running background tasks and projects, "
-    "reviewed self-modification, and installable skills."
-)
-
+# The shared password of earlier releases: still accepted, as one unnamed caller.
+A2A_SERVER_PASSWORD = _setting_text(links.SHARED_PASSWORD)
+# Direct HTTPS (both files, or neither) and the address the card advertises (a proxy, a tunnel).
+A2A_TLS_CERT_FILE = _setting_text("A2A_TLS_CERT_FILE")
+A2A_TLS_KEY_FILE = _setting_text("A2A_TLS_KEY_FILE")
 
 A2A_MAX_CONCURRENT = _setting_int("A2A_MAX_CONCURRENT", 5, minimum=1, maximum=20)
 # The Presence turn wait is bounded at 1800s; stay under it (plus the httpx
 # margin) so the daemon, not a socket, always decides what a wait expiry means.
 A2A_RESPONSE_TIMEOUT_SEC = _setting_int("A2A_RESPONSE_TIMEOUT_SEC", 600, minimum=1, maximum=1740)
-# The old hardcoded 5s allocate timeout was the source of spurious "timed out"
-# stream errors on a busy host — allocation is cheap but the host polls at 1s.
-A2A_ALLOCATE_TIMEOUT_SEC = _setting_int("A2A_ALLOCATE_TIMEOUT_SEC", 30, minimum=1, maximum=120)
-# Total wait for one inbound message including deferred work polling.
+# Total delivery window of one inbound message, deferred work polling and allowance re-offers included.
 # Closing this wait never cancels the Host task.
 A2A_STREAM_DEADLINE_SEC = _setting_int("A2A_STREAM_DEADLINE_SEC", 3600, minimum=60, maximum=21600)
 # Cross-validate the two independently-bounded waits. The deadline is only checked
-# AFTER _inject_sync returns, so a response timeout longer than the total deadline
+# AFTER the turn request returns, so a response timeout longer than the total deadline
 # (e.g. 1740s against a 60s deadline) blocks for the full socket wait and then
 # gives up immediately — defeating the deadline it was supposed to respect.
 if A2A_RESPONSE_TIMEOUT_SEC + 15 > A2A_STREAM_DEADLINE_SEC:
@@ -310,6 +235,7 @@ A2A_HEARTBEAT_SEC = _setting_int("A2A_HEARTBEAT_SEC", 25, minimum=5, maximum=300
 
 _A2A_SEMAPHORE = None
 
+
 def _get_semaphore() -> asyncio.Semaphore:
     global _A2A_SEMAPHORE
     if _A2A_SEMAPHORE is None:
@@ -321,150 +247,178 @@ def _host_headers() -> Dict[str, str]:
     return {"X-Skill-Token": _HOST_TOKEN.use_in_request()}
 
 
-class _A2AAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if _is_loopback(A2A_HOST):
-            return await call_next(request)
-        expected = "Basic " + base64.b64encode(f"ouroboros:{A2A_SERVER_PASSWORD}".encode()).decode()
-        if not A2A_SERVER_PASSWORD or request.headers.get("authorization") != expected:
-            return JSONResponse({"error": "A2A authentication required"}, status_code=401)
-        return await call_next(request)
+# --- who is calling --------------------------------------------------------
+#
+# HTTP Basic, where the password names the caller: a link's own inbound password
+# gives the principal ``link:<uid>`` (the link's own identity, never its label, so a
+# rename keeps its tasks and a link made again under the same id starts afresh); the
+# shared password of earlier releases and an anonymous request to a loopback bind are
+# the one unnamed caller (principal "", today's scope). The shared password this server
+# runs with is checked first, so a link given it before a restart cannot take over its
+# callers. A wrong password is refused everywhere, loopback included. The user name is
+# not used.
 
 
-def _tasks_dir() -> pathlib.Path:
-    path = STATE_DIR / "tasks"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+class _Caller:
+    """The request user the A2A SDK scopes tasks by (``user_name`` is its ``display_name``)."""
+
+    def __init__(self, principal: str) -> None:
+        self.display_name = principal
+        self.is_authenticated = bool(principal)
 
 
-class _TaskStateCorrupt(RuntimeError):
-    """A task record exists but is unreadable or is not a JSON object."""
-
-
-def _task_path(task_id: str) -> pathlib.Path:
-    """Map a task id to a state file INJECTIVELY.
-
-    Stripping every character outside [A-Za-z0-9_-] is a lossy mapping: distinct
-    ids such as "job/a" and "joba" collapsed onto one filename, so one peer's task
-    could overwrite or return another's record. The sha256 of the COMPLETE id is
-    the identity; the sanitized prefix is retained only to keep the directory
-    human-readable. An empty id now maps deterministically as well — the previous
-    uuid fallback meant _load_task("") could never find what _save_task wrote.
-    """
-    raw = str(task_id or "")
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-    prefix = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_"))[:48]
-    return _tasks_dir() / (f"{prefix}-{digest}.json" if prefix else f"{digest}.json")
-
-
-def _save_task(task: Dict[str, Any]) -> None:
-    """Atomically replace the existing task record; callers serialize merges."""
-    path = _task_path(str(task["id"]))
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _load_task(task_id: str) -> Dict[str, Any] | None:
-    path = _task_path(task_id)
-    if not path.exists():
+def _principal_for(authorization: "str | None") -> "str | None":
+    """The caller's principal, or None to refuse the request."""
+    if not authorization:
+        return None if links.requires_inbound_auth(A2A_HOST, A2A_PUBLIC_URL) else ""
+    scheme, _, value = authorization.partition(" ")
+    if scheme.lower() != "basic":
         return None
-    return _read_task_record(path, task_id)
-
-
-def _read_task_record(path: pathlib.Path, expected_task_id: str | None = None) -> Dict[str, Any]:
-    """Read one task file with the same typed failure for lookup and listing."""
-    label = expected_task_id if expected_task_id is not None else path.name
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
-        # A present-but-unreadable record is NOT "task not found": report it as an
-        # actionable task-state failure instead of letting a bare decode error
-        # escape as an opaque server error.
-        raise _TaskStateCorrupt(f"task state for {label!r} is unreadable: {exc}") from exc
-    if not isinstance(record, dict):
-        raise _TaskStateCorrupt(f"task state for {label!r} is not a JSON object")
-    task_id = record.get("id")
-    if (not isinstance(task_id, str) or (expected_task_id is not None and task_id != expected_task_id)
-            or _task_path(task_id) != path):
-        raise _TaskStateCorrupt(f"task state for {label!r} has a different identity")
+        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    _user, separator, secret = decoded.partition(":")
+    if not separator or not secret:
+        return None
+    if A2A_SERVER_PASSWORD and hmac.compare_digest(secret.encode("utf-8"), A2A_SERVER_PASSWORD.encode("utf-8")):
+        return ""
+    try:
+        link = links.match_secret(STATE_DIR, secret)
+    except links.LinkError as exc:  # unreadable links: no named caller is accepted until they are repaired
+        logger.warning("a2a links: %s", exc)
+        link = None
+    return link.principal if link is not None else None
+
+
+class _LinkAuthentication:
+    """Authenticate every request and hand the SDK the caller's principal as the request user."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        principal = _principal_for(Headers(scope=scope).get("authorization"))
+        if principal is None:
+            response = JSONResponse({"error": "A2A authentication required"}, status_code=401,
+                                    headers={"WWW-Authenticate": 'Basic realm="a2a"'})
+            return await response(scope, receive, send)
+        if principal:
+            scope["user"] = _Caller(principal)
+        return await self.app(scope, receive, send)
+
+
+def _principal_of(call_context) -> str:
+    user = getattr(call_context, "user", None)
+    return str(getattr(user, "user_name", "") or "")
+
+
+def _inbound_credentials_exist() -> bool:
+    if A2A_SERVER_PASSWORD:
+        return True
+    try:
+        return any(link.uid and link.inbound_hash for link in links.load(STATE_DIR))
+    except links.LinkError:
+        return False
+
+
+# --- task records, message identity, arrival reservations (a2a_records.py) --------------------------
+
+_RECORDS = Records(STATE_DIR, window=A2A_STREAM_DEADLINE_SEC, legacy_identity=_client_message_id)
+_TASK_RECORD_LOCK = _RECORDS.lock
+_TERMINAL_RECORD_STATES = TERMINAL_STATES
+_TaskStateCorrupt = TaskStateCorrupt
+_tasks_dir, _task_path, _save_task = _RECORDS.tasks_dir, _RECORDS.task_path, _RECORDS.save_task
+_load_task, _read_task_record = _RECORDS.load_task, _RECORDS.read_task_record
+_update_task_record, _bound_operation, _load_arrival = _RECORDS.update_task, _RECORDS.bound, _RECORDS.load_arrival
+_arrival_digest, _is_current = arrival_digest, _RECORDS.is_current
+_check_same_arrival, _presence_address = check_same_arrival, presence_address
+
+
+def _settle(task_id: str, principal: str, wire_id: "str | None", digest: str, state: str, delivery: str,
+            answer: str = "") -> Dict[str, Any]:
+    """Record an outcome with its public sentence, fenced to the message it answers."""
+    text = PUBLIC[(delivery, state)]
+    record = _update_task_record(task_id, principal=principal, state=state, message=text,
+                                 artifacts=[{"parts": [{"kind": "text", "text": answer}]}] if answer else None,
+                                 delivery={"class": delivery, "text": text}, expected_message_id=digest,
+                                 wire_id=wire_id)
+    if digest and state in _TERMINAL_RECORD_STATES:
+        _RECORDS.retire_arrival(record, digest, wire_id or "")
     return record
 
 
-_TASK_RECORD_LOCK = threading.RLock()
+def _public_sentence(state: str, delivery: "str | None") -> str:
+    """The public sentence of a stored state: its delivery class's, else the state's own (none for success)."""
+    if (delivery, state) in PUBLIC:
+        return PUBLIC[(delivery, state)]
+    fallback = {"working": "working", "failed": "failed", "canceled": "canceled"}.get(state)
+    return PUBLIC[(fallback, state)] if fallback else ""
 
 
-# --- host operation binding (#667) ----------------------------------------
+def _legacy_replay(task_id: str, principal: str, digest: str, text: str, context_id: str, room: str) -> bool:
+    """Whether a message the SDK history does not know is a 1.5 message of this task (its sender spoke JSON-RPC
+    without the SDK): its digest is bound to the task and its saved event holds the same words in the same room.
+    False for a new message; a conflict when the old record cannot establish that a repeat is the same message."""
+    bound = _bound_operation(task_id, principal)
+    if digest not in (bound.get("message_ids") or [bound.get("client_message_id")]):
+        return False
+    receipt = _presence_transport().load(digest)
+    if receipt is None or receipt["event"].get("text") != text or (context_id and context_id != room):
+        raise _HostMessageConflict("this messageId's earlier record cannot confirm a safe repeat; send a new message")
+    return True
+
+
+def _settle_view(task_id: str, principal: str, wire_id: "str | None", digest: str, view) -> Dict[str, Any]:
+    state, delivery, _text = _public(view)
+    return _settle(task_id, principal, wire_id, digest, state, delivery,
+                   view["text"] if delivery == "answered" else "")
+
+
+# --- arrival reservations ----------------------------------------------------
 #
-# One inbound A2A message maps to ONE host operation. The message identity the
-# host is told (``client_message_id``) is deterministic in the A2A task and
-# message ids, so an SDK retry or a reconnect re-delivering the same message
-# REJOINS the accepted host work instead of starting a second turn; the host's
-# ``operation_ref`` is that same identity behind the allocated chat id. The
-# binding lives in the skill's existing durable task record (shared by the SDK
-# executor and the no-SDK fallback), which is what ``tasks/cancel`` reads.
+# The request context builder reserves (principal, messageId) before the SDK creates or acknowledges a
+# task and hands the reserved ids to the winning first request; a request that loses the race joins it.
+
+_IN_FLIGHT: set = set()          # arrival digests a live dispatch of this process is delivering
+_BACKGROUND: set = set()         # delivery and observation tasks outside a request
+_STATUS_READS: set = set()       # one background observation per task while its saved answers are readable
 
 
-def _client_message_id(task_id: str, message_id: str) -> str:
-    identity = json.dumps([task_id, message_id or "message"], ensure_ascii=False, separators=(",", ":"))
-    return "a2a:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+class _ArrivalJoined(Exception):
+    """The arrival was reserved by an earlier or concurrent request: join it, do not start a second one."""
+
+    def __init__(self, arrival: Dict[str, Any]) -> None:
+        super().__init__(arrival["digest"])
+        self.arrival = arrival
 
 
-def _operation_ref(chat_id: int, client_message_id: str) -> str:
-    """The host's documented ref spelling: the identity the caller supplied."""
-    return client_message_id
+def _actor(principal: str) -> Dict[str, Any]:
+    if not principal:
+        return {"platform": "a2a", "platform_actor_id": "", "display_name": "A2A peer", "is_bot": True,
+                "origin": "machine"}
+    try:
+        link = links.by_principal(STATE_DIR, principal)
+    except links.LinkError:
+        link = None
+    # ``origin: machine`` only lowers authority: a program's words, never an owner's, whatever accounts say.
+    actor = {"platform": "a2a", "platform_actor_id": principal, "display_name": link.label if link else "A2A link",
+             "is_bot": True, "origin": "machine"}
+    if _host_facts().get("presence_identity") == 1:
+        actor["authenticated"] = True
+    return actor
 
 
-def _update_task_record(
-    task_id: str,
-    context_id: str = "",
-    *,
-    binding: "Dict[str, Any] | None" = None,
-    state: str = "",
-    message: str = "",
-    artifacts: "List[Dict[str, Any]] | None" = None,
-    expected_message_id: str = "",
-) -> Dict[str, Any]:
-    """Merge through one current-message fence for both disk and returned views."""
-    with _TASK_RECORD_LOCK:
-        record = _load_task(task_id) or {}
-        bound = dict(record.get("ouroboros") or {})
-        current = str(bound.get("client_message_id") or "")
-        if expected_message_id and current and expected_message_id != current:
-            return record  # Neither persistence nor its returned projection may mix messages.
-        record.setdefault("id", task_id)
-        record.setdefault("contextId", context_id or task_id)
-        record.setdefault("status", {"state": "working"})
-        if binding:
-            incoming = str(binding.get("client_message_id") or "")
-            seen = list(bound.get("message_ids") or ([current] if current else []))
-            if incoming not in seen:
-                seen.append(incoming)
-                if binding.get("protocol") == "presence" and bound.get("chat_id"):
-                    bound["legacy_message_ids"] = list(seen[:-1])
-                    bound.pop("chat_id", None)
-                bound.update(binding)
-                bound["message_ids"] = seen
-                record["status"] = {"state": "working"}
-                record.pop("artifacts", None)
-            record["ouroboros"] = bound
-        if state:
-            record["status"] = {"state": state}
-            if message:
-                record["status"]["message"] = {"parts": [{"kind": "text", "text": message}]}
-        if artifacts is not None:
-            record["artifacts"] = artifacts
-        _save_task(record)
-        return record
+def _reserve_arrival(principal: str, message_id: str, content: Dict[str, Any], text: str, **where):
+    """Reserve one arrival (``Records.reserve``), in flight from the moment it exists; the actor may read the
+    host's /identity once, outside the record lock."""
+    return _RECORDS.reserve(principal, message_id, content, text, actor=_actor(principal),
+                            on_reserved=_IN_FLIGHT.add, **where)
 
 
-def _bound_operation(task_id: str) -> Dict[str, Any]:
-    record = _load_task(task_id) or {}
-    bound = record.get("ouroboros")
-    return dict(bound) if isinstance(bound, dict) else {}
+# --- delivery to the host ----------------------------------------------------
 
 
 class _HostCancelRefused(RuntimeError):
@@ -476,37 +430,276 @@ class _HostCancelRefused(RuntimeError):
         self.reason = reason
 
 
-def _cancel_host_operation_sync(task_id: str) -> Dict[str, Any]:
-    if not _bound_operation(task_id):
+class _ServerBusy(RuntimeError):
+    """Every dispatch slot was taken at the first offer; nothing was offered."""
+
+
+def _cancel_host_operation_sync(task_id: str, principal: str = "") -> Dict[str, Any]:
+    if not _bound_operation(task_id, principal):
         raise _HostCancelRefused("unbound", "no host operation is bound to this task")
     raise _HostCancelRefused("cancel_unsupported",
         "the Presence protocol has no cancellation endpoint; host work is unchanged")
+
+
+_PRESENCE_TRANSPORT = None
+
+
+def _host_facts() -> Dict[str, Any]:
+    """The host's ``/identity`` document (feature facts), read once and refreshed with each card build."""
+    if not _HOST_FACTS:
+        _fetch_identity()
+    return _HOST_FACTS
+
+
+def _presence_transport():
+    global _PRESENCE_TRANSPORT
+    if _PRESENCE_TRANSPORT is None:
+        _PRESENCE_TRANSPORT = PresenceTransport(STATE_DIR, HOST_SERVICE_URL, _host_headers,
+            timeout=A2A_RESPONSE_TIMEOUT_SEC, poll_interval=A2A_PROGRESS_POLL_SEC, http=_HOST_HTTP,
+            facts=_host_facts)
+    return _PRESENCE_TRANSPORT
 
 
 def _read_operation_sync(operation_ref: str):
     return _presence_transport().read(operation_ref) if operation_ref else None
 
 
-def _refresh_task_record(task_id: str) -> "Dict[str, Any] | None":
-    """Reconcile a saved task with its exact host operation after reconnect."""
-    record = _load_task(task_id)
+def _read_letter_view(digest: str, operation_ref: str = ""):
+    view = _read_operation_sync(operation_ref or digest)
+    if view and view.get("status") == "unknown" and digest in _IN_FLIGHT:
+        return None  # the current or an earlier letter may still be getting its own reference
+    return view
+
+
+def _wait_final_after_expiry_sync(conversation_id, deadline_monotonic, operation_ref=""):
+    return _presence_transport().wait(operation_ref, deadline_monotonic, read=_read_operation_sync)
+
+
+def _task_terminal(record):
+    return (record.get("status") or {}).get("state") in _TERMINAL_RECORD_STATES
+
+
+def _refresh_task_record(task_id: str, principal: str = "") -> "Dict[str, Any] | None":
+    """Reconcile a saved task with its exact host operations after reconnect (a read; nothing is offered).
+
+    Besides the current message, each earlier message of the task whose own outcome is not filed yet is read
+    through its own receipt; a final answer there is filed under its message id, never in the task's state.
+    """
+    record = _load_task(task_id, principal)
     if not record:
         return None
     bound = record.get("ouroboros") or {}
-    view = _read_operation_sync(str(bound.get("operation_ref") or ""))
-    states = {"completed": "completed", "cancelled": "canceled", "failed": "failed",
-              "rejected_duplicate": "rejected", "lost": "failed"}
-    state = states.get(str((view or {}).get("status") or ""))
-    if state:
-        text = _HOST_LOST_MESSAGE if view.get("status") == "lost" else str(view.get("text") or "")
-        return _update_task_record(task_id, state=state, message=text if state != "completed" else "",
-                                   artifacts=[{"parts": [{"kind": "text", "text": text}]}] if state == "completed" else None,
-                                   expected_message_id=str(bound.get("client_message_id") or ""))
+    if not _task_terminal(record):
+        record = _refresh_current_record(task_id, principal, record, bound)
+    for digest, wire in _RECORDS.open_messages(record):
+        if digest != (record.get("ouroboros") or {}).get("client_message_id"):
+            view = _read_letter_view(digest)
+            if view and _public(view)[0] in _TERMINAL_RECORD_STATES:
+                record = _settle_view(task_id, principal, wire, digest, view)
     return record
 
 
+def _refresh_current_record(task_id, principal, record, bound):
+    digest = str(bound.get("client_message_id") or "")
+    view = _read_letter_view(digest, str(bound.get("operation_ref") or ""))
+    if not view or (_public(view)[0] == "working" and (record.get("delivery") or {}).get("class") != "no_capacity"):
+        return record
+    return _settle_view(task_id, principal, bound.get("message_id"), digest, view)
+
+
+async def _acquire_slot(fail_fast: bool) -> None:
+    try:
+        await asyncio.wait_for(_get_semaphore().acquire(), timeout=0.1 if fail_fast else None)
+    except asyncio.TimeoutError as exc:
+        raise _ServerBusy("A2A server is busy; retry later") from exc
+
+
+async def _deliver(arrival: Dict[str, Any], *, first: bool = True):
+    """Offer the reserved event and wait for its outcome within the arrival's delivery window.
+
+    After a spent allowance the same event is offered again at the host's own next attempt; the dispatch
+    slot is free while waiting for it. At the end of the window a refusal stays a refusal only if the last
+    offer was refused (an offer with an unknown effect is never called refused).
+    """
+    transport = _presence_transport()
+    digest, deadline_wall = arrival["digest"], float(arrival["deadline"])
+    deadline = time.monotonic() + max(0.0, deadline_wall - time.time())
+    while True:
+        await _acquire_slot(first)
+        try:
+            view = await asyncio.to_thread(transport.offer, arrival["event"], digest, deadline=deadline_wall)
+            if view["status"] == "pending":
+                receipt = await asyncio.to_thread(transport.load, digest)
+                if not (receipt and (receipt.get("turn_ref") or receipt.get("work_ref"))):
+                    raise _HostWaitExpired("Host admission is unconfirmed; retry this same messageId", digest)
+                view = await asyncio.to_thread(transport.wait, digest, deadline)
+        finally:
+            _get_semaphore().release()
+        if view["status"] != "waiting":
+            return view
+        first = False
+        await asyncio.sleep(max(0.0, float(view["next_at"]) - time.time()))
+        if time.time() >= deadline_wall:
+            return await asyncio.to_thread(transport.settle_expired, digest)
+
+
+async def _deliver_and_settle(arrival: Dict[str, Any]) -> None:
+    """Deliver an arrival with no request waiting on it (a repeat after an unconfirmed offer, a restart)."""
+    digest = arrival["digest"]
+    if digest in _IN_FLIGHT:
+        return
+    _IN_FLIGHT.add(digest)
+    try:
+        try:
+            view = await _deliver(arrival, first=False)
+        except _HostWaitExpired:
+            return
+        await asyncio.to_thread(_settle_view, arrival["task_id"], arrival["principal"],
+                                arrival["message_id"], digest, view)
+    except Exception as exc:  # noqa: BLE001 - a background delivery must not end silently
+        logger.warning("a2a delivery of %s failed: %s", digest, exc)
+    finally:
+        _IN_FLIGHT.discard(digest)
+
+
+def _start_background(arrival: Dict[str, Any]) -> None:
+    if arrival["digest"] in _IN_FLIGHT:
+        return
+    task = asyncio.ensure_future(_deliver_and_settle(arrival))
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+
+def _recovery(arrival: Dict[str, Any]) -> str:
+    """What carrying an arrival on needs (``PresenceTransport.recovery``); this decides, it offers nothing."""
+    return _presence_transport().recovery(arrival["digest"], arrival.get("deadline"))
+
+
+async def _carry_on(arrival: Dict[str, Any], *, allow_offer: bool = True, observe: bool = False) -> str:
+    """Carry an arrival on (see ``_recovery``); the delivery runs in the background. Returns what was done; a failure
+    is logged and leaves the arrival for the next read or restart (it never fails the read that asked)."""
+    if arrival["digest"] in _IN_FLIGHT:
+        return ""
+    transport = _presence_transport()
+    try:
+        record = await asyncio.to_thread(_RECORDS.attach_arrival, arrival)
+        if _RECORDS.settled_arrival(record, arrival["digest"], arrival["message_id"]):
+            _RECORDS.retire_arrival(record, arrival["digest"], arrival["message_id"])
+            return ""
+        action = await asyncio.to_thread(_recovery, arrival)
+        if action == "offer":
+            if not allow_offer:
+                return ""
+            _start_background(arrival)
+        elif action == "expire":
+            view = await asyncio.to_thread(transport.settle_unoffered, arrival["event"], arrival["digest"],
+                                           deadline=arrival["deadline"],
+                                           outcome={"status": "refused", "refusal": "not_taken_up"})
+            await asyncio.to_thread(_settle_view, arrival["task_id"], arrival["principal"], arrival["message_id"],
+                                    arrival["digest"], view)
+        elif action == "expire_waiting":
+            view = await asyncio.to_thread(transport.settle_expired, arrival["digest"])
+            if view["status"] == "refused":
+                await asyncio.to_thread(_settle_view, arrival["task_id"], arrival["principal"],
+                                        arrival["message_id"], arrival["digest"], view)
+        elif action == "expire_unknown":
+            view = await asyncio.to_thread(_read_letter_view, arrival["digest"])
+            if view and view["status"] == "unknown":
+                await asyncio.to_thread(_settle_view, arrival["task_id"], arrival["principal"],
+                                        arrival["message_id"], arrival["digest"], view)
+            else:
+                action = ""  # an exact work reference could have arrived since the observation
+        elif not action and observe:
+            view = await asyncio.to_thread(_read_letter_view, arrival["digest"])
+            if view and _public(view)[0] in _TERMINAL_RECORD_STATES:
+                await asyncio.to_thread(_settle_view, arrival["task_id"], arrival["principal"], arrival["message_id"],
+                                        arrival["digest"], view)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("a2a carrying %s on failed: %s", arrival["digest"], exc)
+        return ""
+    return action
+
+
+async def _observe_task_status(task_id, principal):
+    record = await asyncio.to_thread(_refresh_task_record, task_id, principal)
+    if not record:
+        return record
+    bound = record.get("ouroboros") or {}
+    current = bound.get("client_message_id") or ""
+    pending = dict(_RECORDS.open_messages(record))
+    if current and not _task_terminal(record):
+        pending.setdefault(current, bound.get("message_id") or "")
+    expired = False
+    for digest, wire in pending.items():
+        arrival = await asyncio.to_thread(_load_arrival, principal, wire)
+        if arrival and arrival["digest"] == digest and arrival["task_id"] == task_id:
+            expired |= (await _carry_on(arrival, allow_offer=digest == current)).startswith("expire")
+    if expired:
+        record = await asyncio.to_thread(_load_task, task_id, principal)
+    return record
+
+
+def _observe_status_later(task_id, principal):
+    key = (principal, task_id)
+    if key in _STATUS_READS:
+        return
+    _STATUS_READS.add(key)
+
+    async def observe():
+        try:
+            await _observe_task_status(task_id, principal)
+        except Exception as exc:
+            logger.warning("a2a background status read of %s failed: %s", task_id, exc)
+        finally:
+            _STATUS_READS.discard(key)
+
+    task = asyncio.create_task(observe())
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+
+async def _resume_custody() -> None:
+    """After a restart: carry on every arrival a read would carry on (never offered, waiting for capacity, offered
+    with an unconfirmed effect); one never offered before its window closed is told "saved; no response was
+    started", and a wait whose window closed with its last offer refused becomes "no capacity"."""
+    for arrival in await asyncio.to_thread(_RECORDS.pending_arrivals):
+        await _carry_on(arrival, observe=True)
+
+
+# --- the SDK seam -------------------------------------------------------------
+
+
+def _content(message) -> Dict[str, Any]:
+    """A message's content without its addresses (a repeat may add the task and context ids it was given)."""
+    from google.protobuf.json_format import MessageToDict
+
+    body = MessageToDict(message)
+    body.pop("taskId", None)
+    body.pop("contextId", None)
+    return body
+
+
+def _message_text(message) -> str:
+    return "\n".join(part.text for part in message.parts
+                     if any(field.name == "text" for field, _value in part.ListFields()))
+
+
+def _metadata(wire_id: str, delivery: str, state: str, receipt=None) -> Dict[str, Any]:
+    """A message's public facts: its id and short delivery state (``a2a_presence.wire``), never the internal class."""
+    facts = {"message_id": wire_id, "delivery": _wire(delivery, state)}
+    if receipt is not None:
+        facts["answers"] = _public_answers({wire_id: receipt})
+    return {"ouroboros": facts}
+
+
+def _public_answers(answers) -> Dict[str, Any]:
+    """Each message's filed outcome as a peer reads it: state and answer as saved, delivery as its short state."""
+    return {key: {**entry, "delivery": _wire((entry.get("delivery") or {}).get("class"), entry.get("state"))}
+            for key, entry in (answers or {}).items() if isinstance(entry, dict)}
+
+
 def _sdk_task_store():
-    """Adapt the SDK to the SAME durable Hub task record used by the fallback."""
+    """Adapt the SDK to the durable Hub task records, one folder per caller."""
     from a2a.server.owner_resolver import resolve_user_scope
     from a2a.server.tasks.task_store import TaskStore
     from a2a.types import Message, Task
@@ -516,80 +709,215 @@ def _sdk_task_store():
               "completed": TaskState.TASK_STATE_COMPLETED, "failed": TaskState.TASK_STATE_FAILED,
               "canceled": TaskState.TASK_STATE_CANCELED, "rejected": TaskState.TASK_STATE_REJECTED}
 
-    def project_record(record, context):
-        """Project a local snapshot without refreshing or changing its source."""
-        if not record or record.get("sdk_owner", resolve_user_scope(context)) != resolve_user_scope(context):
+    def owned(record, principal) -> bool:
+        # An owner was written at the first durable reservation; a record without one predates links and
+        # belongs to the unnamed caller only, never to whoever asks.
+        return bool(record) and record.get("sdk_owner", "") == principal
+
+    def project_record(record, principal):
+        """Project a local snapshot without refreshing or changing its source.
+
+        A peer reads the public vocabulary only: the status message is the sentence of the task's state and
+        delivery class (an earlier release kept raw diagnostics there, and the SDK moves its own status notes into
+        the history), so the history keeps the peers' own questions and the artifacts the answers, verbatim.
+        """
+        if not owned(record, principal):
             return None
         task_id = record["id"]
         task = ParseDict(record["sdk_task"], Task()) if record.get("sdk_task") else Task(id=task_id, context_id=record.get("contextId") or task_id)
-        task.status.state = states.get(str((record.get("status") or {}).get("state") or ""), TaskState.TASK_STATE_WORKING)
-        message = (record.get("status") or {}).get("message")
-        if message:
-            task.status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex,
-                parts=[Part(text=str(part.get("text") or "")) for part in message.get("parts", [])]))
-        current = str((record.get("ouroboros") or {}).get("client_message_id") or "")
+        state = str((record.get("status") or {}).get("state") or "")
+        task.status.state = states.get(state, TaskState.TASK_STATE_WORKING)
+        task.status.ClearField("message")
+        if text := _public_sentence(state, (record.get("delivery") or {}).get("class")):
+            task.status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex, parts=[Part(text=text)]))
+        questions = [m for m in task.history if m.role == Role.ROLE_USER]
+        del task.history[:]
+        task.history.extend(questions)
+        bound = record.get("ouroboros") or {}
         source = next((m for m in reversed(task.history) if m.role == Role.ROLE_USER), None)
-        if current and source and _client_message_id(task_id, source.message_id) != current:
+        source_matches = source is not None and _is_current(bound, task_id, source.message_id)
+        if "message_id" in bound or (source and not source_matches):
+            # For v2, the receipt's own artifacts cannot include an earlier SDK task's accumulated ones.
             task.ClearField("artifacts")
         if not task.artifacts and record.get("artifacts"):
             for item in record["artifacts"]:
                 task.artifacts.append(Artifact(artifact_id=uuid.uuid4().hex, parts=[Part(text=str(p.get("text") or "")) for p in item.get("parts", [])]))
+        message_id = bound.get("message_id") if "message_id" in bound else (
+            source.message_id if source_matches and bound.get("client_message_id") else "")
+        facts = {"message_id": str(message_id or "")}
+        if record.get("delivery"):
+            facts["delivery"] = _wire(record["delivery"].get("class"), state)
+        if record.get("answers"):
+            facts["answers"] = _public_answers(record["answers"])
+        if "message_id" in bound:
+            facts["pending_message_ids"] = list(dict.fromkeys(wire for _, wire in _RECORDS.open_messages(record)
+                                                            if wire))
+        task.metadata.update({"ouroboros": facts})
         return task
 
     class DurableTaskStore(TaskStore):
+        def project(self, record, principal):
+            return project_record(record, principal)
+
         async def save(self, task, context):
+            principal = resolve_user_scope(context)
             with _TASK_RECORD_LOCK:
-                record = _load_task(task.id) or {"id": task.id, "contextId": task.context_id}
-                owner = resolve_user_scope(context)
-                if record.get("sdk_owner", owner) != owner:
+                existing = _load_task(task.id, principal)
+                if existing is not None and not owned(existing, principal):
                     raise _TaskStateCorrupt("SDK task belongs to another caller")
-                current = str((record.get("ouroboros") or {}).get("client_message_id") or "")
+                record = existing or {"id": task.id, "contextId": task.context_id, "sdk_owner": principal}
                 inbound = next((m for m in reversed(task.history) if m.role == Role.ROLE_USER), None)
-                if current and inbound and _client_message_id(task.id, inbound.message_id) != current:
+                if inbound and not _is_current(record.get("ouroboros") or {}, task.id, inbound.message_id):
                     return
-                record["sdk_owner"] = owner
+                record["sdk_owner"] = principal
                 record["sdk_task"] = MessageToDict(task)
                 state = next((key for key, value in states.items() if value == task.status.state), "working")
                 if str((record.get("status") or {}).get("state") or "") not in _TERMINAL_RECORD_STATES:
                     record["status"] = {"state": state}
-                _save_task(record)
+                _save_task(record, principal)
 
         async def get(self, task_id, context):
-            record = await asyncio.to_thread(_refresh_task_record, task_id)
-            return project_record(record, context)
+            """The SDK also uses this during validation. No host read or work belongs here."""
+            principal = resolve_user_scope(context)
+            return project_record(await asyncio.to_thread(_load_task, task_id, principal), principal)
+
+        async def get_status(self, task_id, context):
+            principal = resolve_user_scope(context)
+            record = await asyncio.to_thread(_load_task, task_id, principal)
+            if not owned(record, principal):
+                return None  # authorized before any host read
+            if record.get("answers") or _task_terminal(record):
+                # A written answer is ready now. Another letter may still need its own bounded read.
+                if _RECORDS.open_messages(record):
+                    _observe_status_later(task_id, principal)
+            else:
+                record = await _observe_task_status(task_id, principal)
+            return project_record(record, principal)
 
         async def list(self, params, context):
             # Reuse the SDK's filtering/pagination over a request-local view;
-            # list reads stored snapshots; only get reconciles with the Host.
+            # list reads stored snapshots of this caller only; only get reconciles with the Host.
+            principal = resolve_user_scope(context)
             records = await asyncio.to_thread(
-                lambda: [_read_task_record(path) for path in _tasks_dir().glob("*.json")]
+                lambda: [_read_task_record(path, principal=principal) for path in _tasks_dir(principal).glob("*.json")]
             )
             view = InMemoryTaskStore()
             for record in records:
-                task = project_record(record, context)
+                task = project_record(record, principal)
                 if task is not None:
                     await view.save(task, context)
             return await view.list(params, context)
 
         async def delete(self, task_id, context):
+            principal = resolve_user_scope(context)
             with _TASK_RECORD_LOCK:
-                record = _load_task(task_id)
-                if record and record.get("sdk_owner", resolve_user_scope(context)) == resolve_user_scope(context):
-                    _task_path(task_id).unlink(missing_ok=True)
+                if owned(_load_task(task_id, principal), principal):
+                    _task_path(task_id, principal).unlink(missing_ok=True)
 
     return DurableTaskStore()
+
+
+@contextlib.asynccontextmanager
+async def _holding(lock):
+    """Hold the SDK's running-agent lock with no await inside the block.
+
+    SDK 1.3 made it a ``threading.RLock`` (``async with`` on it raised, so every ordinary send answered
+    JSON-RPC -32603 after reaching the host); earlier 1.x releases used an ``asyncio.Lock``.
+    """
+    if hasattr(lock, "__aenter__"):
+        async with lock:
+            yield
+    else:
+        with lock:
+            yield
+
+
+class _ReservingContextBuilder(SimpleRequestContextBuilder):
+    """Reserve the arrival before the SDK creates or acknowledges a task, and give the winner its ids."""
+
+    async def build(self, context, params=None, task_id=None, context_id=None, task=None):
+        if params is not None:
+            message = params.message
+            requested = {"task_id": message.task_id, "context_id": message.context_id}
+            try:
+                arrival, fresh = await asyncio.to_thread(
+                    _reserve_arrival, _principal_of(context), message.message_id, _content(message),
+                    _message_text(message), task_id=task.id if task else "",
+                    context_id=task.context_id if task else "", requested=requested)
+            except _HostMessageConflict as exc:
+                raise InvalidParamsError(message=str(exc)) from exc
+            if not fresh:
+                raise _ArrivalJoined(arrival)
+            context.state["a2a_arrival"] = arrival
+            task_id, context_id = arrival["task_id"], arrival["context_id"]
+        return await super().build(context=context, params=params, task_id=task_id, context_id=context_id,
+                                   task=task)
 
 
 def _sdk_request_handler(card):
     from google.protobuf.json_format import MessageToDict
     from a2a.server.request_handlers.request_handler import validate, validate_request_params
     from a2a.utils.task import apply_history_length, validate_history_length
-    from a2a.utils.errors import InvalidParamsError, TaskNotFoundError, UnsupportedOperationError
-    from a2a.types import Message, SubscribeToTaskRequest, Task, TaskStatus
+    from a2a.utils.errors import TaskNotFoundError
+    from a2a.types import Message, Task, TaskStatus
     terminal_states = {TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_CANCELED,
                        TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_REJECTED}
+    state_values = {"completed": TaskState.TASK_STATE_COMPLETED, "canceled": TaskState.TASK_STATE_CANCELED,
+                    "failed": TaskState.TASK_STATE_FAILED, "rejected": TaskState.TASK_STATE_REJECTED,
+                    "submitted": TaskState.TASK_STATE_SUBMITTED, "working": TaskState.TASK_STATE_WORKING}
+
+    def guarded(method):
+        """The external JSON-RPC boundary: an unexpected failure (a damaged or unavailable state folder, an error
+        after acceptance) answers one fixed sentence; the SDK would otherwise send the exception text, a local path
+        included. The detail stays in this companion's log. Works for a method that returns an awaitable and for
+        one that returns an event stream (decorated SDK methods are not marked as either)."""
+        def refusal(exc):
+            logger.warning("a2a %s failed: %s", method.__name__, exc, exc_info=True)
+            return InternalError(message=_INTERNAL_ERROR)
+
+        async def awaited(result):
+            try:
+                return await result
+            except A2AError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - see the docstring
+                raise refusal(exc) from None
+
+        async def streamed(result):
+            try:
+                async with contextlib.aclosing(result) as events:
+                    async for event in events:
+                        yield event
+            except A2AError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - see the docstring
+                raise refusal(exc) from None
+
+        @functools.wraps(method)
+        def call(self, *args, **kwargs):
+            try:
+                result = method(self, *args, **kwargs)
+            except A2AError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - see the docstring
+                raise refusal(exc) from None
+            return streamed(result) if inspect.isasyncgen(result) else awaited(result)
+        return call
 
     class OperationRequestHandler(LegacyRequestHandler):
+        on_list_tasks = guarded(LegacyRequestHandler.on_list_tasks)
+        on_cancel_task = guarded(LegacyRequestHandler.on_cancel_task)
+        on_subscribe_to_task = guarded(LegacyRequestHandler.on_subscribe_to_task)
+
+        @guarded
+        @validate_request_params
+        async def on_get_task(self, params, context):
+            validate_history_length(params)
+            task = await self.task_store.get_status(params.id, context)
+            if task is None:
+                raise TaskNotFoundError
+            return apply_history_length(task, params)
+
         async def _run_event_stream(self, request, queue):
             # A superseded producer does not own the current task's queue.
             await self.agent_executor.execute(request, queue)
@@ -601,97 +929,121 @@ def _sdk_request_handler(card):
                 await producer_task
             except asyncio.CancelledError:
                 logger.debug("Producer task %s was cancelled during cleanup", task_id)
-            # The SDK closes by task id; keep its existing owner lock across
-            # identity validation, queue close and retirement.
-            async with self._running_agents_lock:
-                if self._running_agents.get(task_id) is not producer_task:
-                    return
+            # The SDK closes by task id: only the producer still registered for the task retires it, so a
+            # stale producer never closes the current one's queue. No await runs while the lock is held.
+            async with _holding(self._running_agents_lock):
+                current = self._running_agents.get(task_id) is producer_task
+                if current:
+                    self._running_agents.pop(task_id, None)
+            if current:
                 await self._queue_manager.close(task_id)
-                self._running_agents.pop(task_id, None)
+
+        def _older_message(self, task, message, state, delivery, answer):
+            """A synthetic answer for an older message of a moved task: its own outcome, never the current one's."""
+            status = TaskStatus(state=state_values[state])
+            text = _wire((delivery or {}).get("class"), state)["text"]
+            if text:
+                status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex, parts=[Part(text=text)]))
+            original = next((m for m in reversed(task.history)
+                             if m.message_id == message.message_id and m.role == Role.ROLE_USER), message)
+            older = Task(id=task.id, context_id=task.context_id, status=status, history=[original],
+                         artifacts=[Artifact(artifact_id=uuid.uuid4().hex, parts=[Part(text=answer)])] if answer else [])
+            receipt = ({"state": state, "delivery": delivery, "answer": answer or ""}
+                       if state in _TERMINAL_RECORD_STATES else None)
+            older.metadata.update(_metadata(message.message_id, (delivery or {}).get("class") or "", state, receipt))
+            return older
 
         async def _same_message_replay(self, params, context):
-            task_id = params.message.task_id
-            task = await self.task_store.get(task_id, context) if task_id else None
+            principal = _principal_of(context)
+            message = params.message
+            requested = {"task_id": message.task_id, "context_id": message.context_id}
+            arrival = await asyncio.to_thread(_load_arrival, principal, message.message_id)
+            if arrival is not None:
+                try:
+                    _check_same_arrival(arrival, _content(message), requested)
+                except _HostMessageConflict as exc:
+                    raise InvalidParamsError(message=str(exc)) from exc
+                digest = arrival["digest"]
+                task_id = arrival["task_id"]
+                record = await asyncio.to_thread(_RECORDS.attach_arrival, arrival)
+            else:
+                task_id = message.task_id
+                task = await self.task_store.get(task_id, context) if task_id else None
+                if task is None:
+                    return None
+                original = next((m for m in reversed(task.history)
+                                 if m.message_id == message.message_id and m.role == Role.ROLE_USER), None)
+                digest = _client_message_id(task_id, message.message_id)  # a 1.5 binding names it so
+                if original is None:
+                    try:
+                        if not await asyncio.to_thread(_legacy_replay, task_id, principal, digest,
+                                                       _message_text(message), message.context_id, task.context_id):
+                            return None  # NEW message retains the SDK's terminal-task guard.
+                    except _HostMessageConflict as exc:
+                        raise InvalidParamsError(message=str(exc)) from exc
+                else:
+                    before, after = MessageToDict(original), MessageToDict(message)
+                    for body in (before, after):
+                        body.pop("taskId", None)
+                        body.pop("contextId", None)
+                    if before != after or (message.context_id and message.context_id != task.context_id):
+                        raise InvalidParamsError(message="messageId was already accepted with different content or context")
+                record = await asyncio.to_thread(_load_task, task_id, principal)
+            if not record:
+                raise InvalidParamsError(message="the task this message was accepted on is unavailable")
+            bound = record.get("ouroboros") or {}
+            view = None
+            if bound and not _RECORDS.settled_arrival(record, digest, message.message_id):
+                current = bound.get("client_message_id") == digest
+                if arrival:  # only a validated repeat of this exact letter, never SDK validation
+                    await _carry_on(arrival, allow_offer=current)
+                operation = str(bound.get("operation_ref") or "") if current else ""
+                view = await asyncio.to_thread(_read_letter_view, digest, operation)
+                if view:
+                    record = await asyncio.to_thread(_settle_view, task_id, principal, message.message_id, digest, view)
+                else:
+                    record = await asyncio.to_thread(_load_task, task_id, principal)
+            task = self.task_store.project(record, principal)
             if task is None:
-                return None
-            original = next((m for m in reversed(task.history)
-                             if m.message_id == params.message.message_id and m.role == Role.ROLE_USER), None)
-            if original is None:
-                return None  # NEW message retains the SDK's terminal-task guard.
-            before, after = MessageToDict(original), MessageToDict(params.message)
-            for body in (before, after):
-                body.pop("taskId", None)
-                body.pop("contextId", None)
-            if before != after or (params.message.context_id and params.message.context_id != task.context_id):
-                raise InvalidParamsError(message="messageId was already accepted with different content or context")
-            expected = _client_message_id(task_id, params.message.message_id)
-            bound = _bound_operation(task_id)
-            if not bound or bound.get("client_message_id") == expected:
+                raise InvalidParamsError(message="the task this message was accepted on is unavailable")
+            bound = record.get("ouroboros") or {}
+            if not bound or bound.get("client_message_id") == digest:
                 return task
-            # An old message must never receive current M2's terminal answer.
-            # Reconcile M1 through the same host operation; do not write M2.
-            view = await asyncio.to_thread(_read_operation_sync, expected)
-            state = {"completed": TaskState.TASK_STATE_COMPLETED, "cancelled": TaskState.TASK_STATE_CANCELED,
-                     "failed": TaskState.TASK_STATE_FAILED, "rejected_duplicate": TaskState.TASK_STATE_REJECTED,
-                     "lost": TaskState.TASK_STATE_FAILED}.get((view or {}).get("status"))
-            if state is None:
-                raise InvalidParamsError(message="previous message outcome is not confirmed; current task is unchanged")
-            status = TaskStatus(state=state)
-            if view.get("status") == "lost":
-                status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex,
-                                                parts=[Part(text=_HOST_LOST_MESSAGE)]))
-            return Task(id=task_id, context_id=task.context_id, status=status, history=[original],
-                        artifacts=[Artifact(artifact_id=uuid.uuid4().hex, parts=[Part(text=str(view.get("text") or ""))])]
-                        if state == TaskState.TASK_STATE_COMPLETED else [])
+            saved = (record.get("answers") or {}).get(message.message_id)
+            if saved:
+                return self._older_message(task, message, saved["state"], saved.get("delivery"), saved.get("answer"))
+            state, delivery, text = _public(view)
+            return self._older_message(task, message, state, {"class": delivery, "text": text},
+                                       view["text"] if delivery == "answered" else "")
 
         async def _replay_events(self, params, context, task):
-            if task.status.state in terminal_states:
-                yield task
-                return
-            # Reuse the SDK subscription/aggregator owner without creating an
-            # executor or replacing its running-agent entry/context identity.
-            if await self._queue_manager.get(task.id) is not None:
-                try:
-                    async for event in super().on_subscribe_to_task(SubscribeToTaskRequest(id=task.id), context):
-                        yield event
-                    yield await self._same_message_replay(params, context)
-                    return
-                except (TaskNotFoundError, UnsupportedOperationError):
-                    pass  # Queue completion raced the tap; reconcile below.
             yield task
-            bound = _bound_operation(task.id)
-            expected = _client_message_id(task.id, params.message.message_id)
-            if bound.get("protocol") != "presence":
-                task.status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex,
-                                                     parts=[Part(text="The host operation binding is unavailable; delivery outcome is unknown.")]))
-                yield task
+            if task.status.state in terminal_states:
                 return
-            ref = expected
+            # The SDK stream is task-wide. A retry names a letter, so only its saved operation can supply updates.
+            principal = _principal_of(context)
+            wire = params.message.message_id
+            arrival = await asyncio.to_thread(_load_arrival, principal, wire)
+            if arrival:
+                ref = arrival["digest"]
+                remaining = float(arrival["deadline"]) - time.time()
+                if remaining <= 0:
+                    receipt = await asyncio.to_thread(_presence_transport().load, ref)
+                    if receipt and (receipt.get("turn_ref") or receipt.get("work_ref")):
+                        remaining = A2A_STREAM_DEADLINE_SEC  # read admitted work, but never extend its offer window
+            else:
+                ref = _client_message_id(task.id, wire)
+                if not await asyncio.to_thread(_presence_transport().load, ref):
+                    return
+                remaining = A2A_STREAM_DEADLINE_SEC
             try:
-                answer = await asyncio.to_thread(_wait_final_after_expiry_sync, bound.get("conversation_id", ""),
-                                                time.monotonic() + A2A_STREAM_DEADLINE_SEC, ref)
-                _update_task_record(task.id, state="completed", expected_message_id=expected,
-                                    artifacts=[{"parts": [{"kind": "text", "text": answer}]}])
-            except _HostWaitExpired as exc:
-                # The reconnect wait ended, not the host operation. Return its
-                # nonterminal Task and explicit uncertainty without writing a
-                # false failed/completed state or starting another producer.
-                task.status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex,
-                                                     parts=[Part(text=str(exc))]))
-                yield task
-                return
-            except _HostWorkCancelled as exc:
-                _update_task_record(task.id, state="canceled", message=str(exc), expected_message_id=expected)
-            except RuntimeError as exc:
-                _update_task_record(task.id, state="failed", message=str(exc), expected_message_id=expected)
+                view = await asyncio.to_thread(_wait_final_after_expiry_sync, "", time.monotonic() + remaining, ref)
+            except _HostWaitExpired:
+                return  # Only the wait ended. Keep this letter's nonterminal snapshot, with no new producer.
+            await asyncio.to_thread(_settle_view, task.id, principal, wire, ref, view)
             yield await self._same_message_replay(params, context)
 
-        @validate_request_params
-        async def on_message_send(self, params, context):
-            validate_history_length(params.configuration)
-            replay = await self._same_message_replay(params, context)
-            if replay is None:
-                return await super().on_message_send(params, context)
+        async def _replayed(self, params, context, replay):
             if params.configuration.return_immediately or replay.status.state in terminal_states:
                 return apply_history_length(replay, params.configuration)
             async for event in self._replay_events(params, context, replay):
@@ -699,185 +1051,59 @@ def _sdk_request_handler(card):
                     replay = event
             return apply_history_length(replay, params.configuration)
 
+        @guarded
+        @validate_request_params
+        async def on_message_send(self, params, context):
+            validate_history_length(params.configuration)
+            replay = await self._same_message_replay(params, context)
+            if replay is None:
+                try:
+                    return await super().on_message_send(params, context)
+                except _ArrivalJoined:  # a concurrent first copy reserved it first: join that one
+                    replay = await self._same_message_replay(params, context)
+            return await self._replayed(params, context, replay)
+
+        @guarded
         @validate_request_params
         @validate(lambda self: self._agent_card.capabilities.streaming, "Streaming is not supported by the agent")
         async def on_message_send_stream(self, params, context):
+            validate_history_length(params.configuration)
             replay = await self._same_message_replay(params, context)
-            if replay is not None:
-                async with contextlib.aclosing(self._replay_events(params, context, replay)) as stream:
-                    async for event in stream:
-                        yield event
-                return
-            async with contextlib.aclosing(super().on_message_send_stream(params, context)) as stream:
+            if replay is None:
+                try:
+                    async with contextlib.aclosing(super().on_message_send_stream(params, context)) as stream:
+                        async for event in stream:
+                            yield event
+                    return
+                except _ArrivalJoined:
+                    replay = await self._same_message_replay(params, context)
+            async with contextlib.aclosing(self._replay_events(params, context, replay)) as stream:
                 async for event in stream:
                     yield event
 
-    return OperationRequestHandler(agent_executor=OuroborosExecutor(), task_store=_sdk_task_store(), agent_card=card)
+    store = _sdk_task_store()
+    return OperationRequestHandler(agent_executor=OuroborosExecutor(), task_store=store, agent_card=card,
+                                   request_context_builder=_ReservingContextBuilder(task_store=store))
 
 
-def _fetch_identity() -> Dict[str, str]:
-    """Best-effort read of the host's real name/description from GET /identity.
-
-    Returns {} when the endpoint is unavailable so the caller can fall back to the
-    configured A2A_AGENT_NAME / A2A_AGENT_DESCRIPTION defaults.
-    """
-    try:
-        response = httpx.get(
-            f"{HOST_SERVICE_URL}/identity", headers=_host_headers(), timeout=_HOST_FETCH_TIMEOUT_SEC
-        )
-        if response.status_code == 200:
-            data = response.json() or {}
-            return {
-                "name": str(data.get("name") or "").strip(),
-                "description": str(data.get("description") or "").strip(),
-            }
-        logger.warning("a2a agent-card: /identity returned status %s", response.status_code)
-    except Exception as exc:
-        logger.warning("a2a agent-card: /identity unavailable (%s)", exc)
-    return {}
+def _card_url() -> str:
+    """The address the card advertises: the configured public endpoint (path included), else the bind
+    address. A wildcard bind (0.0.0.0, ::) is not dialable from elsewhere: set A2A_PUBLIC_URL for it."""
+    return links.advertised_url(A2A_HOST, A2A_PORT, A2A_PUBLIC_URL, bool(A2A_TLS_CERT_FILE and A2A_TLS_KEY_FILE))
 
 
-def _fetch_tool_schemas(
-    attempts_override: "int | None" = None,
-    *,
-    stop_event: "threading.Event | None" = None,
-) -> List[Dict[str, Any]]:
-    """Fetch the host tool schemas, treating an empty list as "not ready yet".
-
-    The companion routinely starts before the host chat-agent is built, so
-    GET /tools/schemas answers 200 {"tools": []} for the first few seconds. A
-    single 200 must NOT be accepted as final when the list is empty — that was
-    the regression that let the agent card collapse to the identity-only entry
-    on a peer whose host was still warming up. So an empty 200 is retried like a
-    transient failure; the last non-empty result is cached at module scope; and
-    a populated card is never regressed back to empty. If every attempt yields
-    empty we serve the last known-good tool list when we have one, and fall back
-    to the identity-derived entry only when we have never seen a populated list.
-
-    ``stop_event`` (passed only by the background refresher) aborts the ladder and
-    its backoff waits as soon as companion shutdown is requested.
-    """
-    global _LAST_GOOD_TOOLS
-    attempts = _TOOLS_FETCH_ATTEMPTS if attempts_override is None else max(1, int(attempts_override))
-    last_error = "no attempt made"
-    for attempt in range(attempts):
-        if stop_event is not None and stop_event.is_set():
-            last_error = "shutdown requested"
-            break
-        try:
-            response = httpx.get(
-                f"{HOST_SERVICE_URL}/tools/schemas",
-                headers=_host_headers(),
-                timeout=_HOST_FETCH_TIMEOUT_SEC,
-            )
-            if response.status_code == 200:
-                tools = response.json().get("tools") or []
-                if tools:
-                    _LAST_GOOD_TOOLS = tools
-                    return tools
-                last_error = "host returned an empty tool list (chat-agent not ready yet)"
-            else:
-                last_error = f"status {response.status_code}"
-        except Exception as exc:
-            last_error = str(exc)
-        if attempt + 1 < attempts:
-            delay = _TOOLS_FETCH_BACKOFF_SEC * (attempt + 1)
-            # Shutdown must interrupt the ladder, not merely the interval between
-            # runs: the full backoff chain sleeps ~14s, longer than
-            # _REFRESHER_JOIN_TIMEOUT_SEC, so a plain sleep here made a graceful
-            # stop time out its join and leak the thread with a warning.
-            if stop_event is not None:
-                if stop_event.wait(delay):
-                    last_error = "shutdown requested"
-                    break
-            else:
-                time.sleep(delay)
-    if _LAST_GOOD_TOOLS:
-        logger.warning(
-            "a2a agent-card: /tools/schemas empty after %d attempts (%s); "
-            "serving last known-good tool list (%d tools)",
-            attempts,
-            last_error,
-            len(_LAST_GOOD_TOOLS),
-        )
-        return _LAST_GOOD_TOOLS
-    logger.warning(
-        "a2a agent-card: /tools/schemas unavailable after %d attempts (%s); "
-        "card will advertise the curated capability categories only",
-        attempts,
-        last_error,
-    )
-    return []
-
-
-def _resolve_identity() -> Dict[str, str]:
-    """Resolve the card's top-level name/description.
-
-    Operator-set A2A_AGENT_NAME / A2A_AGENT_DESCRIPTION always win. Otherwise the
-    NAME is the stable product name "Ouroboros" — the /identity name is the
-    identity document's first heading, which in practice is a section title like
-    "Who I Am", not an agent name — and the DESCRIPTION leads with the curated
-    capability summary, with the live /identity first line appended as flavor
-    (personality on the card, never INSTEAD of capabilities: an integrator reads
-    what the agent can do off this field)."""
-    identity = _fetch_identity()
-    name = _A2A_AGENT_NAME_EXPLICIT or "Ouroboros"
-    if _A2A_AGENT_DESCRIPTION_EXPLICIT:
-        description = _A2A_AGENT_DESCRIPTION_EXPLICIT
-    else:
-        flavor = str(identity.get("description") or "").strip()
-        description = _CAPABILITY_LEAD + ((" " + flavor) if flavor else "")
-    return {"name": name, "description": description}
-
-
-def _agent_card() -> Dict[str, Any]:
-    ident = _resolve_identity()
-    name = ident["name"]
-    description = ident["description"]
-
-    # Curated capability categories come FIRST and are ALWAYS present: the card must
-    # describe what this agent can actually do even while the host tool registry is
-    # warming up or unavailable (the two prior regressions served a contentless
-    # "General" stub and then an identity-persona-only entry — both useless to an
-    # integrator that consumes capabilities off the card).
-    skills = [dict(entry) for entry in _CORE_CAPABILITY_SKILLS]
-
-    # Live per-tool entries follow, when available. The in-request fetch is SHORT
-    # (the background refresher owns the long warmup ladder and keeps the last-good
-    # list warm), so a discovery GET answers in seconds even on a cold host.
-    seen_ids = {entry["id"] for entry in skills}
-    tools = _LAST_GOOD_TOOLS or _fetch_tool_schemas(attempts_override=_TOOLS_FETCH_ATTEMPTS_REQUEST)
-    for schema in tools:
-        func = schema.get("function", schema) if isinstance(schema, dict) else {}
-        tool_name = str(func.get("name") or "")
-        if tool_name and tool_name not in seen_ids:
-            seen_ids.add(tool_name)
-            skills.append({
-                "id": tool_name,
-                "name": tool_name,
-                "description": str(func.get("description") or "")[:200],
-                "tags": [tool_name.split("_", 1)[0] if "_" in tool_name else "tool"],
-            })
-
-    base_url = f"http://{A2A_HOST}:{A2A_PORT}/"
-    return {
-        "name": name,
-        "description": description,
-        "url": base_url,
-        "version": A2A_CARD_VERSION,
-        # A2: advertise the A2A v0.3 transport interface so v0.3-aware clients can negotiate.
-        "protocolVersion": "0.3.0",
-        "preferredTransport": "JSONRPC",
-        "additionalInterfaces": [{"url": base_url, "transport": "JSONRPC"}],
-        "capabilities": {"streaming": True},
-        "defaultInputModes": ["text/plain"],
-        "defaultOutputModes": ["text/plain"],
-        "skills": skills,
-    }
+_CARD = CardSource(host_url=HOST_SERVICE_URL, headers=_host_headers, http=lambda: _HOST_HTTP, facts=_HOST_FACTS,
+                   name=_A2A_AGENT_NAME_EXPLICIT, description=_A2A_AGENT_DESCRIPTION_EXPLICIT, url=_card_url,
+                   version=A2A_CARD_VERSION, auth_required=links.requires_inbound_auth(A2A_HOST, A2A_PUBLIC_URL))
+_fetch_identity, _fetch_tool_schemas, _resolve_identity = (_CARD.fetch_identity, _CARD.fetch_tool_schemas,
+                                                           _CARD.resolve_identity)
+_agent_card, _start_tools_refresher, _stop_tools_refresher = _CARD.agent_card, _CARD.start_refresher, _CARD.stop_refresher
+_CAPABILITY_LEAD, _TOOLS_FETCH_ATTEMPTS, _TOOLS_FETCH_ATTEMPTS_REQUEST = (CAPABILITY_LEAD, TOOLS_FETCH_ATTEMPTS,
+                                                                          TOOLS_FETCH_ATTEMPTS_REQUEST)
 
 
 def _sdk_agent_card():
-    card = _agent_card()
+    card = _agent_card(live=False)  # The handler needs transport capabilities, not a host connection at import.
     # The SDK AgentCard requires the card URL, and v0.3-aware SDKs also carry the
     # transport identity fields the dict card already publishes. Omitting them
     # raised during _build_app() and killed the supervised companion before it
@@ -935,126 +1161,12 @@ async def agent_card(_request: Request) -> JSONResponse:
     # cold path (_LAST_GOOD_TOOLS empty / host unreachable). uvicorn runs this app
     # on one event loop, so calling it inline stalled EVERY concurrent request —
     # including in-flight message/send dispatch — for up to ~10s during exactly
-    # the cold-start window the retry ladder exists to survive. _agent_card stays
-    # synchronous because _sdk_agent_card() calls it once at startup, off the
-    # request path, where blocking is correct.
+    # the cold-start window the retry ladder exists to survive.
     return JSONResponse(await asyncio.to_thread(_agent_card))
 
 
 async def health(_request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "service": "a2a"})
-
-
-def _extract_text(params: Dict[str, Any]) -> str:
-    # Independently defensive: safe even if reached from a path that has not
-    # already proven the nested shapes.
-    message = params.get("message") if isinstance(params, dict) else None
-    if not isinstance(message, dict):
-        return ""
-    parts = message.get("parts")
-    if not isinstance(parts, list):
-        return ""
-    texts = []
-    for part in parts:
-        if isinstance(part, dict):
-            texts.append(str(part.get("text") or ""))
-    return "\n".join(text for text in texts if text).strip()
-
-
-def _jsonrpc_error(request_id: Any, code: int, message: str) -> JSONResponse:
-    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
-
-
-async def jsonrpc(request: Request) -> JSONResponse:
-    # Untrusted bodies are validated at EVERY nesting level this handler touches
-    # before any .get access: a valid JSON list or scalar previously raised an
-    # uncaught AttributeError that surfaced as an opaque HTTP 500 rather than a
-    # JSON-RPC invalid-request response.
-    try:
-        payload = await request.json()
-    except ValueError as exc:
-        return _jsonrpc_error(None, -32700, f"parse error: {exc}")
-    if not isinstance(payload, dict):
-        return _jsonrpc_error(None, -32600, "invalid request: body must be a JSON object")
-    request_id = payload.get("id") or uuid.uuid4().hex
-    method = str(payload.get("method") or "")
-    params = payload.get("params") or {}
-    if not isinstance(params, dict):
-        return _jsonrpc_error(request_id, -32600, "invalid request: params must be a JSON object")
-    message = params.get("message")
-    if message is not None and not isinstance(message, dict):
-        return _jsonrpc_error(request_id, -32600, "invalid request: params.message must be a JSON object")
-    if method == "tasks/get":
-        try:
-            task = await asyncio.to_thread(_refresh_task_record, str(params.get("id") or ""))
-        except _TaskStateCorrupt as exc:
-            # Distinct from "task not found": the record exists but cannot be read,
-            # so the caller gets an actionable internal error, not a bare traceback.
-            return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": str(exc)}})
-        if not task:
-            return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32004, "message": "task not found"}})
-        return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": task})
-    if method == "tasks/cancel":
-        return await _jsonrpc_cancel(request_id, str(params.get("id") or ""))
-    if method != "message/send":
-        return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}})
-    text = _extract_text(params)
-    message = params.get("message") or {}
-    task_id = str(message.get("taskId") or uuid.uuid4().hex)
-    context_id = str(message.get("contextId") or task_id)
-    message_id = str(message.get("messageId") or "")
-    expected_message_id = _client_message_id(task_id, message_id)
-    try:
-        response_text = await _dispatch_to_host(
-            text, task_id=task_id, context_id=context_id, message_id=message_id,
-        )
-        task = _update_task_record(
-            task_id, context_id, state="completed",
-            artifacts=[{"parts": [{"kind": "text", "text": response_text}]}],
-            expected_message_id=expected_message_id,
-        )
-    except _HostWaitExpired as exc:
-        task = _update_task_record(task_id, context_id, state="working", message=str(exc), expected_message_id=expected_message_id)
-    except _HostMessageConflict as exc:
-        return _jsonrpc_error(request_id, -32602, str(exc))
-    except _HostWorkCancelled as exc:
-        task = _update_task_record(task_id, context_id, state="canceled", message=str(exc), expected_message_id=expected_message_id)
-    except Exception as exc:
-        task = _update_task_record(task_id, context_id, state="failed", message=str(exc), expected_message_id=expected_message_id)
-    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": task})
-
-
-_TERMINAL_RECORD_STATES = frozenset({"completed", "failed", "canceled", "rejected"})
-
-
-async def _jsonrpc_cancel(request_id: Any, task_id: str) -> JSONResponse:
-    """No-SDK ``tasks/cancel``: the host's cancellation owner decides; the
-    record turns ``canceled`` ONLY on the host's ``cancelled`` outcome."""
-    try:
-        record = _load_task(task_id)
-    except _TaskStateCorrupt as exc:
-        return _jsonrpc_error(request_id, -32603, str(exc))
-    if not record:
-        return _jsonrpc_error(request_id, -32001, "task not found")
-    state = str((record.get("status") or {}).get("state") or "")
-    if state in _TERMINAL_RECORD_STATES:
-        return _jsonrpc_error(
-            request_id, _JSONRPC_TASK_NOT_CANCELABLE, f"Task cannot be canceled - current state: {state}",
-        )
-    try:
-        outcome = await asyncio.to_thread(_cancel_host_operation_sync, task_id)
-    except _HostCancelRefused as exc:
-        return _jsonrpc_error(
-            request_id, _JSONRPC_TASK_NOT_CANCELABLE, f"Task cannot be canceled: {exc.reason} ({exc.outcome})",
-        )
-    task = _update_task_record(
-        task_id, str(record.get("contextId") or task_id), state="canceled",
-        message=f"host work cancelled ({outcome.get('task_id') or 'direct turn'})",
-        expected_message_id=outcome["client_message_id"],
-    )
-    if str((task.get("ouroboros") or {}).get("client_message_id") or "") != outcome["client_message_id"]:
-        return _jsonrpc_error(request_id, _JSONRPC_TASK_NOT_CANCELABLE, _SUPERSEDED_CANCEL_MESSAGE)
-    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": task})
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -1063,106 +1175,98 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-class OuroborosExecutor(AgentExecutor if _A2A_SDK_AVAILABLE else object):
+class OuroborosExecutor(AgentExecutor):
     """Streams the host agent's work as spec-shaped A2A events.
 
-    Lifecycle per message: submitted -> working (start note) -> working updates
-    carrying the host agent's own progress notes (plus heartbeats while quiet)
-    -> one final artifact + completed. Failures become a terminal failed status
-    with a human-readable message instead of a JSON-RPC -32603 stream error."""
+    Lifecycle per message: submitted -> working (start note) -> working heartbeats
+    while quiet (submitted while the host has no capacity) -> one final state with
+    its public delivery class, plus an artifact when there is an answer. Nothing
+    an outside peer sees carries an internal reason code or exception text."""
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        principal = _principal_of(context.call_context)
         message = getattr(context, "message", None)
-        parts = getattr(message, "parts", []) or []
-        text = "\n".join(str(getattr(part, "text", "") or "") for part in parts if getattr(part, "text", ""))
-        # Reuse the SDK-provided ids: the request handler rejects events whose
-        # task_id differs from RequestContext.task_id when the client named one.
-        task_id = getattr(context, "task_id", "") or uuid.uuid4().hex
-        context_id = getattr(context, "context_id", "") or task_id
-        message_id = str(getattr(message, "message_id", "") or "")
-        expected_message_id = _client_message_id(task_id, message_id)
+        task_id, context_id = context.task_id, context.context_id
+        wire_id = str(getattr(message, "message_id", "") or "")
+        arrival = context.call_context.state.get("a2a_arrival") or await asyncio.to_thread(
+            _load_arrival, principal, wire_id)
         updater = TaskUpdater(event_queue, task_id, context_id)
 
-        async def emit_working(note: str) -> None:
-            await _maybe_await(
-                updater.update_status(
+        async def emit(capacity: bool, elapsed: int) -> None:
+            if capacity:
+                text = PUBLIC[("no_capacity", "submitted")]
+                await _maybe_await(updater.update_status(
+                    TaskState.TASK_STATE_SUBMITTED, message=updater.new_agent_message([Part(text=text)]),
+                    metadata=_metadata(wire_id, "no_capacity", "submitted")))
+            else:
+                await _maybe_await(updater.update_status(
                     TaskState.TASK_STATE_WORKING,
-                    message=updater.new_agent_message([Part(text=note)]),
-                )
-            )
+                    message=updater.new_agent_message([Part(text=f"Still working ({elapsed}s elapsed)")])))
 
         if not getattr(context, "current_task", None):
             await _maybe_await(updater.submit())
-        await _maybe_await(updater.start_work())
-        state, note, artifacts = "completed", "", None
-        try:
-            response_text = await self._run_dispatch(
-                text, emit_working, task_id=task_id, context_id=context_id, message_id=message_id,
-            )
-            artifacts = [{"parts": [{"kind": "text", "text": response_text}]}]
-        except _HostWaitExpired as exc:
-            state, note = "working", str(exc)
-        except _HostWorkCancelled as exc:
-            state, note = "canceled", str(exc)
-            logger.info("a2a executor task %s cancelled at the host: %s", task_id, exc)
-        except Exception as exc:
-            state, note = "failed", f"dispatch failed: {exc}"
-            logger.warning("a2a executor task %s failed: %s", task_id, exc)
-        record = _update_task_record(task_id, context_id, state=state, message=note,
-                                    artifacts=artifacts, expected_message_id=expected_message_id)
-        current = str((record.get("ouroboros") or {}).get("client_message_id") or "")
-        if current and current != expected_message_id:
+        # The working event names this message, so a non-blocking sender's snapshot is about it (a continued task's
+        # metadata still names the previous message until then).
+        await _maybe_await(updater.update_status(TaskState.TASK_STATE_WORKING, metadata=_metadata(
+            wire_id, "working", "working")))
+        if arrival is None:
+            logger.warning("a2a task %s has no arrival reservation", task_id)
             return
+        digest, answer = arrival["digest"], ""
+        try:
+            view = await self._run(arrival, emit)
+            state, delivery, _text = _public(view)
+            answer = view["text"] if delivery == "answered" else ""
+        except _HostWaitExpired:
+            state, delivery = "working", "working"
+        except _HostWorkCancelled:
+            state, delivery = "canceled", "canceled"
+        except _ServerBusy:
+            # Never offered. The reservation and its task stay, so a repeat replays this answer under the same task.
+            state, delivery = "failed", "busy"
+            await asyncio.to_thread(_presence_transport().settle_unoffered, arrival["event"], digest,
+                                    deadline=arrival["deadline"], outcome={"status": "busy"})
+        except Exception as exc:  # noqa: BLE001 - the detail stays in the log, never in the peer's status
+            logger.warning("a2a executor task %s failed: %s", task_id, exc)
+            state, delivery = "failed", "failed"
+        finally:
+            _IN_FLIGHT.discard(digest)
+        text = PUBLIC[(delivery, state)]
+        record = await asyncio.to_thread(_settle, task_id, principal, wire_id, digest, state, delivery, answer)
+        if str((record.get("ouroboros") or {}).get("client_message_id") or "") != digest:
+            return
+        metadata = _metadata(wire_id, delivery, state, (record.get("answers") or {}).get(wire_id))
+        note = updater.new_agent_message([Part(text=text)]) if text else None
         if state == "working":
-            await emit_working(note)
+            await _maybe_await(updater.update_status(TaskState.TASK_STATE_WORKING, message=note, metadata=metadata))
         elif state == "canceled":
             # The cancel caller may already have published the terminal event.
-            try:
-                await _maybe_await(updater.cancel(message=updater.new_agent_message([Part(text=note)])))
-            except Exception:
-                pass
-        elif state == "failed":
-            # Dispatch failures remain a typed terminal status on the stream.
-            await _maybe_await(updater.failed(message=updater.new_agent_message([Part(text=note)])))
+            with contextlib.suppress(Exception):
+                await _maybe_await(updater.update_status(TaskState.TASK_STATE_CANCELED, message=note, metadata=metadata))
         else:
-            await _maybe_await(updater.add_artifact([Part(text=response_text)], last_chunk=True))
-            await _maybe_await(updater.complete())
-            logger.info("a2a executor finalized task %s (state=completed)", task_id)
+            if answer:
+                await _maybe_await(updater.add_artifact([Part(text=answer)], last_chunk=True))
+            target = {"completed": TaskState.TASK_STATE_COMPLETED, "rejected": TaskState.TASK_STATE_REJECTED,
+                      "failed": TaskState.TASK_STATE_FAILED, "submitted": TaskState.TASK_STATE_SUBMITTED}[state]
+            await _maybe_await(updater.update_status(target, message=note, metadata=metadata))
+            logger.info("a2a executor finalized task %s (state=%s)", task_id, state)
 
-    async def _run_dispatch(
-        self, text: str, emit_working, *, task_id: str = "", context_id: str = "", message_id: str = "",
-    ) -> str:
-        _guard_inbound_text(text)
+    async def _run(self, arrival: Dict[str, Any], emit):
+        delivery = asyncio.ensure_future(_deliver(arrival))
+        started = last_emit = time.monotonic()
+        shown = False
         try:
-            semaphore = _get_semaphore()
-            await asyncio.wait_for(semaphore.acquire(), timeout=0.1)
-        except asyncio.TimeoutError as exc:
-            raise RuntimeError("A2A server is busy; retry later") from exc
-        try:
-            chat_id, client_message_id = await asyncio.to_thread(
-                _bind_inbound_message_sync, task_id, context_id, message_id,
-            )
-            started = time.monotonic()
-            deadline = started + A2A_STREAM_DEADLINE_SEC
-            await emit_working("Message accepted; dispatching to the host agent")
-            dispatch = asyncio.ensure_future(
-                asyncio.to_thread(_dispatch_after_allocate_sync, chat_id, text, deadline, client_message_id)
-            )
-            last_emit = time.monotonic()
             while True:
-                done, _pending = await asyncio.wait({dispatch}, timeout=A2A_PROGRESS_POLL_SEC)
+                done, _pending = await asyncio.wait({delivery}, timeout=A2A_PROGRESS_POLL_SEC)
                 if done:
-                    break
-                notes: List[str] = []
-                for note in notes:
-                    await emit_working(note)
-                    last_emit = time.monotonic()
-                if time.monotonic() - last_emit >= A2A_HEARTBEAT_SEC:
-                    await emit_working(f"Still working ({int(time.monotonic() - started)}s elapsed)")
-                    last_emit = time.monotonic()
-            return await dispatch
+                    return await delivery
+                capacity = bool(await asyncio.to_thread(_presence_transport().waiting, arrival["digest"]))
+                if capacity != shown or time.monotonic() - last_emit >= A2A_HEARTBEAT_SEC:
+                    await emit(capacity, int(time.monotonic() - started))
+                    shown, last_emit = capacity, time.monotonic()
         finally:
-            semaphore.release()
+            if not delivery.done():
+                delivery.cancel()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """``tasks/cancel``: the host's cancellation owner decides.
@@ -1175,14 +1279,16 @@ class OuroborosExecutor(AgentExecutor if _A2A_SDK_AVAILABLE else object):
         """
         task_id = getattr(context, "task_id", "") or ""
         context_id = getattr(context, "context_id", "") or task_id
+        principal = _principal_of(getattr(context, "call_context", None))
         try:
-            outcome = await asyncio.to_thread(_cancel_host_operation_sync, task_id)
+            outcome = await asyncio.to_thread(_cancel_host_operation_sync, task_id, principal)
         except _HostCancelRefused as exc:
             logger.info("a2a cancel for task %s refused by the host: %s", task_id, exc)
             raise TaskNotCancelableError(
                 message=f"Task cannot be canceled: {exc.reason} ({exc.outcome})"
             ) from exc
-        record = _update_task_record(task_id, context_id, state="canceled", expected_message_id=outcome["client_message_id"])
+        record = _update_task_record(task_id, context_id, principal=principal, state="canceled",
+                                     expected_message_id=outcome["client_message_id"])
         if str((record.get("ouroboros") or {}).get("client_message_id") or "") != outcome["client_message_id"]:
             # The SDK cancels its current producer after this method returns.
             raise TaskNotCancelableError(message=_SUPERSEDED_CANCEL_MESSAGE)
@@ -1194,204 +1300,74 @@ class OuroborosExecutor(AgentExecutor if _A2A_SDK_AVAILABLE else object):
         ))
 
 
-def _guard_inbound_text(text: str) -> None:
-    # Presence receives slash-prefixed peer text as ordinary conversation data.
-    if not isinstance(text, str):
-        raise ValueError("peer text must be a string")
-
-
-_PRESENCE_TRANSPORT = None
-
-
-def _presence_transport():
-    global _PRESENCE_TRANSPORT
-    if _PRESENCE_TRANSPORT is None:
-        _PRESENCE_TRANSPORT = PresenceTransport(STATE_DIR, HOST_SERVICE_URL, _host_headers,
-            timeout=A2A_RESPONSE_TIMEOUT_SEC, poll_interval=A2A_PROGRESS_POLL_SEC)
-    return _PRESENCE_TRANSPORT
-
-
-def _bind_inbound_message_sync(task_id: str, context_id: str, message_id: str):
-    task_id = task_id or uuid.uuid4().hex
-    client_id = _client_message_id(task_id, message_id)
-    with _TASK_RECORD_LOCK:
-        bound = _bound_operation(task_id)
-        if client_id in bound.get("legacy_message_ids", []) or (bound.get("chat_id") and client_id in bound.get("message_ids", [bound.get("client_message_id")])):
-            raise _HostMessageConflict("Legacy owner-chat message cannot be resubmitted as a place event; inspect its saved task")
-        if bound.get("conversation_id") and context_id and bound["conversation_id"] != context_id:
-            raise _HostMessageConflict("taskId was already accepted in another context")
-        conversation = str(bound.get("conversation_id") or context_id or task_id)
-        _update_task_record(task_id, context_id, binding={
-            "conversation_id": conversation, "client_message_id": client_id,
-            "operation_ref": client_id, "protocol": "presence",
-        })
-    return conversation, client_id
-
-
-def _inject_sync(conversation_id, text, client_message_id=""):
-    return _presence_transport().submit(conversation_id, text, client_message_id or uuid.uuid4().hex)
-
-
-def _wait_final_after_expiry_sync(conversation_id, deadline_monotonic, operation_ref=""):
-    return _presence_transport().wait(operation_ref, deadline_monotonic, read=_read_operation_sync)
-
-
-def _dispatch_after_allocate_sync(conversation_id, text, deadline_monotonic, client_message_id=""):
-    # Kept as the dispatch seam used by SDK and fallback callers; no chat allocation.
-    try:
-        return _inject_sync(conversation_id, text, client_message_id)
-    except _HostWaitExpired as exc:
-        record = _presence_transport().load(exc.operation_ref)
-        if not record or not (record.get("turn_ref") or record.get("work_ref")):
-            raise
-        return _wait_final_after_expiry_sync(conversation_id, deadline_monotonic, exc.operation_ref)
-
-
-def _dispatch_to_host_sync(text: str, *, task_id: str = "", context_id: str = "", message_id: str = "") -> str:
-    conversation, client_id = _bind_inbound_message_sync(task_id, context_id, message_id)
-    return _dispatch_after_allocate_sync(conversation, text, time.monotonic() + A2A_STREAM_DEADLINE_SEC, client_id)
-
-
-async def _dispatch_to_host(text: str, *, task_id: str = "", context_id: str = "", message_id: str = "") -> str:
-    """Non-streaming dispatch used by the no-SDK fallback message/send route."""
-    _guard_inbound_text(text)
-    try:
-        semaphore = _get_semaphore()
-        await asyncio.wait_for(semaphore.acquire(), timeout=0.1)
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError("A2A server is busy; retry later") from exc
-    try:
-        return await asyncio.to_thread(
-            _dispatch_to_host_sync, text, task_id=task_id, context_id=context_id, message_id=message_id,
-        )
-    finally:
-        semaphore.release()
-
-
-_REFRESHER_STARTED = False
-_REFRESHER_STOP = threading.Event()
-_REFRESHER_THREAD: "threading.Thread | None" = None
-
-
-def _stop_tools_refresher() -> None:
-    """Terminate the refresher thread and allow a later restart.
-
-    Invoked from the app lifespan shutdown path, so an ordinary companion
-    stop (host unload/disable, uvicorn SIGTERM) ends the thread through a real
-    code path instead of relying on the interpreter tearing a daemon thread
-    down. Panic still hard-kills the process group; this is the graceful path
-    that previously did not exist at all. Idempotent, and safe to call when the
-    thread was never started."""
-    global _REFRESHER_STARTED, _REFRESHER_THREAD
-    _REFRESHER_STOP.set()
-    thread = _REFRESHER_THREAD
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=_REFRESHER_JOIN_TIMEOUT_SEC)
-        if thread.is_alive():
-            logger.warning(
-                "a2a tools refresher did not exit within %ss; leaving it as a daemon thread",
-                _REFRESHER_JOIN_TIMEOUT_SEC,
-            )
-    _REFRESHER_THREAD = None
-    _REFRESHER_STARTED = False
-
-
-def _start_tools_refresher() -> None:
-    """Keep ``_LAST_GOOD_TOOLS`` warm from a daemon thread.
-
-    The host chat-agent can take minutes to build on a fresh install, far longer
-    than any latency a discovery GET should pay. This thread owns the LONG warmup:
-    it runs the full retry ladder until the first non-empty tool list lands, then
-    re-polls occasionally so an enabled/disabled skill is reflected without a
-    companion restart. Card requests never block on it — they serve the curated
-    categories plus whatever this thread has already warmed.
-
-    ``A2A_TOOLS_REFRESHER=0`` disables the thread (tests and embedders that build
-    the app repeatedly must not accumulate pollers); repeated calls are no-ops.
-    ``_stop_tools_refresher`` ends it on companion shutdown."""
-    global _REFRESHER_STARTED, _REFRESHER_THREAD
-    if _REFRESHER_STARTED or os.environ.get("A2A_TOOLS_REFRESHER", "1") == "0":
-        return
-    _REFRESHER_STARTED = True
-    _REFRESHER_STOP.clear()
-
-    def _loop() -> None:
-        while not _REFRESHER_STOP.is_set():
-            try:
-                _fetch_tool_schemas(stop_event=_REFRESHER_STOP)
-            except Exception as exc:
-                # A poll error must not end the refresher permanently. The thread
-                # body has no other recovery path, so a single unexpected
-                # exception (the stop_event signature mismatch was exactly this)
-                # killed background warming for the whole companion lifetime
-                # after one stderr traceback nobody reads.
-                logger.warning("a2a tools refresher poll failed: %s", exc)
-            if _REFRESHER_STOP.is_set():
-                break
-            interval = _TOOLS_REFRESH_INTERVAL_SEC if _LAST_GOOD_TOOLS else _TOOLS_RETRY_INTERVAL_SEC
-            if _REFRESHER_STOP.wait(interval):
-                break
-
-    _REFRESHER_THREAD = threading.Thread(target=_loop, name="a2a-tools-refresher", daemon=True)
-    _REFRESHER_THREAD.start()
-
-
-_TOOLS_REFRESH_INTERVAL_SEC = 300
-_TOOLS_RETRY_INTERVAL_SEC = 15
-_REFRESHER_JOIN_TIMEOUT_SEC = 10
-
-
 @contextlib.asynccontextmanager
 async def _app_lifespan(_app: Starlette):
-    """Modern-starlette shutdown hook (the on_shutdown kwarg no longer exists):
-    end the tools refresher through a real code path on companion stop."""
+    """Carry custody across a restart on start; end the tools refresher and background deliveries on stop."""
+    _start_tools_refresher()
+    resume = asyncio.ensure_future(_resume_custody())
     try:
         yield
     finally:
+        resume.cancel()
+        for task in list(_BACKGROUND):
+            task.cancel()
         _stop_tools_refresher()
 
 
+def _tls_options() -> Dict[str, str]:
+    """uvicorn's TLS arguments; an incomplete or unusable pair is a setup error before anything listens."""
+    if not A2A_TLS_CERT_FILE and not A2A_TLS_KEY_FILE:
+        return {}
+    if not (A2A_TLS_CERT_FILE and A2A_TLS_KEY_FILE):
+        raise RuntimeError("A2A_TLS_CERT_FILE and A2A_TLS_KEY_FILE must be set together")
+    try:
+        ssl.create_default_context(ssl.Purpose.CLIENT_AUTH).load_cert_chain(A2A_TLS_CERT_FILE, A2A_TLS_KEY_FILE)
+    except (OSError, ssl.SSLError) as exc:
+        raise RuntimeError(f"the TLS certificate and key cannot be used together ({type(exc).__name__})") from None
+    return {"ssl_certfile": A2A_TLS_CERT_FILE, "ssl_keyfile": A2A_TLS_KEY_FILE}
+
+
+def _plain_http_warning(tls: Dict[str, str]) -> str:
+    if A2A_PUBLIC_URL.startswith("http://"):
+        return "a2a: the configured public endpoint is plain HTTP; use an HTTPS proxy or a private link."
+    if tls or _is_loopback(A2A_HOST):
+        return ""
+    return (f"a2a: serving plain HTTP on {A2A_HOST}:{A2A_PORT}; passwords and messages cross the network "
+            "unencrypted. Use it only over a private link (a VPN, an SSH forward, a TLS proxy) or set "
+            "A2A_TLS_CERT_FILE and A2A_TLS_KEY_FILE.")
+
+
 def _build_app() -> Starlette:
-    if not _is_loopback(A2A_HOST) and not A2A_SERVER_PASSWORD:
-        raise RuntimeError("Refusing non-loopback A2A bind without A2A_SERVER_PASSWORD")
-    _start_tools_refresher()
-    if _A2A_SDK_AVAILABLE:
-        card = _sdk_agent_card()
-        handler = _sdk_request_handler(card)
-        logger.info("a2a daemon using SDK agent-card routes")
-        # A2: serve the v0.3-complete DICT card at BOTH well-known paths, registered BEFORE
-        # the SDK helper so Starlette first-match makes it authoritative. The SDK AgentCard
-        # object deliberately omits the v0.3 transport fields (protocolVersion /
-        # preferredTransport / additionalInterfaces — kept out for SDK-version safety), so it
-        # must NOT own the v0.3 path; the dict card carries them. The SDK's own card route is
-        # then a harmless shadow, and the JSON-RPC handler still holds the card object.
-        routes = [
-            Route("/health", health, methods=["GET"]),
-            Route("/.well-known/agent.json", agent_card, methods=["GET"]),
-            Route("/.well-known/agent-card.json", agent_card, methods=["GET"]),
-            *create_agent_card_routes(card),
-            *create_jsonrpc_routes(handler, "/", enable_v0_3_compat=True),
-        ]
-        return Starlette(
-            routes=routes,
-            middleware=[Middleware(_A2AAuthMiddleware)],
-            lifespan=_app_lifespan,
-        )
-    logger.info("a2a daemon using fallback (no SDK) agent-card routes")
-    return Starlette(
-        routes=[
-            Route("/.well-known/agent.json", agent_card, methods=["GET"]),
-            Route("/.well-known/agent-card.json", agent_card, methods=["GET"]),
-            Route("/health", health, methods=["GET"]),
-            Route("/", jsonrpc, methods=["POST"]),
-        ],
-        middleware=[Middleware(_A2AAuthMiddleware)],
-        lifespan=_app_lifespan,
-    )
+    if links.requires_inbound_auth(A2A_HOST, A2A_PUBLIC_URL) and not _inbound_credentials_exist():
+        raise RuntimeError("A network bind or public A2A address needs an inbound credential: set A2A_SERVER_PASSWORD "
+                           "or add a link that accepts messages")
+    card = _sdk_agent_card()
+    handler = _sdk_request_handler(card)
+    # A2: serve the v0.3-complete DICT card at BOTH well-known paths, registered BEFORE
+    # the SDK helper so Starlette first-match makes it authoritative. The SDK AgentCard
+    # object deliberately omits the v0.3 transport fields (protocolVersion /
+    # preferredTransport / additionalInterfaces — kept out for SDK-version safety), so it
+    # must NOT own the v0.3 path; the dict card carries them. The SDK's own card route is
+    # then a harmless shadow, and the JSON-RPC handler still holds the card object.
+    routes = [
+        Route("/health", health, methods=["GET"]),
+        Route("/.well-known/agent.json", agent_card, methods=["GET"]),
+        Route("/.well-known/agent-card.json", agent_card, methods=["GET"]),
+        *create_agent_card_routes(card),
+        *create_jsonrpc_routes(handler, "/", enable_v0_3_compat=True),
+    ]
+    return Starlette(routes=routes, middleware=[Middleware(_LinkAuthentication)], lifespan=_app_lifespan)
 
 
 app = _build_app()
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=A2A_HOST, port=A2A_PORT, log_level="warning")
+    try:
+        _TLS = _tls_options()
+    except RuntimeError as exc:
+        logger.error("a2a: %s; the server does not start", exc)
+        raise SystemExit(2) from None
+    if warning := _plain_http_warning(_TLS):
+        logger.warning("%s", warning)
+    uvicorn.run(app, host=A2A_HOST, port=A2A_PORT, log_level="warning", **_TLS)

@@ -331,6 +331,10 @@ variable a suite names is checked on its own, so two of them (Telegram User Sess
 theme roots, or Memory Atlas's `ATLAS_CORE` beside `ATLAS_HOST_ROOT`) can name different checkouts;
 CI names one checkout per job.
 
+The A2A job runs on Linux and uses libseccomp before importing the skill or its
+test dependencies. It selects individual ordinary letter exchanges and the 1.5
+handoff receipt case by name; it never collects the A2A test directory.
+
 The `claudexor-quotas` suite needs Node 24, pytest, PyYAML, and Playwright with its
 Chromium and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
 `PLAYWRIGHT_BROWSERS_PATH` selects the browser cache. Run with
