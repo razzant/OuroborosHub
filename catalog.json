@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/17fb4f310a7a3e44a16e82bd6142951318bc86da",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/859d7dbb5153d78fd61e0b30686195fedaf02693",
   "schema_version": 1,
   "skills": [
     {
@@ -188,35 +188,35 @@
       "files": [
         {
           "path": "ATTRIBUTION.md",
-          "sha256": "978c97c1e5d60955464946f323329ee3a59a579ee2942e07048d9c71d4c0e07c",
-          "size": 2725
+          "sha256": "6fe8a79ca1f94238229e1e026875ec661386c3e93dfe0907bc6dd7ff50a3d1a4",
+          "size": 2696
         },
         {
           "path": "SKILL.md",
-          "sha256": "835b1b6737e4298b100686804802a9847b25945fcf152af7e496e3879fa96ee0",
-          "size": 16829
+          "sha256": "7aa1904839eae7b773f0e3fd30903ba6c103ae101249f8682918c8c606fbad8e",
+          "size": 21416
         },
         {
           "path": "scripts/amberkeep.py",
-          "sha256": "fe4f48f36a0df85afed0d34471298220f47975513127d7bcae72c79363d243b8",
-          "size": 94656
+          "sha256": "09960e29abd04383ab02e8d07acb148738888cdd1c43a27bd803bc205002f9b8",
+          "size": 118516
         },
         {
           "path": "scripts/portable.py",
-          "sha256": "18541450d2e7fcd7535a04fcdbb9b9635134be0c5c294ba2fb4daf6b1c8c18c6",
-          "size": 35308
+          "sha256": "2ff9312794ed2505da3b575795b1072c005c9f160d6f9487e320cca26ec94fc3",
+          "size": 46130
         },
         {
           "path": "scripts/readers.py",
-          "sha256": "dc1507a7eec5c137c155bd4130c81ff7be6c9f5a2b40643de2834b19173f76a2",
-          "size": 39504
+          "sha256": "eafd7295220dfa60dc39fa98bd574ae28257ecfdf5101dd65d086e8cb2aadff4",
+          "size": 60388
         }
       ],
       "name": "amberkeep",
       "slug": "amberkeep",
       "title": "Amberkeep",
       "type": "instruction",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "when_to_use": "The user wants to introduce themselves or carry over memory, decisions, instructions, projects, or unfinished work from another AI assistant (ChatGPT, Claude, Claude Code, Codex, Hermes, Dots, Duet), pastes a summary from a previous assistant, or shares an export file or Portable Memory package to continue work in an Ouroboros room."
     },
     {
