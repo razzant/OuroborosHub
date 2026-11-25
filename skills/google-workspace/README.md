@@ -37,7 +37,80 @@ project. Configure secrets under **Settings → Secrets** and
 grant only the keys for that route to this skill. Secrets belong to the host's
 granted settings, never the skill's folder or template settings form.
 
-### Persistent user OAuth
+### Google sign-in on a newer Ouroboros (0.4.0)
+
+When the Ouroboros holds sign-ins (its `GET /identity` carries `sign_in_version: 1`), the
+owner signs in for this skill on its card in **Extensions › Skills**: the client (a personal
+one or one approved by IT) and the account are chosen there, and the skill asks Ouroboros for
+a short-lived access token. The host never returns its refresh token to the skill.
+Full Drive (`drive`, default on) also satisfies Docs, Sheets and Slides calls; separate
+Docs/Sheets/Slides scopes narrow access only when `drive` is unchecked, and `docs_create`
+with a folder or template still requires `drive`. Ask Ouroboros to run `workspace_accounts`
+to see each account's exact `a-...` key (an email is not shown for every account) and the
+active route, then paste that key into `DEFAULT_GOOGLE_ACCOUNT` and press **Save Google
+Account** (leave empty for eligible Settings, including on an older core). Local settings
+saves and Settings OAuth renewals or transfers share one cross-process lock with a bounded
+5 s wait; if it is busy or unavailable, try again.
+
+The manual connection from 0.3.0 did not save its permissions. Without an explicit account
+choice, an eligible Settings connection stays in use without scanning `GET /sign-in/accounts`,
+even if the card lists another account or the account list is unavailable. If the host's
+`/identity` does not answer, only a positively confirmed, eligible Settings connection can
+still serve; no transfer or implicit card choice starts while it is unavailable.
+Only an ordinary renewal on a host with `sign_in_handover_version: 2` starts a transfer:
+Google must state permissions that fit this skill's declaration, cover the current call and
+permit verifying the account (`openid`, `email` or its Google spelling). An older grant with
+only API permissions stays local. The skill sends `return_hint: "unknown"` with
+`require_verified: true`; no additional request discovers scope. If the host lacks v2 handover, the evidence is missing, loopback
+connect is refused (`ConnectionRefusedError`) before bytes are sent, or the host proves
+pre-exchange refusal (`429` with `handover_started: false`, initial synchronous per-grant
+`exchange: "none"`, or a read-only receipt returning the exact generation-bound
+`result: "refused", exchange: "none"` without a terminal rejection or withdrawal), Settings remains in
+use (when selection, withdrawal state and Settings Secrets still match) and may retry on a
+later ordinary renewal after backoff; `workspace_auth_status` explains why.
+If Google replaces the refresh token while the grant stays on the old route, the skill
+cannot write to Settings Secrets and does not store refresh tokens in skill state: only the
+newly issued access token can be used while it remains valid in this call (a later renewal
+or new process will not inherit the replacement refresh token or in-memory cache),
+and ordinary tool responses include `sign_in_notice`. On a host with sign-ins, sign in on the
+card and select and save that account in the skill's settings, or obtain a new working refresh
+token and enter it as `GOOGLE_OAUTH_REFRESH_TOKEN` in **Settings → Secrets** (never in chat);
+on an older Ouroboros without sign-ins, update `GOOGLE_OAUTH_REFRESH_TOKEN` in **Settings → Secrets**.
+
+The skill submits at most one transfer over loopback, with the newly issued bearer and its
+expiry, and may issue one recovery check of that same in-memory operation if the reply is
+lost or saved before finishing. It leaves the Settings Secrets untouched. A confirmed
+transfer stays bound to its verified host connection. It becomes the implicit route only
+after the original Settings connection still matches and no newer account choice applies.
+If Settings changed before then, the transfer is still recorded; select and save the account
+to use. A host account that needs sign-in is not reported as usable. On v2,
+each command pins its account, connection and consent reference (`consent`), whereas on v1
+without `consent` each step still checks `/sign-in/token` and stops if a different bearer is
+issued (and Settings routes stop if credentials, selection or transition state change mid-command,
+or if a command that already succeeded under a directly entered `GOOGLE_OAUTH_ACCESS_TOKEN` would
+switch to `GOOGLE_OAUTH_REFRESH_TOKEN`). A strict `imported`
+receipt binds the continuing command to that transferred consent, whereas `kept_newer` (or an
+old `already_present` without `consent`) stops the initiating command instead of switching
+mid-flight to another consent. A `recover: true` refusal never proves `exchange: "none"` by
+itself; on doubt after a lost reply, only exact read-only receipt lookup checks for a settled
+outcome without resending normal handover grants. A later process reads that exact receipt
+using `POST /sign-in/handover` with `{service, receipt: {legacy_key, legacy_generation}}`;
+a listed account is not proof that the offer settled. The skill records the known outcome
+even if Settings have changed or the account list cannot be read. An exact `refused` / `none`
+receipt without a terminal rejection or withdrawal keeps Settings eligible only while the
+attempt's fingerprint matches, no account is selected and no withdrawal is recorded. A
+`resubmit` receipt confirms that the exchange did not start but does not make the old Settings
+eligible. The skill does not reconstruct or re-send the old offer from current Settings.
+
+An uncertain transfer or explicit withdrawal (`sign_in_withdrawn.json`) keeps the old route
+closed. After a fingerprinted refresh rejection, a new refresh credential can serve a new
+command. A newly entered short-lived access token can also serve that command on its own,
+without renewing through the rejected grant, if the skill can tell that the token is new.
+A rejection recorded without a credential fingerprint cannot make that determination.
+To switch to the card route, select and save the account in `DEFAULT_GOOGLE_ACCOUNT`;
+that choice applies to new commands.
+
+### Persistent user OAuth (an Ouroboros without sign-ins)
 
 1. Use an owner-approved Google OAuth client and consent flow with offline access
    to obtain a refresh token for the user and required scopes. The skill does not
@@ -61,8 +134,11 @@ granted settings, never the skill's folder or template settings form.
 
 `GOOGLE_OAUTH_ACCESS_TOKEN` alone remains supported for short-lived use; an
 expired token cannot renew without all three refresh credentials. An explicitly
-supplied access token is reused initially. A definite API 401 triggers at most
-one refresh and request retry; timeouts and other HTTP errors never trigger an
+supplied access token is reused initially. A definite API 401 before any step succeeds
+(or under a token from the refresh grant) triggers at most one refresh and request retry;
+once a step succeeds with a directly entered `GOOGLE_OAUTH_ACCESS_TOKEN`, later steps stop
+instead of switching mid-command to `GOOGLE_OAUTH_REFRESH_TOKEN`. Timeouts and other HTTP
+errors never trigger an
 automatic mutation retry. A revoked/expired refresh grant returns an error and
 requires owner action. Google app publishing status, organization policies and
 revocation affect refresh-token validity; a refresh token is not a permanent
@@ -91,7 +167,7 @@ user's calendar.
 
 ### `workspace_auth_status(auth_mode="service_account", subject="")`
 - **Description**: Calls Drive `about?fields=user` through the explicitly selected route. No Workspace write occurs; renewable routes may exchange credentials for an access token.
-- **Returns**: `status`, `auth_mode`, `configured`, `verified`, `actor`, `resource_access="not_checked"`, and a message. A configured but invalid token reports `verified=false`, never `ready`. Successful probes include `verification_scope="drive.about.user"`; service-account configuration metadata stays separate from the actual provider actor.
+- **Returns**: `status`, `auth_mode`, `configured`, `verified`, `actor`, `resource_access="not_checked"`, and a message. A configured but invalid token reports `verified=false`, never `ready`. If Settings, the host identity or the account selection cannot be checked, `configured` can be `null` rather than `false`. Successful probes include `verification_scope="drive.about.user"`; service-account configuration metadata stays separate from the actual provider actor.
 
 ### `workspace_request(service, method, path, query=None, json_body=None, auth_mode="service_account")`
 - **Services**: `drive` starts at `https://www.googleapis.com/drive/v3`, `docs` at `https://docs.googleapis.com/v1`, `sheets` at `https://sheets.googleapis.com/v4`, `slides` at `https://slides.googleapis.com/v1`, and `calendar` at `https://www.googleapis.com/calendar/v3`.
