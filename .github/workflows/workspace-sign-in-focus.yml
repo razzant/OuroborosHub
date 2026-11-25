@@ -1,0 +1,90 @@
+name: Workspace sign-in focus
+
+on:
+  push:
+    branches: [ci-check/workspace-040-0ad9bbd5]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace-sign-in-focus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HUB_BASE: af79effc0e0db3f239f491c31e805cedf4268f9d
+      HUB_TREE: 0ad9bbd543f116490e888711710fea36628300c6
+      CORE_SHA: f762e27ec88abda230c9b4826674a5f544514e11
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: razzant/OuroborosHub
+          ref: ${{ github.sha }}
+          path: hub
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.CORE_SHA }}
+          path: core
+          persist-credentials: false
+      - name: Verify the exact Workspace product and core
+        working-directory: hub
+        shell: bash
+        run: |
+          qa=$(git rev-parse HEAD)
+          product=$(git rev-parse HEAD^)
+          [[ "$qa" == "$GITHUB_SHA" &&
+             "$(git rev-list --parents -n 1 HEAD)" == "$qa $product" &&
+             "$(git rev-list --parents -n 1 "$product")" == "$product $HUB_BASE" &&
+             "$(git rev-parse "${product}^{tree}")" == "$HUB_TREE" &&
+             "$(git diff --no-ext-diff --no-renames --name-status "$product" HEAD --)" == $'A\t.github/workflows/workspace-sign-in-focus.yml' &&
+             "$(git -C ../core rev-parse HEAD)" == "$CORE_SHA" ]] || {
+            echo '::error::Workspace product, QA commit, or core does not match the selected input.'
+            exit 1
+          }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned core dependencies
+        run: python -m pip install -r core/requirements.txt
+      - name: Confirm one handover and two Drive reads
+        working-directory: hub
+        run: |
+          python -I -B - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import xml.etree.ElementTree as ET
+
+          path = Path('tests/workspace_sign_in/test_workspace_sign_in_core.py')
+          name = 'test_a_settings_sign_in_moves_to_the_host_on_one_ordinary_renewal'
+          expected = ('.'.join(path.with_suffix('').parts), name)
+          with tempfile.TemporaryDirectory(dir=os.environ['RUNNER_TEMP']) as scratch:
+              home = Path(scratch) / 'home'
+              home.mkdir()
+              report = Path(scratch) / 'junit.xml'
+              result = subprocess.run(
+                  [sys.executable, '-B', '-m', 'pytest', '--rootdir=.', '-p', 'no:cacheprovider',
+                   f'--junitxml={report}', f'{path}::{name}'],
+                  env={'PATH': os.environ['PATH'], 'HOME': str(home), 'TMPDIR': scratch,
+                       'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1',
+                       'OUROBOROS_SIGN_IN_CORE_ROOT': str(Path('../core').resolve())},
+                  stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+              )
+              if result.returncode != 0:
+                  sys.exit(f'FAIL: pytest exit {result.returncode}; Workspace scenario not confirmed.')
+              try:
+                  cases = ET.parse(report).findall('.//testcase')
+              except (OSError, ET.ParseError):
+                  sys.exit('FAIL: missing or invalid JUnit result.')
+              if len(cases) != 1 or (cases[0].get('classname'), cases[0].get('name')) != expected:
+                  sys.exit('FAIL: JUnit does not identify exactly the selected Workspace case.')
+              for outcome in ('skipped', 'failure', 'error'):
+                  if cases[0].find(outcome) is not None:
+                      sys.exit(f'FAIL: selected Workspace case reported {outcome}.')
+          print('PASS: one Settings renewal, one confirmed handover, and two Drive reads under the same sign-in.')
+          PY
