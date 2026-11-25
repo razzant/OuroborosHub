@@ -4,7 +4,7 @@ The event-level primary flag chooses one source for a relationship. A projection
 observed divergence survives provider ACKs; only an explicit link operation resumes
 following. This module writes no provider data and creates no delivery queue.
 """
-from model import BUSY_COPY_TITLE, PROVIDER_GOOGLE, event_field_value, event_time_kind
+from model import BUSY_COPY_TITLE, PROVIDER_GOOGLE, event_field_value, event_time_kind, iso_utc, parse_stored
 
 FOLLOWING = 'following'
 DIVERGED = 'diverged'
@@ -50,6 +50,15 @@ def observe_projection(store, previous, incoming):
     """Keep the observed relation separate from its next delivery acknowledgement."""
     if not previous.get('link_group_id') or source_is(store, previous):
         return
+    if previous.get('provider') != PROVIDER_GOOGLE and incoming.get('exdates') != previous.get('exdates'):
+        # CalDAV can echo an already acknowledged cancelled override as a master EXDATE.
+        old = set(filter(None, str(previous.get('exdates') or '').split(',')))
+        cancelled = {e['recurrence_id'] for e in store.exceptions_for(previous['id'])
+                     if e.get('status') == 'cancelled' and e.get('sync_state') == 'synced'}
+        new = str(incoming.get('exdates') or '').split(',')
+        aliases = {value for value in new if value not in old and parse_stored(value)
+                   and iso_utc(parse_stored(value)) in cancelled}
+        incoming = {**incoming, 'exdates': ','.join(value for value in new if value not in aliases)}
     if changed(previous, incoming, provider_observation=True):
         store.update_event(previous['id'], {'link_state': DIVERGED})
 

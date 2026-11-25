@@ -331,7 +331,7 @@ def _reserve(store, channel: NotifyChannel, reminder_ids: List[str]) -> List[str
 
 def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[str, int]) -> Optional[Dict[str, Any]]:
     event = store.get_event(rem["event_id"])
-    if (event is None or not store.calendar_connection(event['calendar_id'])
+    if (event is None or event.get('master_id') or not store.calendar_connection(event['calendar_id'])
             or event.get("deleted_at") or str(event.get("status") or "") == "cancelled"
             or event.get("sync_state") == "pending_delete"
             or store.delete_requested(rem["event_id"])):
@@ -457,9 +457,10 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
         return "", {**event, 'start_utc': iso_utc(m_start), 'end_utc': iso_utc(m_end)} if m_start and m_end else event
     key = iso_utc(start)
     original = recurrence_id or key  # old queue rows know only the effective slot
-    exceptions = store.exceptions_for(event["id"])
-    exc = next((row for row in exceptions if str(row.get("recurrence_id") or "") == original), None)
     import ops as _ops
+    overrides = _ops.series_overrides(store, event.get('calendar_id'))   # the dates the plan listed, incl. kept Google records' slots
+    exceptions = overrides(event["id"])
+    exc = next((row for row in exceptions if str(row.get("recurrence_id") or "") == original), None)
     if exc is not None:
         if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at") or original in _ops.excluded_slots(event):
             return "вхождение отменено", event
@@ -476,7 +477,7 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
                                      str(row.get("recurrence_id") or "") != key for row in exceptions):
             return "старое напоминание без идентификатора вхождения", event
         live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1),
-                           store.exceptions_for, owner_tz=owner_tz, strict=True)
+                           overrides, owner_tz=owner_tz, strict=True)
         matches = [o for o in live if str(o.get("occurrence_start_utc") or "") == original and
                    str(o.get("start_utc") or "") == key]
         if not matches:

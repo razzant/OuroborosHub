@@ -47,8 +47,7 @@ class Context:
 
     def occurrences(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
                     include_hidden: bool = True, strict: bool = False, failed=None) -> List[Dict[str, Any]]:
-        rows = self.store.window(start, end, calendar_ids, include_hidden=include_hidden, owner_tz=self.tz)
-        return ops.expand(rows, start, end, self.store.exceptions_for, owner_tz=self.tz, strict=strict, failed=failed)
+        return ops.expand_window(self.store, start, end, calendar_ids, include_hidden, self.tz, strict, failed)
 
     def resolve_calendars(self, spec: Any) -> Tuple[List[str], str]:
         """Names, aliases, ids, provider words, 'all', 'busy_set', 'default' → ordered calendar ids."""
@@ -274,7 +273,9 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
         if row is None or (row.get('deleted_at') and row.get('sync_state') != 'conflict' and row.get('link_state') != links.MISSING):
             return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
         try:
-            master, occ = ops.resolve_occurrence(st, row, occ)
+            master, occ = ops.resolve_occurrence(st, row, occ, read_cancelled=True)
+            if not occ and master['id'] != row['id'] and not row.get('master_id'):
+                row, base = master, master['id']   # one date of a series that is still its own kept record: that record
         except ValueError:
             if not occ and row.get('master_id') and row.get('sync_state') in ('conflict', 'failed'):
                 # A failed structural command may leave an old occurrence key.
@@ -286,23 +287,28 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
         if row.get('link_group_id'):
             out['link'] = links.inspect(st, master)
         if occ:
-            exception = next((e for e in st.exceptions_for(master["id"]) if e.get("recurrence_id") == occ), None)
+            overrides = ops.series_overrides(st, master['calendar_id'])
+            exception = next((e for e in overrides(master["id"]) if e.get("recurrence_id") == occ), None)
             effective_row = {**master, **exception} if exception else master
-            effective = ops.routine_time(effective_row, exception["start_utc"] if exception else occ, ctx.tz)
+            effective = ops.routine_time(effective_row, exception["start_utc"] if exception and exception.get("start_utc") else occ, ctx.tz)
             failed = {}
             live = [o for o in ops.expand([master], effective - timedelta(minutes=1), effective + timedelta(days=2),
-                                          st.exceptions_for, owner_tz=ctx.tz, strict=True, failed=failed)
+                                          overrides, owner_tz=ctx.tz, strict=True, failed=failed)
                     if o.get("occurrence_start_utc") == occ] if effective else []
             if failed:
                 return json_dumps({'status': 'error', 'events_complete': False, 'unexpanded_series': failed, 'event': out})
             if live:
                 out.update(event_public({**master, **live[0], "id": f"{master['id']}@{occ}"}, ctx.tz, compact=False))
-                out["series_id"] = master["id"]
-            out["occurrence_start"] = iso_local(live[0]["start_utc"], ctx.tz) if live else iso_local(occ, ctx.tz)
+            elif exception and exception.get('status') == 'cancelled':
+                out.update(event_public({**effective_row, 'id': f"{master['id']}@{occ}"}, ctx.tz, compact=False))
+            else:
+                return json_dumps({'status': 'not_found', 'message': 'вхождение отсутствует в расписании'})
+            out['series_id'] = master['id']
+            out['occurrence_start'] = out['start']
         out["assignments"] = [{"calendar_id": m["calendar_id"], "calendar_name": m.get("calendar_name"), "event_id": m["id"],
                                "sync_state": m.get("sync_state")} for m in st.group_masters(row.get("link_group_id") or "")] if row.get("link_group_id") else []
         out["intents"] = [{"kind": i["kind"], "state": i["state"], "attempts": i["attempts"], "result": i.get("result_json")} for i in st.intents_for_event(base)[-5:]]
-        inspection = conflict_ops.inspect(ctx, str(id))
+        inspection = conflict_ops.inspect(ctx, str(id) if occ else base)
         if inspection.get('status') != 'not_conflicted':
             out['conflict'] = inspection
         result = {'status': 'ok', 'event': out}
@@ -495,18 +501,20 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     row = ctx.store.get_event(base)
     if row is None or row.get("deleted_at"):
         return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
-    try:
-        ops.resolve_occurrence(ctx.store, row, occ)
-    except ValueError as exc:
-        return json_dumps({"status": "error", "message": str(exc)})
     scope = str(scope or SCOPE_THIS).lower()
     if scope not in SCOPES:
         return json_dumps({"status": "error", "message": "scope: this | following | all"})
+    try:
+        row, occ = ops.addressed(ctx.store, row, occ, scope)   # times, checks and previews of the date that is addressed
+    except ValueError as exc:
+        return json_dumps({"status": "error", "message": str(exc)})
     if has_recurrence(row) and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "это повторяющееся событие: укажи id конкретного вхождения (…@дата) для одной даты, "
                                                                 "scope='all' для всей серии или scope='following' с id вхождения — «начиная с этой даты»"})
     if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
         return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты менять"})
+    if ops.edit_refusal(ctx.store, row, occ, scope):
+        return json_dumps({"status": "error", "message": ops.edit_refusal(ctx.store, row, occ, scope)})
     changes: Dict[str, Any] = {}
     if start or end or duration_min is not None or all_day is not None:
         try:
@@ -553,12 +561,19 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         if result.get('status') == 'argument_required':
             return json_dumps({key: result[key] for key in ('status', 'argument', 'message')})
     if cal_ids is not None:
-        target_row = ctx.store.get_event(result.get("split_master_id") or base) or row
-        result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, target_row, cal_ids)
+        try:
+            target_row = ops.reassign_target(ctx.store, str(id), scope, result.get("split_master_id") or '') or row
+        except ValueError as exc:
+            return json_dumps({"status": "error", "message": str(exc), "assignments": result["assignments"]})
+        result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, target_row, cal_ids, scope=scope,
+                                                address='' if result.get('split_master_id') else str(id))
         result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
-            + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]]
+            + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]] \
+            + list(result["reassign"].get("assignments") or [])
     warning = _plan_reminders(ctx)
-    ev = result.get("event") or ctx.store.get_event(base)
+    # The date the command addressed (a received date, also once its calendars made it its own event), not the series.
+    shown = target_row if cal_ids is not None else row
+    ev = result.get("event") or ctx.store.get_event(shown["id"]) or ctx.store.get_event(base)
     statuses = {a["status"] for a in result["assignments"]}
     if (result.get('reassign') or {}).get('failed'):
         statuses.add('failed')
@@ -577,22 +592,20 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     row = ctx.store.get_event(base)
     if row is None or row.get("deleted_at"):
         return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
-    try:
-        ops.resolve_occurrence(ctx.store, row, occ)
-    except ValueError as exc:
-        return json_dumps({"status": "error", "message": str(exc)})
     scope = str(scope or SCOPE_THIS).lower()
     if scope not in SCOPES:
         return json_dumps({"status": "error", "message": "scope: this | following | all"})
+    try:
+        row, occ = ops.addressed(ctx.store, row, occ, scope)   # times, checks and previews of the date that is addressed
+    except ValueError as exc:
+        return json_dumps({"status": "error", "message": str(exc)})
     if has_recurrence(row) and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "повторяющееся событие: уточни у владельца — удалить только эту дату (id вхождения), "
                                                                 "всё расписание (scope='all') или начиная с даты (scope='following')"})
     if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
         return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты удалять"})
     if not _bool(confirm):
-        target = ctx.store.get_event(row["master_id"]) if row.get("master_id") else row
-        affected = [{"event_id": m["id"], "calendar_id": m["calendar_id"]}
-                    for m in ops.deletion_targets(ctx.store, target or row)]
+        affected = ops.deletion_preview(ctx.store, row, occ, scope)
         return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz),
                                "scope": scope, "affected": affected})
     result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope, send_updates=_bool(send_updates))

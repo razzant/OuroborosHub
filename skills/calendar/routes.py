@@ -182,13 +182,15 @@ def register_routes(api, make_ctx) -> None:
         if current is None or current.get("deleted_at"):
             return _err("событие не найдено", 404)
         try:
-            ops.resolve_occurrence(ctx.store, current, occurrence)
+            current, occurrence = ops.addressed(ctx.store, current, occurrence, scope)
         except ValueError as exc:
             return _err(str(exc))
         if has_recurrence(current) and not occurrence and scope == "this":
             return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
         if scope == "following" and not occurrence and not current.get("master_id"):
             return _err("для following нужен id вхождения (…@дата)")
+        if ops.edit_refusal(ctx.store, current, occurrence, scope):
+            return _err(ops.edit_refusal(ctx.store, current, occurrence, scope))
         if body.get("calendars"):
             _, err = ctx.resolve_calendars(body.get("calendars"))
             if err:
@@ -224,23 +226,28 @@ def register_routes(api, make_ctx) -> None:
                 return JSONResponse({key: result[key] for key in ('status', 'argument', 'message')}, status_code=400)
             if result.get("status") == "not_found":
                 return _err("событие не найдено", 404)
+        shown = current   # the date the command addressed, not the series
         if body.get("calendars"):
             cal_ids, err = ctx.resolve_calendars(body.get("calendars"))
             if err:
                 return _err(err)
-            base, _ = ops._series_id(event_id)
-            row = ctx.store.get_event(result.get("split_master_id") or base)
+            try:
+                row = shown = ops.reassign_target(ctx.store, event_id, scope, result.get("split_master_id") or '')
+            except ValueError as exc:
+                return _err(str(exc))
             if row is None:
                 return _err("событие не найдено", 404)
-            result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids)
+            result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids, scope=scope,
+                                                    address='' if result.get('split_master_id') else event_id)
             if result['reassign'].get('failed') and not any(a.get('status') in ('failed', 'conflict') and a.get('message') for a in result['reassign']['added']):
                 result['assignments'].append({'calendar_id': row['calendar_id'], 'calendar_name': row.get('calendar_name') or row['calendar_id'], 'event_id': row['id'],
                                               'action': 'reassign', 'status': 'failed', 'message': result['reassign']['failed']})
             result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
-                + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]]
+                + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]] \
+                + list(result["reassign"].get("assignments") or [])
         warning = tools._plan_reminders(ctx)
         base, _ = ops._series_id(event_id)
-        ev = result.get("event") or ctx.store.get_event(base)
+        ev = result.get("event") or ctx.store.get_event(shown["id"]) or ctx.store.get_event(base)
         return JSONResponse({"status": _aggregate(result["assignments"]), "event": event_public(ev, ctx.tz, compact=False) if ev else None,
                              "assignments": result["assignments"], "reassign": result.get("reassign"), **({"warning": warning} if warning else {})})
 
@@ -258,7 +265,7 @@ def register_routes(api, make_ctx) -> None:
         if current is None or current.get("deleted_at"):
             return _err("событие не найдено", 404)
         try:
-            ops.resolve_occurrence(ctx.store, current, occurrence)
+            current, occurrence = ops.addressed(ctx.store, current, occurrence, scope)
         except ValueError as exc:
             return _err(str(exc))
         if has_recurrence(current) and not occurrence and scope == "this":

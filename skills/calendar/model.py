@@ -536,6 +536,48 @@ def has_recurrence(row):
     return not row.get('master_id') and any(row.get(field) for field in ('rrule', 'rdates', 'exdates'))
 
 
+def native_instance(row):
+    """(recurringEventId, originalStartTime) retained in a Google instance's native payload; ('', {}) otherwise."""
+    try:
+        item = json.loads(row.get('raw_payload') or '{}') or {}
+    except (TypeError, ValueError):
+        return '', {}
+    if not isinstance(item, dict):
+        return '', {}
+    original = item.get('originalStartTime')
+    return str(item.get('recurringEventId') or ''), original if isinstance(original, dict) else {}
+
+
+def held_series(row):
+    """For a held Google instance (a root that keeps its original slot), the exact series ID it names; else ''."""
+    if row.get('master_id') or not row.get('recurrence_id'):
+        return ''
+    return native_instance(row)[0]
+
+
+def instance_slot(row, master, original=None):
+    """The series address of a Google instance, read once from its native ``originalStartTime``.
+
+    A date is that civil date in the series' zone and a time is its instant, wherever the meeting itself now
+    is; the stored row (whose own zone may be the moved meeting's) is used only when no native slot is kept.
+    """
+    original = native_instance(row)[1] if original is None else original
+    try:
+        if original.get('date'):
+            day = date.fromisoformat(str(original['date']))
+            return iso_utc(datetime.combine(day, time(), tzinfo=get_tz(master.get('tz') or '')))
+        if original.get('dateTime'):
+            instant = datetime.fromisoformat(str(original['dateTime']).replace('Z', '+00:00'))
+            zone = str(original.get('timeZone') or '')
+            if instant.tzinfo is None:
+                instant = instant.replace(tzinfo=get_tz(zone or master.get('tz') or ''))
+            return civil_in_basis({'recurrence_id': iso_utc(instant), 'tz': zone, '_recurrence_tz': zone or 'UTC'},
+                                  master).get('recurrence_id') or ''
+    except (TypeError, ValueError):
+        pass
+    return civil_in_basis(row, master).get('recurrence_id') or ''
+
+
 def civil_in_basis(row, basis, *, recurrence_basis=None):
     """Retain effective coordinates; an exception's original slot uses its master's basis."""
     if not basis.get('tz'):

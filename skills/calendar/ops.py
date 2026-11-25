@@ -8,17 +8,19 @@ live here so Yandex and Google cannot drift apart (roast F11).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
 import links
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
     get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until, has_recurrence, event_time_kind, stage_event_times,
+    held_series, native_instance, instance_slot,
     shift_event_time as _shift_instant, recurrence_time_delta, shift_recurrence_time,
     validate_rrule_interval, shifted_rrule, following_series_start, series_move_changes,
 )
@@ -79,8 +81,12 @@ def _occurrence_end(master, start, tz=None):
     return start + (last - first)
 
 
-def resolve_occurrence(store, row: Dict[str, Any], occ_key: str) -> Tuple[Dict[str, Any], str]:
-    """Resolve an addressed recurrence slot, including saved exception IDs, before a write or direct read."""
+def resolve_occurrence(store, row: Dict[str, Any], occ_key: str, scope: str = SCOPE_THIS, *, read_cancelled=False) -> Tuple[Dict[str, Any], str]:
+    """Resolve an addressed recurrence slot, including saved exception IDs, before a write or direct read.
+
+    One date of a series that is still a kept Google record (it has not joined its series yet) is that record:
+    the address of that single date resolves to it, and to nothing once it is removed.
+    """
     if row.get("master_id"):
         master = store.get_event(row["master_id"])
         if master is None or master.get("deleted_at"):
@@ -92,13 +98,24 @@ def resolve_occurrence(store, row: Dict[str, Any], occ_key: str) -> Tuple[Dict[s
     if slot is None or not has_recurrence(row) or not row.get("id"):
         raise ValueError("invalid occurrence id")
     key = iso_utc(slot)
-    if key in excluded_slots(row):
+    excluded = key in excluded_slots(row)
+    if excluded and not read_cancelled:
         raise ValueError("occurrence is cancelled")
     # A retained authored override has its own identity even when a later rule
     # no longer generates that slot. Lists already retain it; reads and writes
     # must resolve the same stored occurrence, not invent a new virtual one.
-    if any(exc.get('recurrence_id') == key for exc in store.exceptions_for(row['id'])):
+    if any(exc.get('recurrence_id') == key for exc in store.exceptions_for(row['id'])) and not excluded:
         return row, key
+    if scope == SCOPE_THIS:
+        record = waiting_instances(store, row.get('calendar_id')).get(row['id'], {}).get(key)
+        if record is not None:
+            if not record.get('deleted_at') and record.get('status') == 'cancelled' and read_cancelled:
+                return record, ''
+            if _withdrawn(record) or excluded:
+                raise ValueError("occurrence is cancelled")
+            return record, ''
+    if excluded:
+        raise ValueError("occurrence is cancelled")
     try:
         projected = _expand_master(row, slot, slot + timedelta(seconds=1), [], strict=True)
     except Exception as exc:
@@ -106,6 +123,34 @@ def resolve_occurrence(store, row: Dict[str, Any], occ_key: str) -> Tuple[Dict[s
     if not any(o.get("occurrence_start_utc") == key for o in projected):
         raise ValueError("occurrence is outside the series")
     return row, key
+
+
+def addressed(store, row: Dict[str, Any], occ_key: str, scope: str = SCOPE_THIS) -> Tuple[Dict[str, Any], str]:
+    """The row and occurrence key a command's address names under its scope, for its checks, times and previews:
+    a series date that a kept record holds (scope=this) is that record; every other address is returned as given."""
+    resolved, key = resolve_occurrence(store, row, occ_key, scope)
+    if occ_key and not key and resolved['id'] != row['id']:
+        return resolved, ''
+    return row, occ_key
+
+
+def received_cancelled(store, row: Dict[str, Any], occ_key: str = '', scope: str = SCOPE_THIS) -> bool:
+    """The address names one Google date received without its series that its organizer cancelled (or that was
+    removed): the date's own record (any scope: it is its own event), or, after it joined, its override by its ID or
+    its ``series@date`` with scope=this. Whole-series commands (scope=all/following on the series) are not this."""
+    if not row.get('master_id') and not occ_key:
+        return bool(held_series(row) or row.get('kept_master')) and _withdrawn(row)
+    if scope != SCOPE_THIS:
+        return False
+    if row.get('master_id'):
+        return row.get('kept_master') == row['master_id'] and _withdrawn(row)
+    exc = next((e for e in store.exceptions_for(row['id']) if e.get('recurrence_id') == occ_key), None)
+    return bool(exc and exc.get('kept_master') == row['id'] and _withdrawn(exc))
+
+
+def edit_refusal(store, row: Dict[str, Any], occ_key: str = '', scope: str = SCOPE_THIS) -> str:
+    """Why an owner's edit or new calendars for this addressed date are refused before staging ('' = allowed)."""
+    return "occurrence is cancelled" if received_cancelled(store, row, occ_key, scope) else ''
 
 
 def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, exceptions_for: Callable[[str], List[Dict[str, Any]]],
@@ -130,6 +175,8 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
                 out.append(item)
             continue
         if not has_recurrence(row):
+            if row.get("recurrence_id") and str(row.get("status") or "") == "cancelled":
+                continue  # a held Google instance cancelled without its series: remembered for that series, not shown
             s, e = calendar_time(row, row.get("start_utc"), owner_tz), calendar_time(row, row.get("end_utc"), owner_tz)
             if s and e and overlaps(s, e, start, end):
                 out.append({**row, 'start_utc': iso_utc(s), 'end_utc': iso_utc(e), '_display_times': True})
@@ -143,6 +190,325 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
             failed[row["id"]] = f"{type(exc).__name__}: {exc}"
     out.sort(key=lambda r: (r.get("start_utc") or "", r.get("title") or ""))
     return out
+
+
+def waiting_instances(store, calendar_id: Optional[Union[str, Sequence[str]]] = None) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Received Google date records that are not their stored series' override: series ID → slot → record.
+
+    This is the one reading of those dates for every view, address and copy of the series. A record bound to its
+    series (``kept_master``: it waited, or the owner gave that one date its own calendars) owns the slot its
+    ``recurrence_id`` names there, which moves with the series; an unbound one names its series by the exact
+    recurringEventId of its native payload, read once. Series are read together, only when such records exist.
+    """
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for record, master, original in held_with_series(store, store.held_instances(calendar_id, include_removed='bound')):
+        slot = kept_slot(record, master, original)
+        if slot:
+            out.setdefault(master['id'], {})[slot] = record
+    return out
+
+
+def held_with_series(store, records):
+    """Resolve the current series candidates in bulk; writers still re-read before committing."""
+    parsed = [(record, *native_instance(record)) for record in records]
+    bound = {m['id']: m for m in store.live_series(r['kept_master'] for r, _, _ in parsed if r.get('kept_master'))}
+    named = {(m['calendar_id'], m['external_id']): m for m in store.series_named(
+        (r['calendar_id'], series) for r, series, _ in parsed if series and not r.get('kept_master'))}
+    for record, series, original in parsed:
+        master = bound.get(record['kept_master']) if record.get('kept_master') else named.get((record['calendar_id'], series))
+        if master and master['calendar_id'] == record['calendar_id']:
+            yield record, master, original
+
+
+def kept_series_of(store, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The live stored series a received date record belongs to, or None."""
+    if record.get('kept_master'):
+        master = store.get_event(record['kept_master'])
+    else:
+        series = held_series(record)
+        master = store.find_by_external(record['calendar_id'], external_id=series) if series else None
+    if master is None or master.get('deleted_at') or master.get('master_id') or not has_recurrence(master):
+        return None
+    return master
+
+
+def kept_slot(record: Dict[str, Any], master: Dict[str, Any], original=None) -> str:
+    """The slot of ``master`` that a received date record stands for."""
+    if record.get('kept_master') == master.get('id') and record.get('recurrence_id'):
+        return record['recurrence_id']
+    return instance_slot(record, master, original)
+
+
+def _withdrawn(record: Dict[str, Any]) -> bool:
+    return bool(record.get('deleted_at')) or str(record.get('status') or '') == 'cancelled'
+
+
+def series_overrides(store, calendar_id: Optional[Union[str, Sequence[str]]] = None) -> Callable[[str], List[Dict[str, Any]]]:
+    """Overrides that shape a series' listed dates: its stored exceptions, plus a cancelled stand-in for the
+    original slot of each kept Google record of that exact series that has not joined it yet.
+
+    The live record is listed on its own time (hidden once cancelled); a removed one stays hidden. Either way
+    its series date is never shown twice or brought back.
+    """
+    waiting: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
+    def overrides(master_id: str) -> List[Dict[str, Any]]:
+        nonlocal waiting
+        if waiting is None:
+            waiting = waiting_instances(store, calendar_id)
+        exceptions = store.exceptions_for(master_id)
+        if waiting.get(master_id):
+            taken = {exc.get('recurrence_id') for exc in exceptions}
+            exceptions.extend({'id': record['id'], 'master_id': master_id, 'recurrence_id': slot, 'status': 'cancelled'}
+                              for slot, record in waiting[master_id].items() if slot not in taken)
+        return exceptions
+    return overrides
+
+
+def kept_copy_calendars(store, record: Dict[str, Any]) -> set:
+    """Calendars where a kept Google date has its own copy."""
+    if record.get('master_id') or not record.get('link_group_id'):
+        return set()
+    return {member['calendar_id'] for member in store.group_masters(record['link_group_id']) if member['id'] != record['id']}
+
+
+def copied_overrides(store, master: Dict[str, Any], calendar_id: str = '') -> List[Dict[str, Any]]:
+    """A series' dates as its copy in ``calendar_id`` carries them: stored exceptions, plus each waiting kept record
+    at its own time and content. That slot is cancelled once the record is removed, or where the date has its own
+    copy, so every calendar shows the meeting once and never at the hour it left."""
+    exceptions = store.exceptions_for(master['id'])
+    taken = {exc.get('recurrence_id') for exc in exceptions}
+    for slot, record in waiting_instances(store, master.get('calendar_id')).get(master['id'], {}).items():
+        if slot not in taken:
+            withdrawn = (_withdrawn(record) or store.delete_requested(record['id'])
+                         or (calendar_id and calendar_id in kept_copy_calendars(store, record)))
+            exceptions.append({**record, 'master_id': master['id'], 'recurrence_id': slot,
+                               **({'status': 'cancelled'} if withdrawn else {})})
+    return exceptions
+
+
+def kept_google_series(store, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The live series of a stored override that is a Google date received without its series (it was kept as its
+    own record before it joined, ``kept_master``); None for every ordinary override, which keeps 2.1.0 semantics."""
+    if (not row.get('master_id') or not row.get('recurrence_id')
+            or row.get('kept_master') != row.get('master_id')):
+        return None
+    return kept_series_of(store, row)
+
+
+def expand_window(store, start, end, calendar_ids=None, include_hidden=True, owner_tz=None, strict=False, failed=None):
+    with store.read_snapshot() as view:
+        # A visible master can have a hidden date, and the reverse also holds. Filter the effective rows.
+        rows = view.window(start, end, calendar_ids, owner_tz=owner_tz)
+        series_calendars = sorted({row['calendar_id'] for row in rows if has_recurrence(row)})
+        dates = expand(rows, start, end, series_overrides(view, series_calendars), owner_tz=owner_tz, strict=strict, failed=failed)
+        return dates if include_hidden else [row for row in dates if row.get('visibility') == 'shown']
+
+
+def detach_kept_date(store, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """One received Google date of a stored series becomes its own kept record again, keeping its delivered notices.
+
+    The series then keeps that slot for the record (waiting_instances) exactly as before the date joined it.
+    """
+    master_id, slot = row['master_id'], row['recurrence_id']
+    if not store.detach_instance(row['id']):
+        return None
+    carry_date_notices(store, master_id, slot, row['id'], '', row)
+    store.drop_reminders_for_slot(master_id, slot)   # waiting notices are planned again under the record's own key
+    return store.get_event(row['id'])
+
+
+def carry_date_notices(store, old_id, old_slot, new_id, new_slot, row):
+    """Transfer delivery custody under the same owner-clock instant the planner uses."""
+    from reminders import notice_id_for
+    instant = calendar_time(row, row['start_utc'], get_tz(store.get_setting('timezone') or ''))
+    if instant is None:
+        return
+    effective = iso_utc(instant)
+    for previous in store.settled_reminders_for_split(old_id, old_slot):
+        if previous['recurrence_id'] in ('', old_slot) and parse_stored(previous['occurrence_start_utc']) == parse_stored(effective):
+            store.carry_settled_reminder(previous, new_id, effective, new_slot, previous['fire_at_utc'],
+                                         notice_id_for(new_id, effective, previous['offset_min'], new_slot))
+
+
+def _withdraw_series_slot(store, record: Dict[str, Any], calendar_ids, created: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Where a kept date now has its own copy, a following copy of its series stops carrying that date.
+
+    Only copies that follow the series: an independent (diverged) copy keeps its own meeting. The cancellation is
+    sent after the provider confirmed the own copy that replaces it (``created``: calendar → its create intent).
+    """
+    master = kept_series_of(store, record)
+    if master is None or not master.get('link_group_id'):
+        return []
+    source = links.source(store, master)
+    if source is None or source.get('deleted_at'):
+        return []
+    key = kept_slot(record, master)
+    assignments: List[Dict[str, Any]] = []
+    for member in [source, *links.followers(store, source)]:
+        if member['id'] == master['id']:
+            continue  # the separately received record already substitutes for the slot there
+        if member['calendar_id'] not in calendar_ids or key in excluded_slots(member):
+            continue
+        current = next((exc for exc in store.exceptions_for(member['id']) if exc.get('recurrence_id') == key), None)
+        if current is not None and str(current.get('status') or '') == 'cancelled':
+            continue
+        try:
+            result = _stage_delete_event(store, member['id'] + '@' + key, scope=SCOPE_THIS, cascade=False, from_source=True)
+        except ValueError:
+            continue
+        _after(store, result.get('assignments', []), (created or {}).get(member['calendar_id']))
+        assignments.extend(result.get('assignments', []))
+    return assignments
+
+
+def _restore_series_slot(store, record: Dict[str, Any], calendar_ids, content=None) -> Dict[str, List[Dict[str, Any]]]:
+    """Stage the reverse handover per destination, before withdrawing the standalone copy."""
+    master = kept_series_of(store, record)
+    if master is None or not master.get('link_group_id'):
+        return {}
+    source = links.source(store, master)
+    if not source or source.get('deleted_at'):
+        return {}
+    key = kept_slot(record, master)
+    if _withdrawn(record) or key in excluded_slots(master):
+        return {}
+    by_destination = {}
+    for member in [source, *links.followers(store, source)]:
+        cid = member['calendar_id']
+        if cid not in calendar_ids or member['id'] == master['id']:
+            continue
+        current = next((exc for exc in store.exceptions_for(member['id']) if exc.get('recurrence_id') == key), None)
+        excluded = key in excluded_slots(member)   # a CalDAV copy reread after the hand-over keeps it as EXDATE
+        if not excluded and (current is None or str(current.get('status') or '') != 'cancelled'):
+            if current and current.get('sync_state') != 'synced':
+                writes = [i for i in store.intents_for_event(current['id']) if i['kind'] == 'update']
+                if writes and writes[-1]['state'] == INTENT_PENDING:
+                    by_destination[cid] = [{'calendar_id': cid, 'event_id': current['id'], 'status': INTENT_PENDING,
+                                            '_intent_ids': [writes[-1]['id']]}]
+                else:
+                    by_destination[cid] = [{'calendar_id': cid, 'status': INTENT_FAILED,
+                                            'message': 'дата в копии серии не подтверждена; сначала сверь её'}]
+            continue
+        try:
+            result = stage_series_slot(store, member, key, content if content is not None else record)
+        except ValueError as exc:
+            result = {'assignments': [{'calendar_id': cid, 'status': INTENT_FAILED, 'message': str(exc)}]}
+        by_destination[cid] = result.get('assignments') or [{'calendar_id': cid, 'status': INTENT_FAILED,
+                                                             'message': 'дата не восстановлена в копии серии'}]
+    return by_destination
+
+
+def stage_series_slot(store, member: Dict[str, Any], key: str, content: Dict[str, Any]) -> Dict[str, Any]:
+    """A following copy shows its series' date at ``key`` with ``content`` again, also where that date is cancelled or
+    excluded (EXDATE) in the copy because a kept date had taken it."""
+    assignments = []
+    if _read_only_preflight(store, [member], assignments):
+        return {'status': 'failed', 'assignments': assignments}
+    projected = links.projection_changes(store, content, member)
+    for field in ('rrule', 'rdates', 'exdates'):
+        projected.pop(field, None)
+    address = member['id'] + '@' + key
+    if key not in excluded_slots(member):
+        cancelled = any(e['recurrence_id'] == key and e['status'] == 'cancelled' for e in store.exceptions_for(member['id']))
+        return _stage_update_event(store, address, projected, scope=SCOPE_THIS, propagate=False, from_source=True,
+                                   restore_kept_slot=cancelled)
+    with store._conn() as c:
+        c.execute('SAVEPOINT restore_kept_slot')
+        try:
+            remaining = [x for x in member['exdates'].split(',') if x and (parse_stored(x) != parse_stored(key))]
+            store.update_event(member['id'], {'exdates': ','.join(remaining)})
+            return _stage_update_event(store, address, projected, scope=SCOPE_THIS, propagate=False, from_source=True,
+                                       restore_kept_slot=True)
+        except ValueError:
+            c.execute('ROLLBACK TO restore_kept_slot')
+            raise
+        finally:
+            c.execute('RELEASE restore_kept_slot')
+
+
+def series_date(master: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
+    """The series' own generated date at ``key`` (its content and times), or None when it generates none there."""
+    slot = parse_stored(key)
+    if slot is None:
+        return None
+    try:
+        projected = _expand_master(master, slot, slot + timedelta(seconds=1), [], strict=True)
+    except Exception:
+        return None
+    occurrence = next((o for o in projected if o.get('occurrence_start_utc') == key), None)
+    if occurrence is None:
+        return None
+    return {**master, 'start_utc': occurrence['start_utc'], 'end_utc': occurrence['end_utc'], 'rrule': '', 'rdates': '', 'exdates': ''}
+
+
+def _after(store, assignments: List[Dict[str, Any]], predecessor: Optional[str]) -> None:
+    """Queue these staged provider writes after ``predecessor`` is confirmed."""
+    if not predecessor:
+        return
+    for assignment in assignments:
+        for iid in assignment.get('_intent_ids', []):
+            intent = store.get_intent(iid)
+            payload = json.loads(intent['payload_json'])
+            payload.setdefault('after_intent_id', predecessor)
+            with store._conn() as c:
+                c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), iid))
+
+
+def _after_all(store, assignments, predecessors):
+    if not predecessors:
+        return
+    with store._conn() as c:
+        for assignment in assignments:
+            for iid in assignment.get('_intent_ids', []):
+                payload = json.loads(store.get_intent(iid)['payload_json'])
+                payload['prior_intent_ids'] = [*payload.get('prior_intent_ids', []), *predecessors]
+                c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), iid))
+
+
+def kept_slot_commands(store, record: Dict[str, Any], master: Optional[Dict[str, Any]], row: Dict[str, Any], cancelled: bool):
+    """(copy id, command) for the series copies that carry a waiting kept date's slot, after the date changed.
+
+    The same rule for the owner's edit and Google's observation: where the date has its own copy, the series copy
+    keeps that slot cancelled; busy copies get times only (projection_changes).
+    """
+    if master is None or master.get('deleted_at') or not master.get('link_group_id') or not links.source_is(store, master):
+        return []
+    key = kept_slot(record, master)
+    own = kept_copy_calendars(store, record)
+    out = []
+    for sib in links.followers(store, master):
+        if sib['calendar_id'] in own:
+            continue
+        current = next((exc for exc in store.exceptions_for(sib['id']) if exc.get('recurrence_id') == key), None)
+        excluded = key in excluded_slots(sib)
+        if cancelled:
+            if not excluded and (current is None or str(current.get('status') or '') != 'cancelled'):
+                out.append((sib['id'], ('delete', sib['id'] + '@' + key, {}, SCOPE_THIS)))
+            continue
+        if key not in excluded_slots(master):
+            out.append((sib['id'], ('slot', sib['id'] + '@' + key, row, SCOPE_THIS)))
+    return out
+
+
+def _stage_kept_slot(store, record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The owner's edit or delete of a waiting kept date reaches the following series copies that carry it."""
+    master = kept_series_of(store, record)
+    assignments: List[Dict[str, Any]] = []
+    for _, (kind, address, changes, scope) in kept_slot_commands(store, record, master, record, _withdrawn(record)):
+        try:
+            member_id, key = _series_id(address)
+            result = (stage_series_slot(store, store.get_event(member_id), key, changes) if kind == 'slot'
+                      else _stage_delete_event(store, address, scope=scope, cascade=False, from_source=True))
+        except ValueError:
+            continue
+        assignments.extend(result.get('assignments', []))
+    return assignments
+
+
+def kept_copy_uid(row: Dict[str, Any]) -> str:
+    """A copy's own UID for one kept Google date: its iCalUID is the whole series', shared with its other dates."""
+    seed = (row.get('calendar_id') or '') + '\0' + (row.get('external_id') or row.get('id') or '')
+    return 'kept-' + hashlib.sha1(seed.encode('utf-8')).hexdigest()[:32] + '@ouroboros-calendar'
 
 
 def validate_rrule(rule: Any, start_utc: str, zone: str) -> str:
@@ -354,7 +720,7 @@ def _finish_command(store, providers, stage, owner, *args, **kwargs):
         raise RuntimeError('provider dispatch requires an ordinary Store, not a transaction view')
     with store.transaction() as local:
         result = stage(local, *args, **kwargs)
-    assignments = list(result.get("assignments", [])) + list(result.get("added", []))
+    assignments = list(result.get("added", [])) + list(result.get("assignments", []))
     for removed in result.get("removed", []):
         assignments.extend(removed.get("assignments", []))
     for assignment in assignments:
@@ -386,8 +752,27 @@ def delete_event(store, providers, event_id, scope=SCOPE_THIS, owner="", send_up
                            scope=scope, send_updates=send_updates, cascade=cascade)
 
 
-def reassign_event(store, providers, row, calendar_ids, owner=""):
-    return _finish_command(store, providers, _stage_reassign_event, owner, row, calendar_ids)
+def reassign_target(store, event_id: str, scope: str, split_master_id: str = '') -> Optional[Dict[str, Any]]:
+    """The row whose calendars a command assigns: one series date that is still its own kept record is that record."""
+    base, occ = _series_id(event_id)
+    row = store.get_event(split_master_id or base)
+    if row is not None and not split_master_id and received_cancelled(store, row, occ, scope):
+        raise ValueError("occurrence is cancelled")   # a received date its organizer cancelled gets no new calendars
+    if row is None or split_master_id or not occ or scope != SCOPE_THIS:
+        return row
+    resolved, key = resolve_occurrence(store, row, occ, scope)   # a stale or cancelled address is an error, not the series
+    if not key:
+        return resolved
+    stored = next((exc for exc in store.exceptions_for(resolved['id']) if exc.get('recurrence_id') == key), None)
+    if stored is not None and kept_google_series(store, stored) is not None:
+        if str(stored.get('status') or '') == 'cancelled':
+            raise ValueError("occurrence is cancelled")
+        return stored   # a received Google date: both of its addresses name that one meeting
+    return row
+
+
+def reassign_event(store, providers, row, calendar_ids, owner="", scope=None, *, address=''):
+    return _finish_command(store, providers, _stage_reassign_event, owner, row, calendar_ids, scope, address=address)
 
 
 def link_event(store, providers, event_id, action, scope=SCOPE_ALL):
@@ -424,11 +809,11 @@ def _stage_link_event(store, event_id, action, scope):
         assignments.extend(result.get('assignments', []))
         if result.get('status') == 'failed':
             return result
-        slots = {e['recurrence_id'] for e in store.exceptions_for(source['id']) + store.exceptions_for(row['id'])}
+        slots = {e['recurrence_id'] for e in copied_overrides(store, source, row['calendar_id']) + store.exceptions_for(row['id'])}
     else:
         slots = {slot}
     unmatched = []
-    source_exceptions = {event['recurrence_id']: event for event in store.exceptions_for(source['id'])}
+    source_exceptions = {event['recurrence_id']: event for event in copied_overrides(store, source, row['calendar_id'])}
     for key in sorted(slots):
         if key in excluded_slots(source):
             for child in store.exceptions_for(row['id']):
@@ -514,7 +899,8 @@ def _stage_create_event(store, spec: Dict[str, Any], owner: str = "") -> Dict[st
 
 
 def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: str = SCOPE_THIS,
-                 propagate: bool = True, send_updates: bool = False, owner_tz=None, from_source=False) -> Dict[str, Any]:
+                 propagate: bool = True, send_updates: bool = False, owner_tz=None, from_source=False,
+                 restore_kept_slot=False, preserve_slots=()) -> Dict[str, Any]:
     """Apply ``changes`` to an event, an occurrence, a whole series or «from this date on».
 
     ``changes`` may contain start_utc/end_utc/all_day/tz/title/description/location/
@@ -526,7 +912,9 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     row = store.get_event(base_id)
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
-    row, occ_key = resolve_occurrence(store, row, occ_key)
+    row, occ_key = resolve_occurrence(store, row, occ_key, scope)
+    if not from_source and received_cancelled(store, row, occ_key, scope):
+        raise ValueError("occurrence is cancelled")   # its organizer cancelled this received date
     if from_source:
         row = {**row, 'origin': 'projection', 'time_kind': links.projection_time_kind(row, store.get_calendar(row['calendar_id']) or {})}
     exception = next((exc for exc in store.exceptions_for(row['id']) if exc.get('recurrence_id') == occ_key), None) if occ_key else None
@@ -536,18 +924,29 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
-    changes = _shift_for_scope_all(store, row, occ_key, scope, changes)
+    if changes.get('rrule') and row.get('recurrence_id') and not row.get('master_id'):
+        return {'status': 'argument_required', 'argument': 'rrule', 'event': row, 'assignments': [],
+                'message': 'This Google occurrence belongs to a series its organizer keeps; edit it without rrule.'}
+    members = [row] + (links.followers(store, row) if propagate else [])
+    member_ids = {m['id'] for m in members if has_recurrence(m)}
+    pinned_slots = set(preserve_slots)
+    waiting = {}
+    if member_ids and (occ_key or changes.get('start_utc')):
+        waiting = waiting_instances(store)
+        pinned_slots.update(slot for mid in member_ids for slot in waiting.get(mid, {}))
+        pinned_slots.update(exc['recurrence_id'] for mid in member_ids for exc in store.exceptions_for(mid)
+                            if exc.get('kept_master') == mid)
+    changes = _shift_for_scope_all(store, row, occ_key, scope, changes, pinned=occ_key in pinned_slots)
     recurrence = None
     try:
         if not from_source and scope == SCOPE_ALL and 'rrule' not in changes and changes.get('start_utc') and has_recurrence(row):
             changes = series_move_changes(row, changes)
         if occ_key and scope == SCOPE_FOLLOWING:
-            recurrence = _following_recurrence(row, occ_key, changes, exception)
+            recurrence = _following_recurrence(row, occ_key, changes, None if occ_key in pinned_slots else exception)
     except ValueError as exc:
         return {'status': 'argument_required', 'argument': 'rrule', 'message': str(exc),
                 'event': row, 'assignments': []}
     op_id = new_id("op")
-    members = [row] + (links.followers(store, row) if propagate else [])
     assignments: List[Dict[str, Any]] = []
     blocked = _read_only_preflight(store, members, assignments)   # refuse read-only targets BEFORE touching local rows
     if row["id"] in blocked:
@@ -562,6 +961,7 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     # Moving topology must follow accepted writes still addressed to the old
     # resource. Their desired snapshots remain valid until they acknowledge.
     structural = scope == SCOPE_FOLLOWING or bool(_series_delta(row, changes))
+    kept_before = store.kept_dates(member_ids) if structural else []
     prior_by_calendar = {}
     if structural:
         for eid, old in before.items():
@@ -574,13 +974,13 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     elif occ_key and scope == SCOPE_FOLLOWING:
         new_group = (new_id("lg") if links.source_is(store, row) else row['link_group_id']) if row.get("link_group_id") else ""
         split_uid = new_uid()
-        targets.extend(_split_series(store, row, occ_key, changes, recurrence, new_group, split_uid))
+        targets.extend(_split_series(store, row, occ_key, changes, recurrence, new_group, split_uid, pinned_slots))
     else:
         series_delta = _series_delta(row, changes)
         _apply_changes(store, row, changes)
         targets.append(store.get_event(row["id"]))
         if series_delta:
-            targets.extend(_shift_series_rows(store, row, series_delta, changes))   # after the master: they resolve through it
+            targets.extend(_shift_series_rows(store, row, series_delta, changes, pinned_slots))
     # Linked copies: only time moves to busy copies; full copies get everything but attendees/reminders.
     if propagate and row.get("link_group_id"):
         sibling_changes = _sibling_changes(changes)
@@ -601,21 +1001,34 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
             source_result = targets[1] if occ_key and scope == SCOPE_FOLLOWING else targets[0]
             allowed['time_kind'] = links.projection_time_kind(source_result, cal)
             if occ_key and scope == SCOPE_THIS:
+                received = waiting.get(sib['id'], {}).get(occ_key)
+                if received is not None:
+                    if not _withdrawn(received) and not store.delete_requested(received['id']):
+                        result = _stage_update_event(store, received['id'], allowed, scope=scope, owner_tz=owner_tz)
+                        assignments.extend(result.get('assignments', []))
+                    continue
                 exc_id = _ensure_exception(store, sib, occ_key, allowed)
                 targets.append(store.get_event(exc_id))
             elif occ_key and scope == SCOPE_FOLLOWING:
-                targets.extend(_split_series(store, sib, occ_key, allowed, recurrence, new_group, split_uid))
+                targets.extend(_split_series(store, sib, occ_key, allowed, recurrence, new_group, split_uid, pinned_slots))
             else:
                 sib_delta = _series_delta(sib, allowed)
                 _apply_changes(store, sib, allowed)
                 targets.append(store.get_event(sib["id"]))
                 if sib_delta:
-                    targets.extend(_shift_series_rows(store, sib, sib_delta, allowed))
+                    targets.extend(_shift_series_rows(store, sib, sib_delta, allowed, pinned_slots))
     rsvp_only = set(changes.keys()) == {"my_response"}
     if not from_source and row.get('link_group_id') and not links.source_is(store, row) and set(changes) & set(links.COPY_FIELDS):
         for target in targets:
             if target:
                 store.update_event(target['id'], {'link_state': links.DIVERGED})
+    kept_moves = {}
+    keys = ('kept_master', 'recurrence_id')
+    for old in kept_before:
+        new = store.get_event(old['id'])
+        if new and any(old[k] != new[k] for k in keys):
+            kept_moves.setdefault(old['calendar_id'], []).append({'id': old['id'],
+                'before': {k: old[k] for k in keys}, 'after': {k: new[k] for k in keys}})
     previous_by_calendar = {}
     for target in targets:
         if target is None:
@@ -641,6 +1054,8 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         result: Dict[str, Any] = {"status": INTENT_PENDING, "_intent_ids": [birth['id']] if recover_birth else []}
         for kind in kinds:
             payload = {"scope": scope, "changes": {k: v for k, v in changes.items() if k != "my_response"}, "send_updates": bool(send_updates)}
+            if restore_kept_slot:
+                payload['restore_kept_slot'] = True
             payload['family_root_id'] = roots[cal['id']]
             if occ_key and scope == SCOPE_FOLLOWING and target['id'] == roots[cal['id']]:
                 payload['truncate_before'] = occ_key
@@ -675,11 +1090,16 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
             elif kind != 'create' and not _write_etag(store, cal, current):
                 payload['baseline'] = _baseline_before(before, target)
             expected = birth['expected_etag'] if recover_birth else _write_etag(store, cal, current)
+            if kept_moves.get(cal['id']) and (not previous or (scope == SCOPE_FOLLOWING and kind == 'create')):
+                # A suffix may fail after its prefix was acknowledged: the unpublished segment cannot own these slots.
+                payload['kept_date_moves'] = kept_moves[cal['id']]
             intent = store.add_intent(kind, cal["account_id"], cal["id"], target["id"], payload, scope=scope, expected_etag=expected, op_id=op_id)
             previous_by_calendar[cal['id']] = intent['id']
             result["_intent_ids"].append(intent["id"])
         assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": target["id"], **result})
     fresh = store.get_event(targets[0]["id"]) if targets and targets[0] else None
+    if propagate and not from_source and fresh and held_series(fresh) and set(changes) & set(links.COPY_FIELDS):
+        assignments.extend(_stage_kept_slot(store, fresh))
     out = {"status": "ok", "event": fresh, "assignments": assignments, 'link': links.inspect(store, store.get_event(row['id']))}
     if occ_key and scope == SCOPE_FOLLOWING and len(targets) > 1 and targets[1]:
         out["split_master_id"] = targets[1]["id"]   # «from this date on» lives in a new series: reassignments apply to it
@@ -688,25 +1108,33 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
 
 
 def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_updates: bool = False,
-                 cascade: bool = True, from_source: bool = False) -> Dict[str, Any]:
-    """Delete the addressed event; only its chosen source can cascade to following projections."""
+                 cascade: bool = True, from_source: bool = False, series_slot: bool = True) -> Dict[str, Any]:
+    """Delete the addressed event; only its chosen source can cascade to following projections.
+
+    A received Google date kept as its own record is one date of its series: deleting the series (or its dates from
+    one on) deletes it too, and deleting the record cancels that date in the series' following copies.
+    """
     if scope not in SCOPES:
         raise ValueError("scope: this | following | all")
     base_id, occ_key = _series_id(event_id)
     row = store.get_event(base_id)
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
-    row, occ_key = resolve_occurrence(store, row, occ_key)
+    row, occ_key = resolve_occurrence(store, row, occ_key, scope)
     if has_recurrence(row) and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
+    kept_record = row if not from_source and series_slot and not occ_key and held_series(row) else None
     rows = deletion_targets(store, row, cascade)
     op_id = new_id("op")
     assignments: List[Dict[str, Any]] = []
     blocked = _read_only_preflight(store, rows, assignments)
     if row["id"] in blocked:
         return {"status": "failed", "assignments": assignments}
+    kept_dates = (_waiting_delete_targets(store, [r for r in rows if r['id'] not in blocked], occ_key, scope)
+                  if not from_source and cascade else [])
+    kept_masters = {master['id'] for record in kept_dates if (master := kept_series_of(store, record)) is not None}
     independent = not from_source and row.get('link_group_id') and not links.source_is(store, row)
     if independent:
         store.update_event(row['id'], {'link_state': links.DIVERGED})
@@ -717,6 +1145,8 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
         cal = store.get_calendar(target["calendar_id"])
         external = cal is not None and cal["provider"] != PROVIDER_LOCAL
         if occ_key and scope == SCOPE_THIS:
+            if target['id'] in kept_masters:
+                continue   # the waiting date has its own address; do not create a second override
             exc_id = _ensure_exception(store, target, occ_key, {"status": "cancelled"})
             victim = store.get_event(exc_id)
         elif occ_key and scope == SCOPE_FOLLOWING:
@@ -746,10 +1176,17 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
                                     for e in before.values()]}
         if occ_key and scope == SCOPE_FOLLOWING:
             payload['truncate_before'] = occ_key
+        if kind == 'update' and scope == SCOPE_THIS and not from_source and victim.get('kept_master') == target['id']:
+            payload['owner_cancelled_received_date'] = True
         intent = store.add_intent(kind, cal["account_id"], cal["id"], victim["id"], payload,
                                   scope=scope, expected_etag=_write_etag(store, cal, victim))
         result = {"status": INTENT_PENDING, "_intent_ids": [intent["id"]]}
         assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": victim["id"], **result})
+    for record in kept_dates:
+        assignments.extend(_stage_delete_event(store, record['id'], scope=SCOPE_THIS, send_updates=send_updates,
+                                               series_slot=False).get('assignments', []))
+    if kept_record is not None:
+        assignments.extend(_stage_kept_slot(store, {**kept_record, 'status': 'cancelled'}))
     return {"status": "ok", "assignments": assignments}
 
 
@@ -757,6 +1194,36 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
 def deletion_targets(store, row: Dict[str, Any], cascade: bool = True) -> List[Dict[str, Any]]:
     """Exact linked-master set affected by delete; used by preview and execution alike."""
     return [row] + (links.followers(store, row) if cascade else [])
+
+
+def _waiting_delete_targets(store, masters, key, scope):
+    return [record for master in masters if has_recurrence(master)
+            for slot, record in sorted(waiting_instances(store, master['calendar_id']).get(master['id'], {}).items())
+            if not record.get('deleted_at') and not store.delete_requested(record['id'])
+            and (scope == SCOPE_ALL or (slot == key if scope == SCOPE_THIS else slot >= key))]
+
+
+def deletion_preview(store, row: Dict[str, Any], occ_key: str, scope: str) -> List[Dict[str, str]]:
+    """Every calendar entry a confirmed delete of this address changes, as _stage_delete_event stages it: the
+    addressed event and its following copies; for a received date kept as its own record, also the following series
+    copies that carry its slot; for a whole-series or «from this date on» delete, also the series' kept dates."""
+    target = store.get_event(row["master_id"]) if row.get("master_id") else row
+    key = occ_key or (str(row.get("recurrence_id") or "") if row.get("master_id") else "")
+    entries = list(deletion_targets(store, target or row))
+    if not occ_key and not row.get("master_id") and held_series(row):
+        for sib_id, _ in kept_slot_commands(store, row, kept_series_of(store, row), {**row, 'status': 'cancelled'}, True):
+            entries.append(store.get_event(sib_id))
+    for record in _waiting_delete_targets(store, entries[:], key, scope):
+        if scope == SCOPE_THIS:
+            master = kept_series_of(store, record)
+            entries = [entry for entry in entries if entry['id'] != master['id']]
+        entries.extend(deletion_targets(store, record))
+    seen, out = set(), []
+    for entry in entries:
+        if entry and entry["id"] not in seen:
+            seen.add(entry["id"])
+            out.append({"event_id": entry["id"], "calendar_id": entry["calendar_id"]})
+    return out
 
 
 def _baseline_before(before, target):
@@ -856,7 +1323,7 @@ def _series_delta(master: Dict[str, Any], changes: Dict[str, Any]) -> Optional[t
     return recurrence_time_delta(old, new, {**master, **changes})
 
 
-def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=None) -> List[Dict[str, Any]]:
+def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=None, pinned_slots=()) -> List[Dict[str, Any]]:
     """Move relative slots, but keep explicitly supplied absolute date sets.
 
     Provider snapshots may replace EXDATE/RDATE while moving the anchor. Owner
@@ -886,7 +1353,7 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=
             upd["recurrence_id"] = iso_utc(shifted_slot)
             if event_time_kind(exc) == 'absolute':
                 effective_delta = shifted_slot.astimezone(timezone.utc) - rid.astimezone(timezone.utc)
-        if s is not None and e is not None:
+        if s is not None and e is not None and exc.get('recurrence_id') not in pinned_slots:
             upd.update({"start_utc": iso_utc(_shift_instant(s, effective_delta, bool(exc.get('all_day')), get_tz(exc.get('tz') or master.get('tz') or ''), event_time_kind(exc) == 'floating')), "end_utc": iso_utc(_shift_instant(e, effective_delta, bool(exc.get('all_day')), get_tz(exc.get('tz') or master.get('tz') or ''), event_time_kind(exc) == 'floating'))})
         if upd:
             store.update_event(exc["id"], upd)
@@ -894,15 +1361,20 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=
             if fresh is not None and (fresh.get("external_id") or fresh.get("href") or fresh.get("master_id")):
                 fresh["_previous_recurrence_id"] = exc.get("recurrence_id")   # the provider still knows it under the old slot
                 moved.append(fresh)
+    for record in store.kept_dates([master["id"]]):
+        # A received date kept as its own record keeps its own time; the slot it holds moves with the series.
+        rid = parse_stored(record.get("recurrence_id"))
+        if rid is not None:
+            store.update_event(record["id"], {"recurrence_id": iso_utc(shift_recurrence_time(target, rid, delta))})
     return moved
 
 
-def _shift_for_scope_all(store, row: Dict[str, Any], occ_key: str, scope: str, changes: Dict[str, Any]) -> Dict[str, Any]:
+def _shift_for_scope_all(store, row: Dict[str, Any], occ_key: str, scope: str, changes: Dict[str, Any], pinned=False) -> Dict[str, Any]:
     """«All of them at 19:00», said about one occurrence: move the series by the same delta, never re-anchor DTSTART
     to that later date (that would silently drop every earlier occurrence)."""
     if not (occ_key and scope == SCOPE_ALL and changes.get("start_utc")):
         return changes
-    exception = next((e for e in store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ_key), None)
+    exception = None if pinned else next((e for e in store.exceptions_for(row['id']) if e.get('recurrence_id') == occ_key), None)
     effective_start = exception["start_utc"] if exception else occ_key
     occ_s, new_s = parse_stored(effective_start), parse_stored(changes.get("start_utc"))
     m_s, m_e = parse_stored(row.get("start_utc")), parse_stored(row.get("end_utc"))
@@ -1019,7 +1491,7 @@ def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exc
     return later
 
 
-def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any], recurrence, new_group: str = "", split_uid: str = "") -> List[Dict[str, Any]]:
+def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any], recurrence, new_group: str = "", split_uid: str = "", pinned_slots=()) -> List[Dict[str, Any]]:
     """«Starting from this date»: truncate the old series, start a new one carrying the changes.
 
     Later exceptions move to the new series (their date keeps the edit, the slot follows the new wall time);
@@ -1031,7 +1503,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     occ_start = parse_stored(occ_key) or m_start
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
     cut_exception = next((exc for exc in later if str(exc.get("recurrence_id") or "") == occ_key), None)
-    cut_start = parse_stored(cut_exception.get("start_utc")) if cut_exception else None
+    cut_start = parse_stored(cut_exception.get("start_utc")) if cut_exception and occ_key not in pinned_slots else None
     # A moved cut has two times: its original recurrence slot and its effective
     # start. Even when a caller submits the displayed start with an end edit,
     # only a change from the effective start moves the following series.
@@ -1045,7 +1517,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     span = {**target, 'start_utc': iso_utc(requested_start), 'end_utc': iso_utc(requested_end)} if requested_end else target
     new_end = _occurrence_end(span, new_start) if target.get('all_day') else new_start + new_duration
     new_cut_start = requested_start
-    cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception else None
+    cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception and occ_key not in pinned_slots else None
     new_cut_end = requested_end or (cut_end + elapsed_shift if cut_end else new_cut_start + duration)
     cut_basis = {**master, **(cut_exception or {}), **changes}
     if cut_basis.get('all_day'):
@@ -1093,7 +1565,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
             if original_dt is None:
                 continue
             exception = later_by_original.get(old_key)
-            if exception is not None and old_key != occ_key:
+            if exception is not None and (old_key != occ_key or old_key in pinned_slots):
                 # Later exceptions retain their explicit start when the master
                 # moves; only their recurrence key follows the new series wall time.
                 effective = iso_utc(old_effective)
@@ -1121,9 +1593,10 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
             continue
         new_key = shift_recurrence_time(target, old_key, slot_shift)
         upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
+               **({"kept_master": saved["id"]} if exc.get("kept_master") else {}),
                "status": materialized_event_status(exc, store),
                "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
-        if str(exc.get("recurrence_id") or "") == occ_key:
+        if str(exc.get("recurrence_id") or "") == occ_key and occ_key not in pinned_slots:
             # Its recurrence key follows the segment, while its individual
             # effective time remains separate from the series anchor.
             if changes.get("start_utc") or changes.get("end_utc"):
@@ -1132,6 +1605,12 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                         ("title", "description", "location", "visibility", "availability", "all_day", "time_kind", "tz") and v is not None})
         store.update_event(exc["id"], upd)
         moved.append(store.get_event(exc["id"]))
+    for record in store.kept_dates([master["id"]]):
+        # A received date kept as its own record from the cut on belongs to the new series, at its shifted slot.
+        if str(record.get("recurrence_id") or "") >= occ_key:
+            old_key = parse_stored(record["recurrence_id"])
+            store.update_event(record["id"], {"kept_master": saved["id"],
+                                              "recurrence_id": iso_utc(shift_recurrence_time(target, old_key, slot_shift))})
     # the moved exceptions are written to the provider after the new master exists (they resolve through it)
     return [store.get_event(master["id"]), store.get_event(saved["id"]), *moved]
 
@@ -1580,14 +2059,42 @@ def retry_due_intents(store, providers, owner: str = "companion", limit: int = 2
     return out
 
 
-def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -> Dict[str, Any]:
+def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str], scope: Optional[str] = None, *, address='') -> Dict[str, Any]:
     """Change the set of calendars an event lives in (12 A: only on explicit command).
 
     Copies are added/removed per the target calendars' ``publish_mode``; the primary row stays where it is —
-    moving the primary itself is a delete + create the owner asks for explicitly.
+    moving the primary itself is a delete + create the owner asks for explicitly. A received Google date
+    addressed by its own ID with scope=this keeps meaning that one meeting after it joined its series: it becomes
+    its own kept record again and only it is assigned (scope=all assigns the series).
     """
     from providers import materialized_event_status
-    row = store.get_event(row["id"]) or row
+    try:
+        row = reassign_target(store, address, scope) if address else store.get_event(row['id'])
+    except ValueError as exc:
+        return {'added': [], 'removed': [], 'failed': str(exc)}
+    if row is None or row.get('deleted_at') or received_cancelled(store, row, scope=scope or SCOPE_THIS):
+        return {'added': [], 'removed': [], 'failed': 'дата больше не доступна для назначения'}
+    series = kept_google_series(store, row) if scope == SCOPE_THIS else None
+    if series is not None:
+        if not row.get('external_id'):
+            return {'added': [], 'removed': [], 'kept_primary': row['calendar_id'],
+                    'failed': 'Google ещё не подтвердил адрес этой даты; дождись синхронизации и повтори назначение даты (scope=this)'}
+        # The date already appears where its series has copies; only another calendar gives it a copy of its own.
+        # Which copy is the series' source does not widen this to the series.
+        carried = {member["calendar_id"] for member in store.group_masters(series.get("link_group_id") or "")}
+        dropped = sorted(cid for cid in carried if cid != row["calendar_id"] and cid not in calendar_ids)
+        if dropped:
+            names = ", ".join((store.get_calendar(cid) or {}).get("name") or cid for cid in dropped)
+            return {"added": [], "removed": [], "kept_primary": row["calendar_id"],
+                    "failed": f"календарь {names} эта дата получает вместе со всей серией; снять его можно только для серии (scope=all)"}
+        extra = [cid for cid in calendar_ids if cid and cid != row["calendar_id"] and cid not in carried]
+        if not extra:
+            return {"added": [], "removed": [], "kept_primary": row["calendar_id"]}
+        detached = detach_kept_date(store, row)
+        if detached is None:
+            return {"added": [], "removed": [], "kept_primary": row["calendar_id"],
+                    "failed": "удаление этой даты ещё не подтверждено; её календари не меняются"}
+        row, calendar_ids = detached, [detached["calendar_id"]] + extra
     if row.get("master_id"):
         row = store.get_event(row["master_id"]) or row   # an occurrence id means its whole series
     clicked_cal = store.get_calendar(row["calendar_id"])
@@ -1598,6 +2105,10 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
     if source is None or source.get('deleted_at'):
         return {'added': [], 'removed': [], 'failed': 'Не выбран единственный действующий источник связи. Выбери источник на карточке события или в чате.'}
     row = source
+    # Content follows the source selected by the owner. Slot ownership follows the native date.
+    kept = next((m for m in members if held_series(m)), None)
+    if kept and (_withdrawn(kept) or store.delete_requested(kept['id'])):
+        return {'added': [], 'removed': [], 'failed': 'дата больше не доступна для назначения'}
     own_cal = store.get_calendar(row["calendar_id"])
     for cal_ in (clicked_cal, own_cal):
         if cal_ is not None and cal_["provider"] != PROVIDER_LOCAL and not cal_.get("writable", True):
@@ -1631,6 +2142,8 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
             continue
         mode = cal.get("publish_mode") or PUBLISH_BUSY
         copy = {k: row.get(k) for k in ("uid", "visibility", "availability", "status", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates")}
+        if kept:
+            copy["uid"] = kept_copy_uid(kept)   # the address comes from the date, not the content source
         copy['status'] = materialized_event_status(row, store)
         copy['time_kind'] = links.projection_time_kind(row, cal)
         copy.update({"calendar_id": cid, "is_primary": 0, "link_group_id": group,
@@ -1642,7 +2155,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
         saved = store.insert_event(copy)
         # a series copy carries the primary's exceptions (moved/cancelled dates), times only for busy copies
         exception_rows = []
-        for exc in store.exceptions_for(row["id"]):
+        for exc in copied_overrides(store, row, cid):
             exc_copy = {k: exc.get(k) for k in ("visibility", "availability", "start_utc", "end_utc", "tz", "all_day", "recurrence_id", "status")}
             exc_copy['time_kind'] = links.projection_time_kind(exc, cal)
             exc_copy.update({"status": materialized_event_status(exc, store), "calendar_id": cid, "uid": saved["uid"], "master_id": saved["id"], "is_primary": 0, "link_group_id": group,
@@ -1670,10 +2183,23 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
                               "after_intent_id": intent['id'], "send_updates": False},
                              scope=SCOPE_THIS, op_id=op_id)
         added.append({"calendar_id": cid, "calendar_name": cal["name"], "event_id": saved["id"], **outcome})
+    dropping = {cid for cid, m in current.items() if cid not in wanted and m['id'] != row['id']}
+    restoration = _restore_series_slot(store, kept, dropping, content=row) if kept and dropping else {}
     for cid, m in current.items():
         if cid in wanted or m["id"] == row["id"]:
             continue
+        prerequisite = restoration.get(cid, [])
+        if any(a.get('status') == INTENT_FAILED for a in prerequisite):
+            removed.append({'calendar_id': cid, 'event_id': m['id'], 'assignments': prerequisite})
+            continue
         res = _stage_delete_event(store, m["id"], scope=SCOPE_ALL, cascade=False)   # this copy only, never the group
+        dependency = next((iid for a in prerequisite for iid in a.get('_intent_ids', [])), None)
+        _after(store, res.get('assignments', []), dependency)
         removed.append({"calendar_id": cid, "calendar_name": m.get("calendar_name"), "event_id": m["id"],
                         "assignments": res.get("assignments") or [{"calendar_id": cid, "event_id": m["id"], "status": INTENT_DONE}]})
-    return {"added": added, "removed": removed, "kept_primary": row["calendar_id"]}
+    assignments = []
+    if kept is not None:
+        created = {a["calendar_id"]: (a.get("_intent_ids") or [""])[0] for a in added if a.get("status") != INTENT_FAILED}
+        assignments = _withdraw_series_slot(store, kept, set(created), created)
+        assignments.extend(a for parts in restoration.values() for a in parts)
+    return {"added": added, "removed": removed, "kept_primary": row["calendar_id"], "assignments": assignments}

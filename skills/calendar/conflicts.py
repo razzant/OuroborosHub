@@ -52,6 +52,7 @@ def _snapshot(c, event_id):
         p = _payload(intent)
         ids.add(intent['event_id'])
         ids.update(p.get('created_ids', []))
+        ids.update(move['id'] for move in p.get('kept_date_moves', []))
         roots.add(p.get('family_root_id') or row.get('master_id') or row['id'])
     # Separate split segments are related by this command, not link_group_id.
     marks = ','.join('?' for _ in ids)
@@ -129,7 +130,8 @@ def _load(ctx, event_id):
             queue.append(p['after_intent_id'])
     if occurrence:
         master, key = ops.resolve_occurrence(ctx.store, row, occurrence)
-        row = next((e for e in ctx.store.exceptions_for(master['id']) if e.get('recurrence_id') == key), row)
+        # A series date that is still its own kept record resolves to that record (key '').
+        row = next((e for e in ctx.store.exceptions_for(master['id']) if e.get('recurrence_id') == key), row) if key else master
     with ctx.store._conn() as c:
         c.execute('BEGIN')
         state = _snapshot(c, row['id'])
@@ -258,6 +260,7 @@ def _accept_provider(local, state, current, templates):
     retired = {i['id'] for i in templates}
     independent = {i['event_id'] for i in state['intents'] if i['state'] in _UNFINISHED and i['id'] not in retired}
     before_rows, created = _rollback_rows(state)
+    local.restore_kept_date_moves(move for i in reversed(templates) for move in reversed(_payload(i).get('kept_date_moves', [])))
     restore = list(before_rows.values())
     for before in restore:
         if before['id'] in affected:
@@ -309,7 +312,12 @@ def resolve(ctx, event_id, choice, token):
         return {**body, 'snapshot_changed': True, 'message': 'снимок изменился или недоступен; покажи обе версии заново'}
     row = state['event']
     templates = _templates(state)
-    if choice == 'local' and (not templates or (current['event'] or {}).get('status') == 'cancelled'
+    cancelled_slot = current.get('excluded_occurrence') or (row.get('master_id') and current.get('cancelled'))
+    restoring = cancelled_slot and any(
+        i['kind'] == 'update' and i['event_id'] == row['id'] and i['state'] == 'conflict'
+        and _payload(i).get('restore_kept_slot') and (_payload(i).get('changes') or {}).get('status') in ('confirmed', 'tentative')
+        for i in templates)
+    if choice == 'local' and (not templates or ((current['event'] or {}).get('status') == 'cancelled' and not restoring)
                               or any(i['kind'] == 'create' and i['event_id'] == row['id'] and i['state'] != 'uncertain' for i in templates)
                               or current['event'] is None and not any(i['kind'] == 'create' and i['state'] == 'uncertain' for i in templates)):
         return {**body, 'message': 'нет однозначной прежней операции для повтора; можно выбрать provider и задать новое изменение'}

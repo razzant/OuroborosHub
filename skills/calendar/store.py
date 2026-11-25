@@ -14,7 +14,7 @@ import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Union
 
 from model import (
     DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_PENDING, LOCAL_ACCOUNT_ID, PROVIDER_LOCAL, CALDAV_PROVIDERS, has_recurrence, iso_utc, new_id, now_utc, parse_stored,
@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS events (
     status TEXT NOT NULL DEFAULT 'confirmed', organizer TEXT NOT NULL DEFAULT '', attendees_json TEXT NOT NULL DEFAULT '[]',
     my_response TEXT NOT NULL DEFAULT '', reminders_json TEXT NOT NULL DEFAULT '[]',
     origin TEXT NOT NULL DEFAULT 'local', link_group_id TEXT NOT NULL DEFAULT '', link_state TEXT NOT NULL DEFAULT 'following', sync_state TEXT NOT NULL DEFAULT 'synced',
-    raw_payload TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
+    raw_payload TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT,
+    kept_master TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_events_window ON events(calendar_id, start_utc, end_utc);
 CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid);
 CREATE INDEX IF NOT EXISTS idx_events_link ON events(link_group_id);
@@ -78,7 +79,7 @@ EVENT_COLUMNS = (
     "id", "calendar_id", "uid", "external_id", "href", "etag", "visibility", "availability", "is_primary", "title",
     "description", "location", "start_utc", "end_utc", "tz", "time_kind", "all_day", "rrule", "rdates", "exdates", "recurrence_id",
     "master_id", "status", "organizer", "attendees_json", "my_response", "reminders_json", "origin", "link_group_id",
-    "link_state", "sync_state", "raw_payload", "created_at", "updated_at", "deleted_at",
+    "link_state", "sync_state", "raw_payload", "created_at", "updated_at", "deleted_at", "kept_master",
 )
 
 
@@ -135,6 +136,20 @@ class Store:
             local._transaction_connection = c
             yield local
 
+    @contextmanager
+    def read_snapshot(self):
+        """Keep all reads of one calendar projection on one SQLite snapshot."""
+        if self._transaction_connection is not None:
+            yield self
+            return
+        with self._conn() as c:
+            c.execute('PRAGMA query_only=ON')
+            c.execute('BEGIN')
+            local = object.__new__(Store)
+            local.state_dir, local.path = self.state_dir, self.path
+            local._transaction_connection = c
+            yield local
+
     def _init(self) -> None:
         with self._conn() as c:
             legacy = self._is_prototype_schema(c)
@@ -146,6 +161,9 @@ class Store:
             event_columns = {r[1] for r in c.execute('PRAGMA table_info(events)')}
             if 'link_state' not in event_columns:
                 c.execute("ALTER TABLE events ADD COLUMN link_state TEXT NOT NULL DEFAULT 'following'")
+            if 'kept_master' not in event_columns:
+                # A Google date received without its series, once that series is stored here: its series' local ID.
+                c.execute("ALTER TABLE events ADD COLUMN kept_master TEXT NOT NULL DEFAULT ''")
             if 'time_kind' not in event_columns:
                 # Unknown legacy parsing provenance never licenses rewriting anchors or queued work.
                 c.execute("ALTER TABLE events ADD COLUMN time_kind TEXT NOT NULL DEFAULT ''")
@@ -408,7 +426,7 @@ class Store:
                              ("availability", "busy"), ("title", ""), ("description", ""), ("location", ""), ("tz", ""), ("time_kind", ""), ("all_day", 0),
                              ("rrule", ""), ("rdates", ""), ("exdates", ""), ("recurrence_id", ""), ("master_id", ""), ("status", "confirmed"),
                              ("organizer", ""), ("attendees_json", "[]"), ("my_response", ""), ("reminders_json", "[]"), ("origin", "local"),
-                             ("link_group_id", ""), ("link_state", "following"), ("sync_state", "synced"), ("raw_payload", "")):
+                             ("link_group_id", ""), ("link_state", "following"), ("sync_state", "synced"), ("raw_payload", ""), ("kept_master", "")):
             if row.get(key) is None:
                 row[key] = default
         row["all_day"] = 1 if row["all_day"] else 0
@@ -477,6 +495,60 @@ class Store:
             if tx.find_by_external(payload['calendar_id'], payload.get('external_id') or '', payload.get('href') or '', payload.get('uid') or ''):
                 return None
             return tx.insert_event(payload)
+
+    def insert_provider_instance(self, payload):
+        """Record a Google instance whose series this calendar does not hold, once per instance ID.
+
+        Its iCalUID is shared with the series and its other instances, so only the instance ID identifies it.
+        """
+        with self.transaction() as tx:
+            if not payload.get('external_id') or tx.find_by_external(payload['calendar_id'], payload['external_id']):
+                return None
+            return tx.insert_event(payload)
+
+    def attach_instance(self, event_id: str, master_id: str, fields=None) -> str:
+        """Make a received instance record an override of its now-stored series, in place; '' when it was attached.
+
+        The row keeps its ID, provider identity, status and owner fields; ``fields`` carries only its coordinates in
+        the series basis. ``kept_master`` records the series and stays through attach and detach: it is what makes
+        this a received date rather than an ordinary override. A record that cannot join yet (unsettled owner work,
+        a live copy of its own, a removed record, a closed series) is still bound to the series with its slot, so the
+        series reads that slot as the record's; the reason is returned.
+        """
+        fields = {k: v for k, v in (fields or {}).items() if k in ('start_utc', 'end_utc', 'tz', 'recurrence_id')}
+        with self._write_conn() as c:
+            row = c.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone()
+            master = c.execute('SELECT * FROM events WHERE id=?', (master_id,)).fetchone()
+            if row is None or row['master_id'] or not row['recurrence_id']:
+                return 'changed'
+            if master is None or master['master_id'] or master['deleted_at']:
+                return 'closed'
+            slot = fields.get('recurrence_id') or row['recurrence_id']
+            reason = ''
+            if row['deleted_at']:
+                reason = 'removed'
+            elif self._series_closed(c, master_id):
+                reason = 'closed'
+            elif (self._unsettled_owner_write(c, event_id, row['sync_state'])
+                    or self._unsettled_owner_write(c, master_id, master['sync_state'])):
+                reason = 'unsettled'
+            elif row['link_group_id'] and c.execute(
+                    "SELECT 1 FROM events WHERE link_group_id=? AND id!=? AND master_id='' AND deleted_at IS NULL LIMIT 1",
+                    (row['link_group_id'], event_id)).fetchone():
+                reason = 'linked'
+            elif c.execute('SELECT 1 FROM events WHERE master_id=? AND recurrence_id=? AND deleted_at IS NULL LIMIT 1',
+                           (master_id, slot)).fetchone():
+                reason = 'slot_taken'
+            if reason:
+                if reason != 'slot_taken' and (row['kept_master'] != master_id or row['recurrence_id'] != slot):
+                    c.execute('UPDATE events SET kept_master=?, recurrence_id=?, updated_at=? WHERE id=?',
+                              (master_id, slot, _ts(), event_id))
+                return reason
+            data = {**fields, 'master_id': master_id, 'kept_master': master_id, 'uid': master['uid'],
+                    'link_group_id': master['link_group_id'], 'is_primary': master['is_primary'],
+                    'link_state': master['link_state'], 'updated_at': _ts()}
+            c.execute('UPDATE events SET ' + ', '.join(key + '=?' for key in data) + ' WHERE id=?', (*data.values(), event_id))
+        return ''
 
     def apply_provider_snapshot(self, event_id: str, fields: Dict[str, Any], observed=None) -> bool:
         """A sync observation cannot overwrite a still-unconfirmed owner write, nor re-attach an override to a closed series.
@@ -632,13 +704,13 @@ class Store:
                    state == 'conflict' and (previous.get('unsent') or previous.get('delivery') == 'none')
                    for _, state, previous in deletions):
                 return False  # Keep the row inspectable; an unrelated absence cannot release a held command.
-            removed = c.execute("DELETE FROM events WHERE id=? AND"
-                                " (sync_state='pending_delete' OR (sync_state='conflict' AND"
-                                " (SELECT kind FROM intents WHERE event_id=? AND state!='resolved' ORDER BY rowid DESC LIMIT 1)='delete'))"
-                                " AND NOT EXISTS (SELECT 1 FROM intents WHERE event_id=? AND kind='create' AND state!=?)",
-                                (event_id, event_id, event_id, INTENT_DONE))
-            if not removed.rowcount:
+            if not c.execute("SELECT 1 FROM events WHERE id=? AND"
+                             " (sync_state='pending_delete' OR (sync_state='conflict' AND"
+                             " (SELECT kind FROM intents WHERE event_id=? AND state!='resolved' ORDER BY rowid DESC LIMIT 1)='delete'))"
+                             " AND NOT EXISTS (SELECT 1 FROM intents WHERE event_id=? AND kind='create' AND state!=?)",
+                             (event_id, event_id, event_id, INTENT_DONE)).fetchone():
                 return False
+            self._remove_deleted(c, event_id)
             for intent_id, _, previous in deletions:
                 receipt = {'note': 'provider confirmed absent', **({'previous_result': previous} if previous else {})}
                 c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=NULL, updated_at=?"
@@ -650,6 +722,17 @@ class Store:
         """Rows overlapping [start, end) plus (optionally) recurrence masters that may expand into it."""
         clauses = ["e.deleted_at IS NULL", "c.deleted_at IS NULL",
                    "(e.master_id='' OR EXISTS (SELECT 1 FROM events m WHERE m.id=e.master_id AND m.deleted_at IS NULL))"]
+        # In a reverse handover the restored series exception and the old copy can
+        # both still exist locally. Coalesce only the same interval of this copy,
+        # and only while the exact replacement selected by its delete is visible.
+        clauses.append("NOT (e.origin='projection' AND e.uid LIKE 'kept-%' AND EXISTS ("
+                       "SELECT 1 FROM intents d JOIN intents p ON p.id=json_extract(d.payload_json, '$.after_intent_id')"
+                       " JOIN events x ON x.id=p.event_id JOIN events m ON m.id=x.master_id"
+                       " WHERE d.event_id=e.id AND d.kind='delete' AND d.state NOT IN ('done','resolved')"
+                       " AND d.rowid=(SELECT max(i.rowid) FROM intents i WHERE i.event_id=e.id AND i.state!='resolved')"
+                       " AND x.calendar_id=e.calendar_id AND x.deleted_at IS NULL AND m.deleted_at IS NULL"
+                       " AND x.status!='cancelled' AND x.visibility=e.visibility AND x.availability=e.availability"
+                       " AND x.start_utc=e.start_utc AND x.end_utc=e.end_utc))")
         args: List[Any] = []
         if calendar_ids:
             clauses.append("e.calendar_id IN (%s)" % ",".join("?" for _ in calendar_ids))
@@ -698,10 +781,114 @@ class Store:
                 if row:
                     return dict(row)
             if uid:
-                row = c.execute("SELECT * FROM events WHERE calendar_id=? AND uid=? AND master_id='' LIMIT 1", (calendar_id, uid)).fetchone()
+                # A root that keeps an original slot is one Google instance whose series is not stored here;
+                # the UID it shares names neither that series nor another of its instances.
+                row = c.execute("SELECT * FROM events WHERE calendar_id=? AND uid=? AND master_id='' AND recurrence_id='' LIMIT 1",
+                                (calendar_id, uid)).fetchone()
                 if row:
                     return dict(row)
         return None
+
+    def overrides_by_external(self, calendar_id, external_ids):
+        if not external_ids:
+            return []
+        with self._conn() as c:
+            rows = c.execute("SELECT e.* FROM events e JOIN events m ON m.id=e.master_id"
+                             " WHERE e.calendar_id=? AND e.deleted_at IS NULL AND m.deleted_at IS NULL AND e.external_id IN ("
+                             + ','.join('?' for _ in external_ids) + ')', (calendar_id, *external_ids)).fetchall()
+        return [dict(row) for row in rows]
+
+    def held_instances(self, calendar_id: Optional[Union[str, Sequence[str]]] = None, include_removed=False) -> List[Dict[str, Any]]:
+        """Records of Google instances whose series this calendar did not hold when they were read (all calendars
+        when ``calendar_id`` is None).
+
+        A removed one (cancelled or deleted by the provider or the owner) is hidden and no tool addresses it;
+        it still keeps that date of its series cancelled.
+        """
+        clauses, args = ["master_id=''", "recurrence_id!=''"], []
+        if calendar_id is not None:
+            ids = [calendar_id] if isinstance(calendar_id, str) else list(calendar_id)
+            if not ids:
+                return []
+            clauses.append("calendar_id IN (%s)" % ",".join("?" for _ in ids))
+            args.extend(ids)
+        if include_removed == 'bound':
+            # A removed record matters to a series only once it is bound to one (its series arrived).
+            clauses.append("(deleted_at IS NULL OR kept_master!='')")
+        elif include_removed == 'unbound':
+            clauses.append("(deleted_at IS NULL OR kept_master='')")
+        elif not include_removed:
+            clauses.append("deleted_at IS NULL")
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM events WHERE " + " AND ".join(clauses), args).fetchall()
+        return [dict(r) for r in rows]
+
+    def live_series(self, ids) -> List[Dict[str, Any]]:
+        """Live stored series among these local IDs, in one read."""
+        ids = sorted(set(ids))
+        if not ids:
+            return []
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM events WHERE master_id='' AND deleted_at IS NULL AND (rrule!='' OR rdates!='' OR exdates!='')"
+                             " AND id IN (%s)" % ",".join("?" for _ in ids), ids).fetchall()
+        return [dict(r) for r in rows]
+
+    def kept_dates(self, master_ids=None, include_removed: bool = True) -> List[Dict[str, Any]]:
+        """Received Google dates bound to a stored series that are not (or no longer) its stored override: the slot
+        their ``recurrence_id`` names in that series is theirs. All series when ``master_ids`` is None."""
+        clauses, args = ["master_id=''", "kept_master!=''"], []
+        if master_ids is not None:
+            ids = sorted(set(master_ids))
+            if not ids:
+                return []
+            clauses.append("kept_master IN (%s)" % ",".join("?" for _ in ids))
+            args.extend(ids)
+        if not include_removed:
+            clauses.append("deleted_at IS NULL")
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM events WHERE " + " AND ".join(clauses), args).fetchall()
+        return [dict(r) for r in rows]
+
+    def series_named(self, keys) -> List[Dict[str, Any]]:
+        """Live stored series among (calendar_id, external_id) pairs, in one read."""
+        keys = set(keys)
+        if not keys:
+            return []
+        external = sorted({ext for _, ext in keys})
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM events WHERE master_id='' AND deleted_at IS NULL AND (rrule!='' OR rdates!='' OR exdates!='')"
+                             " AND external_id IN (%s)" % ",".join("?" for _ in external), external).fetchall()
+        return [dict(r) for r in rows if (r['calendar_id'], r['external_id']) in keys]
+
+    def detach_instance(self, event_id: str) -> bool:
+        """Make a received Google date that joined its series its own kept record again, in place, when the owner gives
+        that one date its own calendars. Only a date received without its series (``kept_master``) detaches; an
+        ordinary override never does.
+
+        The row keeps its ID, provider identity (writes still address the same instance), status, owner fields,
+        queued edits, its slot and its binding to the series. A date whose deletion is under way stays where it is.
+        """
+        with self._write_conn() as c:
+            row = c.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone()
+            if (row is None or row['deleted_at'] or not row['master_id'] or not row['external_id'] or not row['recurrence_id']
+                    or row['kept_master'] != row['master_id']):
+                return False
+            latest = c.execute("SELECT kind FROM intents WHERE event_id=? AND state!='resolved' ORDER BY rowid DESC LIMIT 1",
+                               (event_id,)).fetchone()
+            if row['sync_state'] == 'pending_delete' or (latest is not None and latest['kind'] == 'delete'):
+                return False
+            c.execute("UPDATE events SET master_id='', link_group_id='', is_primary=1, link_state='following', updated_at=? WHERE id=?",
+                      (_ts(), event_id))
+        return True
+
+    @staticmethod
+    def _remove_deleted(c: sqlite3.Connection, event_id: str) -> None:
+        """Remove a row whose provider deletion is confirmed; a held Google instance stays as a removed record instead."""
+        if c.execute("SELECT 1 FROM events WHERE id=? AND master_id='' AND recurrence_id!=''", (event_id,)).fetchone():
+            c.execute("UPDATE events SET deleted_at=COALESCE(deleted_at, ?), sync_state='synced', updated_at=? WHERE id=?",
+                      (_ts(), _ts(), event_id))
+        else:
+            c.execute('DELETE FROM events WHERE id=?', (event_id,))
 
     def group_members(self, link_group_id: str, include_deleted: bool = False) -> List[Dict[str, Any]]:
         if not link_group_id:
@@ -735,7 +922,7 @@ class Store:
     def cancel_intents_for_account(self, account_id: str, reason: str = "account disconnected") -> int:
         """Withdraw waiting commands, preserving desired data and any owed provider outcome."""
         cancelled, before, affected, created, unknown = 0, {}, set(), set(), set()
-        withdrawal_order, derived_rows = {}, set()
+        withdrawal_order, derived_rows, kept_moves = {}, set(), []
         with self.transaction() as local:
             for intent in local.unsettled_account_intents(account_id):
                 payload = json.loads(intent.get('payload_json') or '{}')
@@ -761,6 +948,7 @@ class Store:
                 result['outcome'] = 'withdrawn'
                 local.settle_intent(intent['id'], 'resolved', result)
                 cancelled += 1
+                kept_moves.extend((intent['event_id'], move) for move in payload.get('kept_date_moves', []))
                 affected.add(intent['event_id'])
                 for row in payload.get('restore_rows', []):
                     if row.get('sync_state') == 'synced':
@@ -803,6 +991,7 @@ class Store:
                 else:
                     # No provider ACK is invented for a retained local create or missing preimage.
                     local.update_event(event_id, {'sync_state': 'failed'})
+            local.restore_kept_date_moves(move for eid, move in reversed(kept_moves) if eid not in unknown and move['id'] not in unknown)
         return cancelled
 
     def hold_intents_for_account(self, account_id: str, reason: str = "sign-in status unconfirmed") -> int:
@@ -873,7 +1062,8 @@ class Store:
                     current[k] != intent[k] for k in ('lease_owner', 'lease_until', 'attempts')):
                 return False
             if delete:
-                local.delete_event(event['id'], hard=True)
+                with local._conn() as c:
+                    local._remove_deleted(c, event['id'])
                 local.settle_intent(intent['id'], INTENT_DONE, {'ok': True, **{k: v for k, v in result.items() if k != '_native_payload'}})
                 return True
             etag = result.get('master_etag') or result.get('etag') or ''
@@ -1063,6 +1253,20 @@ class Store:
                             (event_id,)).fetchone()
         return row is not None and row["kind"] == "delete"
 
+    def owner_cancelled_received_date(self, event_id: str) -> bool:
+        """A confirmed owner cancellation is different from an organizer's feed or a projection handover."""
+        with self._conn() as c:
+            row = c.execute("SELECT 1 FROM intents WHERE event_id=? AND kind='update' AND state='done'"
+                            " AND json_extract(payload_json, '$.owner_cancelled_received_date')=1 LIMIT 1", (event_id,)).fetchone()
+        return row is not None
+
+    def restore_kept_date_moves(self, moves) -> None:
+        """Undo only address choices this command still owns. Keep later independent content and notice history."""
+        for move in moves:
+            row = self.get_event(move['id'])
+            if row and not row.get('master_id') and all(row.get(k) == v for k, v in move['after'].items()):
+                self.update_event(row['id'], move['before'])
+
     def open_intents(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM intents WHERE state IN (?, ?) ORDER BY rowid LIMIT ?",
@@ -1171,7 +1375,8 @@ class Store:
             for reminder_id in reminder_ids:
                 result = c.execute("UPDATE reminders SET state='unknown', updated_at=? WHERE id=? AND state IN ('scheduled', 'no_channel')"
                                    " AND EXISTS (SELECT 1 FROM events e JOIN calendars c ON c.id=e.calendar_id"
-                                   " JOIN accounts a ON a.id=c.account_id WHERE e.id=reminders.event_id AND c.deleted_at IS NULL)",
+                                   " JOIN accounts a ON a.id=c.account_id WHERE e.id=reminders.event_id AND e.master_id=''"
+                                   " AND e.deleted_at IS NULL AND e.status!='cancelled' AND c.deleted_at IS NULL)",
                                    (_ts(), reminder_id))
                 if result.rowcount == 1:
                     reserved.append(reminder_id)
@@ -1226,6 +1431,14 @@ class Store:
         with self._conn() as c:
             c.execute("DELETE FROM reminders WHERE event_id=? AND occurrence_start_utc=? AND state IN ('scheduled', 'no_channel')",
                       (event_id, occurrence_start_utc))
+
+    def drop_reminders_for_slot(self, event_id: str, recurrence_id: str) -> None:
+        """Waiting notices of one original slot of a series."""
+        if not recurrence_id:
+            return
+        with self._conn() as c:
+            c.execute("DELETE FROM reminders WHERE event_id=? AND recurrence_id=? AND state IN ('scheduled', 'no_channel')",
+                      (event_id, recurrence_id))
 
     def drop_reminders_for(self, event_id: str, only_future: bool = True) -> None:
         with self._conn() as c:
