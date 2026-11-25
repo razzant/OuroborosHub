@@ -596,9 +596,10 @@ class Store:
                             (identity.get("external_id") or "", identity.get("href") or "", identity.get("etag") or "", _ts(), event_id))
             if cur.rowcount != 1:
                 return False
-            latest = c.execute("SELECT id, kind, state FROM intents WHERE event_id=? AND state!='resolved' ORDER BY rowid DESC LIMIT 1",
+            latest = c.execute("SELECT id, kind, state, result_json FROM intents WHERE event_id=? AND state!='resolved' ORDER BY rowid DESC LIMIT 1",
                                (event_id,)).fetchone()
-            if latest is not None and latest["kind"] == "delete" and latest["state"] == "conflict":
+            if (latest is not None and latest["kind"] == "delete" and latest["state"] == "conflict"
+                    and json.loads(latest["result_json"] or "{}").get("outcome") != "hold_for_review"):
                 c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=?, updated_at=?,"
                           " expected_etag=CASE WHEN expected_etag='' THEN ? ELSE expected_etag END WHERE id=?",
                           (INTENT_PENDING, json.dumps({"note": "provider identity found by sync"}), _ts(), _ts(), identity.get('etag') or '', latest["id"]))
@@ -624,6 +625,13 @@ class Store:
             row = c.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone()
             if row is None or not self._same_observation(row, observed):
                 return False
+            deletions = [(i['id'], i['state'], json.loads(i['result_json'] or '{}')) for i in c.execute(
+                "SELECT id, state, result_json FROM intents WHERE event_id=? AND kind='delete'"
+                " AND state IN ('pending', 'uncertain', 'conflict')", (event_id,))]
+            if any(previous.get('outcome') == 'hold_for_review' or
+                   state == 'conflict' and (previous.get('unsent') or previous.get('delivery') == 'none')
+                   for _, state, previous in deletions):
+                return False  # Keep the row inspectable; an unrelated absence cannot release a held command.
             removed = c.execute("DELETE FROM events WHERE id=? AND"
                                 " (sync_state='pending_delete' OR (sync_state='conflict' AND"
                                 " (SELECT kind FROM intents WHERE event_id=? AND state!='resolved' ORDER BY rowid DESC LIMIT 1)='delete'))"
@@ -631,9 +639,10 @@ class Store:
                                 (event_id, event_id, event_id, INTENT_DONE))
             if not removed.rowcount:
                 return False
-            c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=NULL, updated_at=?"
-                      " WHERE event_id=? AND kind='delete' AND state=?",
-                      (INTENT_DONE, json.dumps({"note": "provider confirmed absent"}), _ts(), event_id, INTENT_PENDING))
+            for intent_id, _, previous in deletions:
+                receipt = {'note': 'provider confirmed absent', **({'previous_result': previous} if previous else {})}
+                c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=NULL, updated_at=?"
+                          " WHERE id=?", (INTENT_DONE, json.dumps(receipt, ensure_ascii=False), _ts(), intent_id))
         return True
 
     def window(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
@@ -736,13 +745,15 @@ class Store:
                     if payload.get('source_connection'):
                         derived_rows.add(event_id)
                 result = {'note': reason, 'previous_result': previous}
-                if intent['state'] == 'uncertain' or (intent['state'] == 'pending' and intent.get('lease_owner') and intent.get('lease_until')):
+                # An attempt in flight, or an earlier write whose answer was lost, may have reached the provider.
+                if intent['state'] == 'uncertain' or local.unknown_delivery(intent) or (
+                        intent['state'] == 'pending' and intent.get('lease_owner') and intent.get('lease_until')):
                     unknown.update(value for value in [intent['event_id'], *payload.get('created_ids', []),
                                     *(row['id'] for row in payload.get('restore_rows', []))] if value)
                     if intent['state'] == 'uncertain':
                         continue
                     # Expiry is not a physical completion receipt. Keep the attempt tuple for its late result.
-                    result.update(kind='unknown', message='Account disconnected during a provider attempt; its outcome is not yet confirmed')
+                    result.update(kind='unknown', message='Account disconnected before a provider attempt was confirmed; its outcome is unknown')
                     with local._conn() as c:
                         c.execute("UPDATE intents SET state='uncertain', result_json=?, updated_at=? WHERE id=?", (json.dumps(result), _ts(), intent['id']))
                     local.update_event(intent['event_id'], {'sync_state': 'conflict'})
@@ -793,6 +804,32 @@ class Store:
                     # No provider ACK is invented for a retained local create or missing preimage.
                     local.update_event(event_id, {'sync_state': 'failed'})
         return cancelled
+
+    def hold_intents_for_account(self, account_id: str, reason: str = "sign-in status unconfirmed") -> int:
+        """Hold waiting commands for explicit review without sending, erasing or marking them resolved.
+        Preserves full payload_json; any in-flight or unknown-delivery intent stays distinct as uncertain."""
+        held = 0
+        with self.transaction() as local:
+            for intent in local.unsettled_account_intents(account_id):
+                if intent['state'] != INTENT_PENDING:
+                    continue
+                previous = json.loads(intent.get('result_json') or '{}')
+                unknown = local.unknown_delivery(intent)
+                if unknown or (intent.get('lease_owner') and intent.get('lease_until')):
+                    res = {'note': reason, 'previous_result': previous, 'kind': 'unknown',
+                           **(unknown or {'delivery': 'unknown'}),
+                           'message': 'Sign-in status could not be confirmed before a provider attempt settled; its outcome is unknown'}
+                    with local._conn() as c:
+                        c.execute("UPDATE intents SET state='uncertain', result_json=?, updated_at=? WHERE id=?",
+                                  (json.dumps(res, ensure_ascii=False, default=str), _ts(), intent['id']))
+                else:
+                    local.settle_intent(intent['id'], 'conflict', {
+                        'outcome': 'hold_for_review', 'unsent': True, 'delivery': 'none',
+                        'note': reason, 'previous_result': previous})
+                    held += 1
+                if intent.get('event_id'):
+                    local.update_event(intent['event_id'], {'sync_state': 'conflict'})
+        return held
 
     # ── intents (durable external operations) ───────────────────────
 
@@ -920,44 +957,96 @@ class Store:
                       " :lease_owner, :result_json, :created_at, :updated_at)", row)
         return row
 
-    def lease_intent(self, intent_id: str, owner: str, seconds: int = 90) -> Optional[Dict[str, Any]]:
-        """Claim one intent atomically; None when another actor holds a live lease or it is settled."""
+    def lease_intent(self, intent_id: str, owner: str, seconds: int = 90, *, only_due: bool = False) -> Optional[Dict[str, Any]]:
+        """Claim one intent atomically; None when another actor holds a live lease, it is settled, or (with only_due) not yet due."""
         now = now_utc()
+        lease_cutoff = iso_utc(now)
         until = iso_utc(now + timedelta(seconds=seconds))
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE intents SET lease_owner=?, lease_until=?, attempts=attempts+1, updated_at=?"
-                " WHERE id=? AND state=? AND (lease_until IS NULL OR lease_until < ?)",
-                (owner, until, iso_utc(now), intent_id, INTENT_PENDING, iso_utc(now)))
+        sql = ("UPDATE intents SET lease_owner=?, lease_until=?, attempts=attempts+1, updated_at=?"
+               " WHERE id=? AND state=? AND (lease_until IS NULL OR lease_until < ?)")
+        args: List[Any] = [owner, until, lease_cutoff, intent_id, INTENT_PENDING, lease_cutoff]
+        if only_due:
+            sql += " AND (next_attempt_at IS NULL OR next_attempt_at <= ?)"
+            args.append(now.isoformat(timespec="microseconds"))
+        with self._write_conn() as c:
+            cur = c.execute(sql, args)
             if cur.rowcount != 1:
                 return None
             row = c.execute("SELECT * FROM intents WHERE id=?", (intent_id,)).fetchone()
         return dict(row) if row else None
 
     def lease_due_intents(self, owner: str, limit: int = 20, seconds: int = 90) -> List[Dict[str, Any]]:
-        now = iso_utc(now_utc())
+        instant = now_utc()
+        # Leases use whole seconds. Due times may also have six fractional digits.
+        # In stored UTC text, '+' sorts before '.', so a whole-second deadline is due at .000000.
+        lease_cutoff = iso_utc(instant)
+        due_cutoff = instant.isoformat(timespec='microseconds')
         with self._conn() as c:
             rows = c.execute(
                 "SELECT id FROM intents WHERE state=? AND (lease_until IS NULL OR lease_until < ?)"
                 " AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY rowid LIMIT ?",
-                (INTENT_PENDING, now, now, limit)).fetchall()
+                (INTENT_PENDING, lease_cutoff, due_cutoff, limit)).fetchall()
         out = []
         for r in rows:
-            leased = self.lease_intent(r["id"], owner, seconds)
+            leased = self.lease_intent(r["id"], owner, seconds, only_due=True)
             if leased:
                 out.append(leased)
         return out
 
-    def park_intent(self, intent_id: str, seconds: int, note: str) -> None:
-        """Release a leased intent that only waits for another one: back to pending, the attempt is given back."""
-        ts = _ts()
+    def park_intent(self, intent_id: str, seconds: int, note: str, leased: Optional[Dict[str, Any]] = None) -> bool:
+        """Release a leased intent that only waits for another one: back to pending, the attempt is given back.
+
+        One write transaction parks only a pending row still held by ``leased``: an outcome recorded meanwhile
+        (a disconnect's uncertain) stays, and so does an earlier write's unknown delivery."""
+        with self._write_conn() as c:
+            row = c.execute("SELECT * FROM intents WHERE id=?", (intent_id,)).fetchone()
+            if row is None or row['state'] != INTENT_PENDING or leased is not None and any(
+                    row[k] != leased[k] for k in ('lease_owner', 'lease_until', 'attempts')):
+                return False
+            c.execute("UPDATE intents SET attempts=MAX(attempts-1, 0), lease_until=NULL, lease_owner='', next_attempt_at=?, result_json=?, updated_at=?"
+                      " WHERE id=?", ((now_utc() + timedelta(seconds=seconds)).isoformat(timespec='microseconds'),
+                                      json.dumps({"note": note, **self.unknown_delivery(row)}), _ts(), intent_id))
+        return True
+
+    @staticmethod
+    def unknown_delivery(intent) -> Dict[str, str]:
+        """An earlier write of this intent may have taken effect and nothing has settled that yet: the recorded fact,
+        or a network/server failure written before that fact existed without proof that it was unsent. A failed
+        creation an owner edit put back in the queue keeps that record one level down, under ``previous``."""
+        result = json.loads(intent['result_json'] or '{}')
+        for record in (result, result.get('previous') or {}):
+            if record.get('delivery') == 'unknown' or ('delivery' not in record and record.get('kind') in ('network', 'server')
+                                                       and not record.get('unsent')):
+                return {'delivery': 'unknown', 'delivery_error': record.get('delivery_error') or record.get('error') or ''}
+        return {}
+
+    @staticmethod
+    def needs_reconciliation(intent) -> bool:
+        return (intent['state'] in ('conflict', 'uncertain') or
+                (intent['state'] == 'pending' and intent['kind'] in ('update', 'delete', 'rsvp')
+                 and bool(Store.unknown_delivery(intent))))
+
+    def disputed_events(self, calendar_ids) -> List[str]:
+        """Events whose provider state is in doubt for availability: a conflict, an uncertain write, or a queued write
+        that carries an unknown delivery (unknown_delivery's rule in SQL, on the record and under its ``previous``)."""
+        owed = " OR ".join(
+            f"json_extract(i.result_json,'{at}.delivery')='unknown' OR json_extract(i.result_json,'{at}.delivery') IS NULL"
+            f" AND json_extract(i.result_json,'{at}.kind') IN ('network','server')"
+            f" AND NOT COALESCE(json_extract(i.result_json,'{at}.unsent'), 0)" for at in ('$', '$.previous'))
+        ids = tuple(dict.fromkeys(calendar_ids or ()))
+        if not ids:
+            return []
+        marks = ','.join('?' for _ in ids)
         with self._conn() as c:
-            c.execute("UPDATE intents SET state=?, attempts=MAX(attempts-1, 0), lease_until=NULL, lease_owner='', next_attempt_at=?, result_json=?, updated_at=?"
-                      " WHERE id=?", (INTENT_PENDING, iso_utc(now_utc() + timedelta(seconds=seconds)), json.dumps({"note": note}), ts, intent_id))
+            rows = c.execute(
+                f"SELECT e.id FROM events e WHERE e.calendar_id IN ({marks}) AND"
+                " (e.sync_state='conflict' OR EXISTS (SELECT 1 FROM intents i"
+                " WHERE i.event_id=e.id AND (i.state='uncertain' OR i.state='pending' AND (" + owed + "))))", ids).fetchall()
+        return [row['id'] for row in rows]
 
     def settle_intent(self, intent_id: str, state: str, result: Optional[Dict[str, Any]] = None, retry_in_sec: Optional[int] = None) -> None:
         ts = _ts()
-        next_at = iso_utc(now_utc() + timedelta(seconds=retry_in_sec)) if retry_in_sec else None
+        next_at = (now_utc() + timedelta(seconds=retry_in_sec)).isoformat(timespec='microseconds') if retry_in_sec else None
         with self._conn() as c:
             c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=?, updated_at=? WHERE id=?",
                       (state, json.dumps(result or {}, ensure_ascii=False, default=str), next_at, ts, intent_id))

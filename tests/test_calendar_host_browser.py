@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = str(ROOT / 'skills/calendar/tests')
 SECRET = 'S3cret-pass-123'
 LEASE = {'token': 'lease', 'base_url': '/api/widget-resources/lease/', 'expires_in': 120, 'renew_after': 40}
+HOST_TOKEN = 'fixture-host-service-token'
 HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 <style>body{margin:0}iframe{width:100%;height:__HEIGHT__px;border:0}</style></head>
 <body><section><div class="widgets-card-status"></div><div id="mount"></div></section>
@@ -86,7 +87,7 @@ def encode(body):
 @contextmanager
 def serve(core, routes_api):
     """The page, the lease controls and one skill's routes on a loopback port."""
-    state = {'posts': [], 'reads': [], 'responses': [], 'errors': [], 'disconnects': []}
+    state = {'posts': [], 'reads': [], 'responses': [], 'errors': [], 'disconnects': [], 'identity': []}
     request = request_class()
 
     class Handler(BaseHTTPRequestHandler):
@@ -116,6 +117,11 @@ def serve(core, routes_api):
             raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
             if url.path.startswith('/api/widgets/asset-leases'):
                 return self.send({'ok': True} if url.path.endswith('/revoke') else LEASE)
+            if self.command == 'GET' and url.path == '/identity':
+                if self.headers.get('X-Skill-Token') != HOST_TOKEN:
+                    return self.send({'ok': False, 'error': 'skill token refused'}, status=403)
+                state['identity'].append((self.command, url.path))
+                return self.send({'ok': True, 'name': 'Ouroboros', 'notify_version': 1})
             if url.path == '/':
                 return self.send(HOST.replace('__HEIGHT__', parse_qs(url.query).get('height', ['720'])[-1]), 'text/html')
             for mount in ('/static/', '/onboarding/static/'):   # the core serves one builtin tree under both
@@ -182,7 +188,7 @@ def calendar_server():
 
 
 @pytest.fixture
-def skill_host():
+def skill_host(monkeypatch):
     """The real routes over a fresh store whose Google client is configured; nothing is connected yet."""
     core = core_root()
     sys.path.insert(0, TESTS)
@@ -196,6 +202,8 @@ def skill_host():
     routes.register_routes(api, lambda: tools.Context(fake))   # the runtime builds a fresh context for every route call
     try:
         with serve(core, api) as (state, url, port):
+            monkeypatch.setenv('HOST_SERVICE_URL', url)
+            monkeypatch.setenv('HOST_SERVICE_TOKEN', HOST_TOKEN)
             fake.get_runtime_info = lambda: {'server_port': port}   # the begin route probes this host's own return page
             yield ctx, state, url
     finally:
@@ -422,6 +430,7 @@ def test_google_sign_in_returns_through_the_host_page_and_only_then_counts(skill
             expect(frame.locator('.msg.ok', has_text='отключён')).to_be_visible()
             expect(row).to_have_count(0)
             assert credentials.load_tokens(ctx.state_dir, '') == {}   # local disconnect dropped the stored tokens
+            assert state['identity'] and set(state['identity']) == {('GET', '/identity')}
             assert context.outside == []   # nothing but loopback and the consent stub was requested
         finally:
             browser.close()

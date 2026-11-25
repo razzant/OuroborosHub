@@ -26,7 +26,7 @@ from model import (
     AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_CALDAV, account_id as make_account_id, calendar_id as make_calendar_id,
     get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, normalize_rrule_until, has_recurrence, event_status,
 )
-from ops import ProviderError
+from ops import ProviderError, never_connected
 from xml.sax.saxutils import escape
 
 YANDEX_BASE = "https://caldav.yandex.ru"
@@ -76,7 +76,7 @@ def parse_yandex_accounts(raw: Any) -> Tuple[List[Dict[str, str]], str]:
 class Providers:
     """Resolve an adapter for an account id from the secrets both processes were given."""
 
-    def __init__(self, secrets: Dict[str, Any], state_dir: str):
+    def __init__(self, secrets: Dict[str, Any], state_dir: str, host: Any = None):
         self.secrets = dict(secrets or {})
         self.state_dir = state_dir
         self.yandex_accounts, self.yandex_error = parse_yandex_accounts(self.secrets.get("YANDEX_CALDAV_ACCOUNTS"))
@@ -84,6 +84,7 @@ class Providers:
         self.errors: Dict[str, str] = {}   # account_id → why no adapter (wrong key, missing token…), for honest statuses
         self.saved_accounts = {}
         self.vault_error = ''
+        self.google_host = {'host': host} if host is not None else None   # google_host's session: the Host Service client and store, on first use
         try:
             from credentials import load_tokens
             self.saved_accounts = load_tokens(state_dir, str(self.secrets.get('CALENDAR_TOKEN_KEY') or ''))
@@ -91,7 +92,8 @@ class Providers:
             self.vault_error = exc.message
 
     def adapter_for(self, account_id: str):
-        if account_id in self._cache:
+        google = account_id.startswith(PROVIDER_GOOGLE + ':')
+        if not google and account_id in self._cache:
             return self._cache[account_id]
         adapter = None
         saved = self.saved_accounts.get(account_id) or {}
@@ -110,15 +112,15 @@ class Providers:
                     if acc["login"] == login:
                         adapter = YandexAdapter(login, acc["app_password"])
                         break
-            elif account_id.startswith(PROVIDER_GOOGLE + ":"):
-                from providers_google import GoogleAdapter
-                if self.vault_error:
-                    raise ProviderError('auth', self.vault_error)
-                adapter = GoogleAdapter.for_account(self.secrets, self.state_dir, account_id.split(":", 1)[1], tokens=self.saved_accounts)
+            elif google:
+                import google_host
+                adapter = google_host.adapter_for(self, account_id.split(':', 1)[1], cached=self._cache.get(account_id))
         except ProviderError as exc:
             self.errors[account_id] = exc.message
         except Exception as exc:
             self.errors[account_id] = f"{type(exc).__name__}: {exc}"
+        if adapter is not None:
+            self.errors.pop(account_id, None)
         if adapter is None and account_id != PROVIDER_LOCAL and account_id not in self.errors:
             self.errors[account_id] = self.vault_error or 'No saved credentials for this account; reconnect it to restore access.'
         self._cache[account_id] = adapter
@@ -517,7 +519,7 @@ def _check_yandex_address(url: str) -> None:
     except ValueError:
         allowed = False
     if not allowed:
-        raise ProviderError('network', 'адрес вне HTTPS caldav.yandex.ru; запрос не отправлен')
+        raise ProviderError('network', 'адрес вне HTTPS caldav.yandex.ru; запрос не отправлен', unsent=True)
 
 
 class _YandexRedirect(urllib.request.HTTPRedirectHandler):
@@ -565,6 +567,7 @@ class CalDAVAdapter:
         self.credential_key = self.account_id.split(':', 1)[-1]
         self.home = home_url or self.server_url
         self._discovered = bool(home_url)
+        self._sent = False   # no write of the current operation may have taken effect yet
         self._check_address(self.home)
         token = base64.b64encode(f"{self.login}:{app_password}".encode("utf-8")).decode("ascii")
         self._auth = f"Basic {token}"
@@ -573,10 +576,14 @@ class CalDAVAdapter:
         parsed = urllib.parse.urlsplit(url)
         origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
         if origin != self._origin or parsed.username or parsed.password:
-            raise ProviderError('network', 'CalDAV credentials cannot leave the configured server origin')
+            raise ProviderError('network', 'CalDAV credentials cannot leave the configured server origin', unsent=True)
 
     def _redirect(self):
         return _CalDAVRedirect(self._check_address)
+
+    def begin_operation(self) -> None:
+        """The start of one outgoing operation: only its own writes can leave its outcome unknown."""
+        self._sent = False
 
     def _discover_home(self):
         body = ('<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
@@ -605,10 +612,15 @@ class CalDAVAdapter:
         req.add_header("User-Agent", USER_AGENT)
         for k, v in (headers or {}).items():
             req.add_header(k, v)
+        sent_before = self._sent
+        if method not in ('GET', 'HEAD', 'PROPFIND', 'REPORT'):
+            self._sent = True   # a write leaves: until the server refuses it, it may take effect
         try:
             with urllib.request.build_opener(self._redirect()).open(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                self._sent = sent_before   # a refusal applied nothing
             text = ""
             try:
                 text = exc.read().decode("utf-8", "replace")
@@ -628,11 +640,13 @@ class CalDAVAdapter:
                 raise ProviderError("server", f"сервер CalDAV временно не отвечает ({exc.code})", exc.code)
             raise ProviderError("http", f"HTTP {exc.code} от CalDAV: {text[:200]}", exc.code)
         except urllib.error.URLError as exc:
-            raise ProviderError("network", f"нет связи с CalDAV: {exc.reason}")
+            if never_connected(exc):
+                self._sent = sent_before   # the connection never formed: nothing of this request left
+            raise ProviderError("network", f"нет связи с CalDAV: {exc.reason}", unsent=not self._sent)
         except TimeoutError:
-            raise ProviderError("network", "таймаут при обращении к CalDAV")
+            raise ProviderError("network", "таймаут при обращении к CalDAV", unsent=not self._sent)
         except (http.client.HTTPException, OSError) as exc:
-            raise ProviderError('network', f'CalDAV connection interrupted: {type(exc).__name__}') from exc
+            raise ProviderError('network', f'CalDAV connection interrupted: {type(exc).__name__}', unsent=not self._sent) from exc
 
     @staticmethod
     def _xml(text: str, what: str) -> ET.Element:

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, own_reminders, parse_stored
 from model import tz_name as zone_name, normalize_rrule_until, event_status
-from ops import ProviderError, created_content_matches
+from ops import ProviderError, created_content_matches, never_connected
 from credentials import (
     TOKENS_FILE as TOKENS_FILE, SALT_FILE as SALT_FILE, KEY_FILE as KEY_FILE,
     load_tokens, save_tokens as save_tokens, _mutate_tokens, _write_tokens as _write_tokens, _fernet as _fernet,
@@ -75,7 +75,7 @@ def start_auth(store, secrets: Dict[str, Any], redirect_uri: str) -> Dict[str, A
     return {"auth_url": AUTH_URL + "?" + urllib.parse.urlencode(params), "state": state, "redirect_uri": redirect_uri}
 
 
-def finish_auth(store, secrets: Dict[str, Any], state_dir: str, code: str, state: str) -> Dict[str, Any]:
+def finish_auth(store, secrets: Dict[str, Any], state_dir: str, code: str, state: str, *, choose_key=None, can_keep_refresh=None, before_vault=None) -> Dict[str, Any]:
     pending = store.pop_setting(PENDING_PREFIX + state)
     if not pending:
         raise ProviderError("auth", "неизвестный или устаревший state в ответе Google — начни подключение заново")
@@ -96,24 +96,42 @@ def finish_auth(store, secrets: Dict[str, Any], state_dir: str, code: str, state
     if not email:
         raise ProviderError("auth", "Google не подтвердил личность аккаунта")
     subject = (getattr(adapter, '_identity', {}) or {}).get('sub')
+    passphrase = str(secrets.get("CALENDAR_TOKEN_KEY") or "")
     connected = {}
+    def _pick(tokens):
+        if choose_key is not None:
+            return choose_key(store, tokens, subject, email)
+        key = next((k for k, value in tokens.items() if subject and value.get('subject') == subject), email)
+        return ('oidc:' + subject) if subject and tokens.get(key, {}).get('subject') not in (None, subject) else key
     def connect(tokens):
-        key = next((key for key, value in tokens.items() if subject and value.get('subject') == subject), email)
-        if subject and tokens.get(key, {}).get('subject') not in (None, subject):
-            key = 'oidc:' + subject
+        key = _pick(tokens)
         prev = tokens.get(key) or {}
+        if before_vault is not None and not before_vault(store, key, prev, commit=False):
+            return False
         if prev.get('client_id') not in (None, client_id):
             prev = {}  # a refresh token belongs to its issuing OAuth client
+        if prev and can_keep_refresh is not None and not can_keep_refresh(store, key, prev, subject):
+            prev = {}
+        generation = uuid.uuid4().hex
         tokens[key] = {"access_token": data["access_token"], "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
                          "expires_at": iso_utc(now_utc() + timedelta(seconds=int(data.get("expires_in") or 3600))),
                          "scope": data.get("scope", ""), 'email': email, 'subject': subject, 'provider': PROVIDER_GOOGLE,
-                         'client_id': client_id, 'client_secret': client_secret, "generation": uuid.uuid4().hex}
+                         'client_id': client_id, 'client_secret': client_secret, "generation": generation}
         connected['key'] = key
+        connected['generation'] = generation
         connected['offline_access'] = bool(tokens[key].get('refresh_token'))
         return True
-    _mutate_tokens(state_dir, str(secrets.get("CALENDAR_TOKEN_KEY") or ""), connect)
+    for _ in range(3):
+        if before_vault is not None:
+            snap = load_tokens(state_dir, passphrase)
+            pre_key = _pick(snap)
+            before_vault(store, pre_key, snap.get(pre_key) or {}, commit=True)
+        if _mutate_tokens(state_dir, passphrase, connect):
+            break
+    else:
+        raise ProviderError("retry", "Очередь аккаунта изменилась во время сохранения входа; начни вход заново")
     return {"email": email, "account_id": make_account_id(PROVIDER_GOOGLE, connected['key']),
-            'offline_access': connected['offline_access']}
+            'offline_access': connected['offline_access'], 'generation': connected['generation']}
 
 
 def cancel_auth(store, state):
@@ -121,10 +139,14 @@ def cancel_auth(store, state):
         raise ProviderError('auth', 'Неизвестный или уже завершённый OAuth state')
 
 
-def forget_account(state_dir: str, passphrase: str, email: str) -> bool:
-    """Drop the stored tokens of one account (disconnect): reload_google must not resurrect it."""
+_ANY_GENERATION = object()
+
+
+def forget_account(state_dir: str, passphrase: str, email: str, *, expected_generation=_ANY_GENERATION) -> bool:
+    """Drop the selected credentials, not a later consent saved after withdrawal committed."""
     def forget(tokens):
-        if email not in tokens:
+        if email not in tokens or (expected_generation is not _ANY_GENERATION
+                                   and tokens[email].get('generation') != expected_generation):
             return False
         del tokens[email]
         return True
@@ -179,6 +201,12 @@ class GoogleAdapter:
         self.access_token, self.refresh_token, self.expires_at = access_token, refresh_token, expires_at
         self.client_id, self.client_secret = client_id, client_secret
         self._persist = persist   # callable(tokens dict) or None
+        self._sent = False   # no write of the current operation may have taken effect at Calendar yet
+        self._legacy_guard = None   # set by the resolver for a local credential copy
+
+    def begin_operation(self) -> None:
+        """The start of one outgoing operation: a token refusal is unsent only while no write of it may have taken effect."""
+        self._sent = False
 
     @classmethod
     def for_account(cls, secrets: Dict[str, Any], state_dir: str, email: str, *, tokens=None) -> Optional["GoogleAdapter"]:
@@ -217,10 +245,33 @@ class GoogleAdapter:
         if self._persist:
             self._persist({"access_token": self.access_token, "expires_at": iso_utc(self.expires_at)})
 
+    def _prepare_write(self) -> bool:
+        return False
+
+    def _refresh_for_request(self, *, rejected: Optional[str] = None, for_write: bool = False):
+        if self._legacy_guard is not None:
+            self._legacy_guard(self._sent)
+        self._rejected_token = rejected
+        self._for_write = for_write
+        try:
+            self._refresh()
+        except ProviderError as exc:
+            if exc.kind in ('network', 'server') or exc.status == 429:
+                # Token I/O is separate from Calendar I/O. Preserve the operation's existing send boundary.
+                kind = 'server' if exc.status == 429 else exc.kind
+                raise ProviderError('uncertain' if self._sent else kind, exc.message, exc.status,
+                                    unsent=not self._sent, reason=exc.reason) from None
+            raise
+        finally:
+            self._rejected_token = None
+            self._for_write = False
+
     def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None,
                  headers: Optional[Dict[str, str]] = None, _retry: bool = True) -> Tuple[int, Dict[str, str], Dict[str, Any]]:
-        if not self.access_token or now_utc() >= self.expires_at - timedelta(seconds=60):
-            self._refresh()
+        is_write = method not in ('GET', 'HEAD')
+        prepared = self._prepare_write() if is_write and _retry else False
+        if not prepared and (not self.access_token or now_utc() >= self.expires_at - timedelta(seconds=60)):
+            self._refresh_for_request(for_write=is_write)
         url = API + path
         if params:
             url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")}, doseq=True)
@@ -232,11 +283,22 @@ class GoogleAdapter:
             req.add_header("Content-Type", "application/json")
         for k, v in (headers or {}).items():
             req.add_header(k, v)
+        if self._legacy_guard is not None:
+            self._legacy_guard(self._sent)
+        sent_before = self._sent
+        if method not in ('GET', 'HEAD'):
+            self._sent = True   # a write leaves: until Google refuses it, it may take effect
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 raw = resp.read().decode("utf-8", "replace")
-                return resp.status, {k.lower(): v for k, v in resp.headers.items()}, (json.loads(raw) if raw.strip() else {})
+                try:
+                    data = json.loads(raw) if raw.strip() else {}
+                except ValueError:   # an accepted request whose answer cannot be read was not refused
+                    raise ProviderError('network', 'ответ Google не удалось прочитать', resp.status, unsent=not self._sent) from None
+                return resp.status, {k.lower(): v for k, v in resp.headers.items()}, data
         except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                self._sent = sent_before   # a refusal, the first 401 included, applied nothing
             text = ""
             try:
                 text = exc.read().decode("utf-8", "replace")
@@ -249,12 +311,13 @@ class GoogleAdapter:
             except (ValueError, AttributeError):
                 pass
             if exc.code == 401 and _retry:
-                self._refresh()
+                self._refresh_for_request(rejected=self.access_token or None, for_write=is_write)
                 return self._request(method, path, params, body, headers, _retry=False)
             if exc.code == 401:
                 raise ProviderError("auth", "Google не принял токен даже после обновления — переподключи аккаунт", 401)
             if exc.code == 403 and reason in ("rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"):
-                raise ProviderError("server", f"лимит Google Calendar API ({reason}); повтор позже", 403)
+                raise ProviderError("server", f"лимит Google Calendar API ({reason}); повтор позже", 403,
+                                    unsent=not self._sent)
             if exc.code == 403:
                 raise ProviderError("forbidden", f"Google отказал в доступе ({reason or 403})", 403)
             if exc.code == 404:
@@ -264,14 +327,19 @@ class GoogleAdapter:
             if exc.code == 412:
                 raise ProviderError("conflict", "событие изменилось в Google (412): перечитай и повтори", 412)
             if exc.code == 429 or exc.code >= 500:
-                raise ProviderError("server", f"Google временно не отвечает ({exc.code})", exc.code)
+                # 429 refused this request; a 5xx leaves a write's outcome unknown.
+                # Neither response erases a write from an earlier step of this operation.
+                raise ProviderError("server", f"Google временно не отвечает ({exc.code})", exc.code,
+                                    unsent=not self._sent)
             raise ProviderError("http", f"Google Calendar API: HTTP {exc.code} {reason} {text[:160]}", exc.code)
         except urllib.error.URLError as exc:
-            raise ProviderError("network", f"нет связи с Google: {exc.reason}")
+            if never_connected(exc):
+                self._sent = sent_before   # the connection never formed: nothing of this request left
+            raise ProviderError("network", f"нет связи с Google: {exc.reason}", unsent=not self._sent)
         except TimeoutError:
-            raise ProviderError("network", "таймаут Google Calendar API")
+            raise ProviderError("network", "таймаут Google Calendar API", unsent=not self._sent)
         except (http.client.HTTPException, OSError) as exc:
-            raise ProviderError('network', f'Соединение с Google Calendar прервано: {type(exc).__name__}') from exc
+            raise ProviderError('network', f'Соединение с Google Calendar прервано: {type(exc).__name__}', unsent=not self._sent) from exc
 
     # identity / calendars
     def primary_email(self) -> str:

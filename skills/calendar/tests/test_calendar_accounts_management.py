@@ -99,7 +99,7 @@ class AccountTests(unittest.TestCase):
     def test_denied_consent_closes_flow_and_remote_prefix_is_preserved(self):
         api = RouteAPI()
         routes.register_routes(api, lambda: self.ctx)
-        with patch.object(accounts.urllib.request.OpenerDirector, 'open', return_value=Response()):
+        with patch('host_sign_in.HostSignIn._call', return_value={'ok': True}), patch.object(accounts.urllib.request.OpenerDirector, 'open', return_value=Response()):
             reply = asyncio.run(api.routes['oauth/begin'](Request({'public_base_url': 'https://host.example.test/my-ouro'})))
         begun = json.loads(reply.body)
         self.assertEqual(begun['redirect_uri'], 'https://host.example.test/my-ouro/onboarding/static/provider-return.html')
@@ -208,6 +208,39 @@ class ManagementTests(unittest.TestCase):
         new_event = json.loads(tools.cal_create(self.ctx, title='New event', start='2026-11-04T11:00:00+00:00',
                                                calendars=new['result']['id'], confirm=True))
         self.assertEqual(new_event['status'], 'created', new_event)
+
+    def test_google_collection_receipta_keep_quota_refusals_distinct_from_unknown_outcomes(self):
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        class TwoStepAdapter(google.GoogleAdapter):
+            def create_calendar(inner, changes):
+                super().create_calendar(changes)
+                return super().create_calendar(changes)
+
+        for label, code, reason, earlier_write, expected in (
+                ('quota-403', 403, 'rateLimitExceeded', False, 'failed'),
+                ('quota-429', 429, '', False, 'failed'),
+                ('response-lost', None, '', False, 'uncertain'),
+                ('quota-after-write', 429, '', True, 'uncertain')):
+            with self.subTest(label=label):
+                adapter_type = TwoStepAdapter if earlier_write else google.GoogleAdapter
+                adapter = adapter_type('person@example.test', 'fixture-access', '',
+                                       now_utc() + timedelta(hours=1), 'client', '', None)
+                self.ctx.providers = OneAdapterProviders(adapter)
+                failure = (HTTPError(google.API + '/calendars', code, '', {}, BytesIO(json.dumps({
+                    'error': {'errors': [{'reason': reason}]}}).encode())) if code else TimeoutError())
+                replies = [Response({'id': 'first'})] if earlier_write else []
+                args = dict(action='create', account_id=self.account, changes={'name': 'Test'},
+                            request_id=label, confirm=True)
+                with patch.object(google.urllib.request, 'urlopen', side_effect=[*replies, failure]) as opened:
+                    receipt = json.loads(management.cal_manage(self.ctx, **args))
+                    self.assertEqual(json.loads(management.cal_manage(self.ctx, **args)), receipt)
+                    self.assertEqual(json.loads(management.cal_calendars(self.ctx, request_id=label)), receipt)
+                    self.assertEqual(opened.call_count, 1 + int(earlier_write))
+                self.assertEqual(receipt['status'], expected)
+                self.assertEqual(receipt['result']['unsent'], expected == 'failed')
+                self.assertFalse(receipt['result']['automatic_retry'])
 
     def test_google_sharing_notifications_are_explicit(self):
         adapter = google.GoogleAdapter('person@example.test', 'access', '', now_utc() + timedelta(hours=1), 'client', '', None)

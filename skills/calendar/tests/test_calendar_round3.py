@@ -444,10 +444,11 @@ class MixedRsvpAndDisconnectRound3Tests(unittest.TestCase):
         conflict = ctx.store.add_intent("delete", account_id, calendar_id, event["id"], {})
         ctx.store.settle_intent(conflict["id"], "conflict", {"error": "conflict"})
 
-        disconnected = json.loads(
-            tools.cal_settings(ctx, action="disconnect", calendar_id=account_id, confirm=True)
-        )
-        reloaded = tools.reload_google(ctx)
+        with patch('host_sign_in.HostSignIn._call', return_value={'ok': True}):
+            disconnected = json.loads(
+                tools.cal_settings(ctx, action="disconnect", calendar_id=account_id, confirm=True)
+            )
+            reloaded = tools.reload_google(ctx)
         self.assertEqual(disconnected["cancelled_intents"], 2)
         self.assertTrue(disconnected["tokens_dropped"])
         self.assertEqual(ctx.store.open_intents(), [])

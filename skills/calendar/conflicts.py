@@ -9,7 +9,7 @@ import json
 import ops
 import links
 from model import civil_in_basis, event_public, new_id, now_utc, parse_stored
-from store import EVENT_COLUMNS
+from store import EVENT_COLUMNS, Store
 
 _UNFINISHED = ('pending', 'conflict', 'failed', 'uncertain')
 _PROVIDER_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz', 'time_kind',
@@ -28,7 +28,7 @@ def _snapshot(c, event_id):
         return None
     row = dict(found)
     selected = [dict(i) for i in c.execute('SELECT * FROM intents WHERE event_id=? ORDER BY rowid', (event_id,))]
-    anchor = next((i for i in selected if i['state'] in ('conflict', 'uncertain')), None)
+    anchor = next((i for i in selected if Store.needs_reconciliation(i)), None)
     if anchor is None:
         anchor = next((i for i in reversed(selected) if i['state'] in _UNFINISHED), None)
     op_id = _payload(anchor).get('op_id') if anchor else None
@@ -83,8 +83,8 @@ def _meaning(state):
     return {**state,
             'event': {k: v for k, v in state['event'].items() if k != 'updated_at'},
             'rows': [{k: v for k, v in r.items() if k != 'updated_at'} for r in state['rows']],
-            'intents': [{k: i[k] for k in ('id', 'kind', 'event_id', 'scope', 'payload_json', 'expected_etag', 'state')}
-                        for i in state['intents']]}
+            'intents': [{**{k: i[k] for k in ('id', 'kind', 'event_id', 'scope', 'payload_json', 'expected_etag', 'state')},
+                         'unknown_delivery': bool(Store.unknown_delivery(i))} for i in state['intents']]}
 
 
 def _read_provider_state(adapter, calendar, row, master, payload):
@@ -121,7 +121,7 @@ def _load(ctx, event_id):
         intent = ctx.store.get_intent(iid)
         if not intent:
             continue
-        if intent['state'] in ('conflict', 'uncertain') and intent['event_id'] != row['id']:
+        if Store.needs_reconciliation(intent) and intent['event_id'] != row['id']:
             return _load(ctx, intent['event_id'])
         p = _payload(intent)
         queue.extend(p.get('prior_intent_ids', []))
@@ -136,17 +136,17 @@ def _load(ctx, event_id):
     if state is None:
         return None, None, {'status': 'not_found'}
     templates = _templates(state)
-    if row.get('sync_state') != 'conflict' and not any(i['state'] in ('conflict', 'uncertain') for i in templates):
+    if state['event'].get('sync_state') != 'conflict' and not any(Store.needs_reconciliation(i) for i in templates):
         return state, None, {'status': 'not_conflicted'}
     # A failed dependent points to the actionable head, not a nonexistent remote segment.
-    head = next((i for i in templates if i['state'] in ('conflict', 'uncertain')), None)
+    head = next((i for i in templates if Store.needs_reconciliation(i)), None)
     if head and head['event_id'] != row['id']:
         return _load(ctx, head['event_id'])
     row = state['event']
     affected = {i['event_id'] for i in templates}
     independent = [i for i in state['intents'] if i['state'] in _UNFINISHED and i not in templates]
     body = {'status': 'conflict', 'event_id': row['id'], 'local': event_public(row, ctx.tz, compact=False),
-            'delivery_outcome_unknown': any(i['state'] == 'uncertain' for i in templates),
+            'delivery_outcome_unknown': any(i['state'] == 'uncertain' or Store.unknown_delivery(i) for i in templates),
             'operations': [{'id': i['id'], 'event_id': i['event_id'], 'kind': i['kind'], 'state': i['state']}
                            for i in templates],
             'affected_events': [event_public(r, ctx.tz, compact=False) for r in state['rows'] if r['id'] in affected and r['id'] != row['id']],
@@ -157,7 +157,7 @@ def _load(ctx, event_id):
     if adapter is None:
         return state, None, {**body, 'status': 'unavailable', 'message': 'аккаунт не подключён; выбор не применён'}
     master = next((r for r in state['rows'] if r['id'] == row.get('master_id')), {})
-    chosen = next((i for i in templates if i['event_id'] == row['id'] and i['state'] in ('conflict', 'uncertain')), None)
+    chosen = next((i for i in templates if i['event_id'] == row['id'] and Store.needs_reconciliation(i)), None)
     try:
         current = _read_provider_state(adapter, cal, row, master, _payload(chosen) if chosen else {})
     except ops.ProviderError as exc:

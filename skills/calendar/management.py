@@ -133,6 +133,10 @@ def cal_manage(ctx, action='', account_id='', calendar_id='', changes=None, shar
     adapter = ctx.providers.adapter_for(account_id) if account['provider'] != PROVIDER_LOCAL else None
     if account['provider'] != PROVIDER_LOCAL and adapter is None:
         return bounded_result({'status': 'not_connected', 'message': ctx.providers.errors.get(account_id, 'Account credentials unavailable')})
+    if adapter is not None:
+        begin = getattr(adapter, 'begin_operation', None)   # one outgoing operation: unsent marks stay honest
+        if callable(begin):
+            begin()
     rid = str(request_id or new_id('calendar_op'))
     with ctx.store.transaction() as view:
         previous = view.get_intent(rid)
@@ -163,8 +167,8 @@ def cal_manage(ctx, action='', account_id='', calendar_id='', changes=None, shar
             view.settle_intent(rid, 'done', result)
         return bounded_result({'status': 'done', 'request_id': rid, 'result': result})
     except ProviderError as exc:
-        state = 'uncertain' if exc.kind in ('network', 'server', 'retry', 'parse', 'partial') else 'failed'
-        result = {'kind': exc.kind, 'message': exc.message, 'automatic_retry': False}
+        state = 'uncertain' if not exc.unsent and exc.kind in ('network', 'server', 'retry', 'parse', 'partial', 'uncertain') else 'failed'
+        result = {'kind': exc.kind, 'message': exc.message, 'automatic_retry': False, 'unsent': exc.unsent}
     except Exception as exc:
         state, result = 'uncertain', {'message': f'Outcome not recorded: {type(exc).__name__}', 'automatic_retry': False}
     ctx.store.settle_intent(rid, state, result)

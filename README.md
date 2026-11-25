@@ -310,16 +310,19 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/tel
 
 Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
 mail, Calendar, Smart Lists, the dashboard widgets, GitHub and the Presence consumers of
-Freshdesk, Slack and Telegram) runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA`
-at the top of `.github/workflows/catalog-check.yml`, checked out once per job; the catalog job
-checks every hosted release and connector against the same commit. With one pin every seam
-between a hosted skill and the core is tested on the same reproducible core, and no suite stays
-behind on an older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml`
-workflow, whether a checkout or a run step's git command takes it. That check is a lint against an
-accidental second pin, not a boundary: a step that moves the checked-out core with a git command run
-from `working-directory: core` or after a shell `cd` is not seen by it. To move the pin, open a PR that
-changes only that value. The workflow is shared, so that PR runs every suite on the new core, and it
-merges when all of them pass. A suite that fails there is fixed in the hub when the skill or its test
+Freshdesk, Slack and Telegram) runs against `OUROBOROS_CORE_SHA` at the top of
+`.github/workflows/catalog-check.yml` in `core`, and the catalog job checks every hosted release
+and connector against that same commit. The one temporary exception is `calendar-skill`, which
+also checks out `OUROBOROS_SIGN_IN_CORE_SHA` into `sign-in-core` for its service sign-in check
+(`tests/calendar_sign_in/test_host_sign_in_core.py`, via `OUROBOROS_SIGN_IN_CORE_ROOT`) while
+`OUROBOROS_CORE_SHA` stays on the older core. With this rule every other seam is tested on one
+reproducible core; `tests/test_workflows.py` fails on any other second pin, extra core checkout,
+git command moving `core` or `sign-in-core`, or matching pins once `OUROBOROS_CORE_SHA` catches up.
+That check is a lint against an accidental second pin, not a boundary: a step that moves a checked-out
+core with a git command run from `working-directory` or after a shell `cd` is not seen by it. To move
+`OUROBOROS_CORE_SHA`, open a PR that changes only that value (removing `OUROBOROS_SIGN_IN_CORE_SHA`
+once it is no longer needed). The workflow is shared, so that PR runs every suite on the new core, and
+it merges when all of them pass. A suite that fails there is fixed in the hub when the skill or its test
 is wrong against the core's documented contract, and reported to the core when the core broke it.
 
 `scripts/ci_checks.py run <suite>` refuses a suite whose core is not named, and puts that core first
@@ -329,7 +332,7 @@ core functions those tests import (`core_imports`): a named core without one, or
 resolves outside the named checkout, stops the suite instead of letting the check skip. Locally each
 variable a suite names is checked on its own, so two of them (Telegram User Session's Presence and
 theme roots, or Memory Atlas's `ATLAS_CORE` beside `ATLAS_HOST_ROOT`) can name different checkouts;
-CI names one checkout per job.
+CI names one checkout per job except `calendar-skill`'s separate `sign-in-core` step.
 
 The A2A job runs on Linux and uses libseccomp before importing the skill or its
 test dependencies. It selects individual ordinary letter exchanges and the 1.5
@@ -362,8 +365,8 @@ bridge; without them it fails (`TRANSPORT_WIDGET_REQUIRE_BROWSERS`). For local b
 calendar checks, which do not qualify its widget or sign-in return:
 
 ```bash
-python -m pip install icalendar python-dateutil cryptography pytest
-PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calendar/tests --ignore=skills/calendar/tests/test_widget_browser.py
+python -m pip install icalendar python-dateutil cryptography PyYAML pytest
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calendar/tests --ignore=skills/calendar/tests/test_widget_browser.py --ignore=skills/calendar/tests/test_widget_state_browser.py
 ```
 
 For each complete consumer suite, use Python 3.10 with the requirements and browsers

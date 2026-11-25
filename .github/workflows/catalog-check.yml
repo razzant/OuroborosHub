@@ -11,11 +11,14 @@ on:
 permissions:
   contents: read
 
-# The one razzant/ouroboros commit every hosted suite that needs a core runs against (README, Tests and widgets).
-# Declared only here (tests/test_workflows.py fails on a second pin). Move it with a PR that changes only this value:
-# this file is shared, so that PR selects every suite, and it merges when all of them pass on the new core.
+# The razzant/ouroboros commit every hosted suite that needs a core runs against (README, Tests and widgets), with one
+# temporary exception: calendar-skill also checks out OUROBOROS_SIGN_IN_CORE_SHA into sign-in-core for its service
+# sign-in check until OUROBOROS_CORE_SHA advances past it (tests/test_workflows.py rejects any other second pin or match).
+# Move OUROBOROS_CORE_SHA with a PR that changes only its value (this file is shared, so every suite runs on it).
 env:
   OUROBOROS_CORE_SHA: d945f07d341d8c43b319e35af09d8fea3704f762
+  # Temporary second pin for Calendar 2.1.0's service sign-in check until OUROBOROS_CORE_SHA advances past it.
+  OUROBOROS_SIGN_IN_CORE_SHA: b59cceb880bdb2d276e78b1e94d5ae9f9856fe3e
 
 jobs:
   catalog:
@@ -177,6 +180,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: Check out the sign-in core for Calendar
+        if: matrix.suite == 'calendar-skill'
+        uses: actions/checkout@v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.OUROBOROS_SIGN_IN_CORE_SHA }}
+          path: sign-in-core
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Run Calendar service sign-in check
+        if: matrix.suite == 'calendar-skill'
+        env:
+          OUROBOROS_SIGN_IN_CORE_ROOT: ${{ github.workspace }}/sign-in-core
+        run: python -B -m pytest -p no:cacheprovider -v -rs tests/calendar_sign_in/test_host_sign_in_core.py
       - name: Run the selected hosted suite with its runtime dependencies
         env:
           SUITE: ${{ matrix.suite }}

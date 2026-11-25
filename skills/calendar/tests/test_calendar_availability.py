@@ -143,5 +143,18 @@ class AvailabilityTests(unittest.TestCase):
             self.assertEqual(self.free(ctx, start, sources=[calendar_id])["slots"][0]["start"], expected_start.isoformat())
 
 
+    def test_disputed_events_keeps_selected_and_empty_calendars_distinct(self):
+        ctx, cid, _ = caldav_context()
+        self.keep(ctx)
+        for selected in (DEFAULT_LOCAL_CALENDAR_ID, cid):
+            event = json.loads(tools.cal_create(ctx, title='Disputed', start=_day(3).isoformat(), calendars=[selected], confirm=True))['event']
+            ctx.store.update_event(event['id'], {'sync_state': 'conflict'})
+            if selected == cid:
+                external = event['id']
+        self.assertEqual(ctx.store.disputed_events([cid, cid]), [external])
+        for empty in (None, [], iter(())):
+            self.assertEqual(ctx.store.disputed_events(empty), [])
+
+
 if __name__ == "__main__":
     unittest.main()

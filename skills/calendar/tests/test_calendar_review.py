@@ -331,7 +331,7 @@ class LinkedCopyAndIntentReviewTests(unittest.TestCase):
         first = ops.execute_intent(store, providers, intent, "child:1")
         second = ops.execute_intent(store, providers, intent, "companion")
         third = ops.execute_intent(store, providers, intent, "child:2")
-        self.assertEqual((first["status"], second["status"], third["status"]), ("pending", "done", "pending"))
+        self.assertEqual((first["status"], second["status"], third["status"]), ("pending", "done", "done"))
         self.assertEqual(len(adapter.remote_by_uid), 1)
         self.assertEqual(store.get_event(event["id"])["external_id"], "remote-stable-uid@e")
 
