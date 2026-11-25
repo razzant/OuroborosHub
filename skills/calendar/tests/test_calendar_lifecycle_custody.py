@@ -395,3 +395,68 @@ def test_unknown_create_resolves_at_its_original_provider_identity(applied, choi
         assert len(server.resources) == 1
         current = ctx.store.get_event(retained['eid'])
         assert current['uid'] == retained['uid'] and current['sync_state'] == 'synced'
+
+
+@pytest.mark.parametrize('kind', ['update', 'delete', 'rsvp'])
+@pytest.mark.parametrize('legacy', [True, False])
+def test_unknown_queued_mutation_is_compared_without_resend(kind, legacy):
+    ctx, cid, server = caldav_context()
+    eid = json.loads(tools.cal_create(ctx, title='Published', start=_day(2).isoformat(), calendars=[cid], confirm=True))['event']['id']
+    row = ctx.store.get_event(eid)
+    payload = {'response': 'accepted'} if kind == 'rsvp' else {'changes': {'title': 'Edited'}} if kind == 'update' else {}
+    intent = ctx.store.add_intent(kind, row['account_id'], cid, eid, payload, expected_etag=row['etag'])
+    previous = {'error': 'reply lost', 'kind': 'network', **({} if legacy else {'delivery': 'unknown'})}
+    ctx.store.settle_intent(intent['id'], 'pending', previous)
+    writes = lambda: [c for c in server.calls if c[0] in ('PUT', 'DELETE', 'POST')]
+    before = writes()
+    info = json.loads(tools.cal_events(ctx, id=eid))['event']['conflict']
+    assert info['delivery_outcome_unknown'] and info['resolution_token']
+    assert json.loads(tools.cal_update(ctx, id=eid, title='Another edit', confirm=True))['status'] == 'conflict'
+    [reply] = ops.retry_due_intents(ctx.store, ctx.providers)
+    assert (reply['status'], writes()) == ('uncertain', before)
+    saved = ctx.store.get_intent(intent['id'])
+    assert (saved['state'], ctx.store.get_event(eid)['sync_state']) == ('uncertain', 'conflict')
+    assert json.loads(saved['result_json'])['previous_result'] == previous
+
+
+def test_legacy_unknown_create_still_recovers_at_its_original_address():
+    ctx, cid, server = caldav_context()
+    server.lose_response.add('PUT')
+    made = json.loads(tools.cal_create(ctx, title='Stable birth', start=_day(2).isoformat(), calendars=[cid], confirm=True))
+    eid = made['event']['id']
+    birth = ctx.store.intents_for_event(eid)[-1]
+    ctx.store.settle_intent(birth['id'], 'pending', {'error': 'reply lost', 'kind': 'network'})
+    [reply] = ops.retry_due_intents(ctx.store, ctx.providers)
+    assert reply['status'] == 'done' and len(server.resources) == 1
+    assert ctx.store.get_event(eid)['sync_state'] == 'synced'
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+def test_confirmed_absence_settles_unknown_delete_without_losing_receipt(provider):
+    from test_calendar_provider_divergence import google_context
+    ctx, cid, server = (caldav_context if provider == 'caldav' else google_context)()
+    eid = json.loads(tools.cal_create(ctx, title='Remove', start=_day(2).isoformat(), calendars=[cid], confirm=True))['event']['id']
+    server.lose_response.add('DELETE')
+    assert json.loads(tools.cal_delete(ctx, id=eid, scope='all', confirm=True))['status'] == 'uncertain'
+    previous = ctx.store.intents_for_event(eid)[-1]
+    sync(ctx, cid)
+    closed = ctx.store.get_intent(previous['id'])
+    assert ctx.store.get_event(eid) is None and closed['state'] == 'done'
+    assert json.loads(closed['result_json'])['previous_result'] == json.loads(previous['result_json'])
+    assert ctx.store.intent_counts(active_only=True) == {}
+
+
+def test_absence_does_not_release_unsent_delete_held_for_review():
+    ctx, cid, server = caldav_context()
+    eid = json.loads(tools.cal_create(ctx, title='Held', start=_day(2).isoformat(), calendars=[cid], confirm=True))['event']['id']
+    server.down = True
+    assert json.loads(tools.cal_delete(ctx, id=eid, scope='all', confirm=True))['status'] == 'pending'
+    aid = ctx.store.get_calendar(cid)['account_id']
+    assert ctx.store.hold_intents_for_account(aid, 'sign-in status unconfirmed') == 1
+    held = ctx.store.intents_for_event(eid)[-1]
+    assert json.loads(held['result_json'])['outcome'] == 'hold_for_review'
+    server.down = False
+    server.resources.clear()
+    sync(ctx, cid)
+    assert ctx.store.get_event(eid)['sync_state'] == 'conflict'
+    assert ctx.store.get_intent(held['id']) == held

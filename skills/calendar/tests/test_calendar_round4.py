@@ -250,6 +250,84 @@ class IntentOrderingRound4Tests(unittest.TestCase):
         self.assertEqual(ctx.store.intents_for_event(event["id"])[0]["state"], "done")
 
 
+class DueTimeRound4Tests(unittest.TestCase):
+    def test_a_due_time_counts_from_its_own_instant_in_either_stored_form(self):
+        from tempfile import TemporaryDirectory
+
+        state = TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        store = Store(state.name)
+        due = {'whole second': '2026-12-01T10:00:00+00:00', 'earlier': '2026-12-01T10:00:00.499999+00:00',
+               'now': '2026-12-01T10:00:00.500000+00:00', 'later': '2026-12-01T10:00:00.500001+00:00',
+               'next second': '2026-12-01T10:00:01+00:00'}
+        names = {}
+        for name, at in due.items():
+            intent = store.add_intent('create', 'local', DEFAULT_LOCAL_CALENDAR_ID, 'evt-' + name.replace(' ', '-'), {})
+            with store._conn() as conn:
+                conn.execute('UPDATE intents SET next_attempt_at=? WHERE id=?', (at, intent['id']))
+            names[intent['id']] = name
+        with patch('store.now_utc', return_value=datetime(2026, 12, 1, 10, 0, 0, 500000, tzinfo=timezone.utc)):
+            leased = store.lease_due_intents('due-test')
+        self.assertEqual(sorted(names[row['id']] for row in leased), ['earlier', 'now', 'whole second'])
+
+    def test_deferred_intent_waits_for_due_time_and_leases_once(self):
+        from tempfile import TemporaryDirectory
+
+        state = TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        store = Store(state.name)
+        t0 = datetime(2026, 12, 1, 10, 0, 0, tzinfo=UTC)
+        with patch('store.now_utc', return_value=t0):
+            intent = store.add_intent('update', 'local', DEFAULT_LOCAL_CALENDAR_ID, 'evt-deferred', {})
+            store.settle_intent(intent['id'], 'pending', {}, retry_in_sec=60)
+            self.assertIsNone(store.lease_intent(intent['id'], 'worker-a', only_due=True))
+            self.assertEqual(store.lease_due_intents('worker-a'), [])
+        saved = store.get_intent(intent['id'])
+        self.assertEqual((saved['attempts'], saved['lease_owner'], saved['lease_until']), (0, '', None))
+        with patch('store.now_utc', return_value=t0 + timedelta(seconds=60)):
+            leased = store.lease_due_intents('worker-a')
+            self.assertEqual(store.lease_due_intents('worker-b'), [])
+            self.assertIsNone(store.lease_intent(intent['id'], 'worker-b', only_due=True))
+        self.assertEqual([(row['id'], row['lease_owner'], row['attempts']) for row in leased], [(intent['id'], 'worker-a', 1)])
+        saved = store.get_intent(intent['id'])
+        self.assertEqual((saved['lease_owner'], saved['attempts']), ('worker-a', 1))
+
+
+    def test_direct_dispatch_and_background_wait_for_subsecond_deferral(self):
+        ctx = make_context()
+        cid = add_external_calendar(ctx.store, 'subsecond-due')
+        aid = ctx.store.get_calendar(cid)['account_id']
+        adapter = RecordingAdapter()
+        providers = OneAdapterProviders(adapter)
+        t0 = datetime(2026, 12, 1, 10, 0, 0, 750000, tzinfo=UTC)
+        ids = []
+        with patch('store.now_utc', return_value=t0):
+            for name in ('settle', 'park'):
+                event = ctx.store.insert_event({'calendar_id': cid, 'external_id': name, 'title': name,
+                    'start_utc': '2026-12-02T10:00:00+00:00', 'end_utc': '2026-12-02T11:00:00+00:00'})
+                iid = ctx.store.add_intent('update', aid, cid, event['id'], {})['id']
+                ids.append(iid)
+                if name == 'settle':
+                    ctx.store.settle_intent(iid, 'pending', {}, retry_in_sec=60)
+                else:
+                    held = ctx.store.lease_intent(iid, 'holder')
+                    self.assertTrue(ctx.store.park_intent(iid, 60, 'waiting', held))
+        def resume_direct(_local, iid):
+            return {'assignments': [{'_intent_ids': [iid]}]}
+        with patch('store.now_utc', return_value=t0 + timedelta(seconds=60, microseconds=-1)):
+            for iid in ids:
+                result = ops._finish_command(ctx.store, providers, resume_direct, 'direct', iid)
+                self.assertEqual(result['assignments'][0]['status'], 'pending')
+                self.assertEqual(ctx.store.get_intent(iid)['attempts'], 0)
+            self.assertEqual(ops.retry_due_intents(ctx.store, providers), [])
+            self.assertEqual(adapter.calls, [])
+        with patch('store.now_utc', return_value=t0 + timedelta(seconds=60)):
+            result = ops._finish_command(ctx.store, providers, resume_direct, 'direct', ids[0])
+            self.assertEqual(result['assignments'][0]['status'], 'done')
+            self.assertEqual([(r['intent'], r['status']) for r in ops.retry_due_intents(ctx.store, providers)], [(ids[1], 'done')])
+        self.assertEqual(len(adapter.calls), 2)
+
+
 class RecurrenceIdentityRound4Tests(unittest.TestCase):
     def _linked_exception(self):
         ctx = make_context()

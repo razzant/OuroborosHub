@@ -150,6 +150,15 @@ class AccountReconnectionTests(unittest.TestCase):
         self.assertEqual(result['status'], 'updated', result)
         return result
 
+    def sign_in_google(self, adapter):
+        # finish_auth supplies the already-resolved account. Exercise discovery through the new resolver.
+        signed_in = {'account_id': self.ACCOUNT, 'email': self.EMAIL, 'offline_access': True}
+        fresh = OneAdapterProviders(adapter)
+        with patch.object(google, 'finish_auth', return_value=signed_in), patch.object(accounts, 'Providers', return_value=fresh):
+            result = accounts.complete_google(self.ctx, code='code', state='state')
+        self.assertTrue(result['ok'], result)
+        self.assertIs(self.ctx.providers, fresh)
+
     def assert_restored(self, calendar_id, account_id):
         restored = self.ctx.store.get_calendar(calendar_id)
         self.assertIsNone(restored['deleted_at'])
@@ -183,9 +192,7 @@ class AccountReconnectionTests(unittest.TestCase):
         adapter = ListingAdapter([self.OBSERVED])
         self.connect_google(adapter)
         self.disconnect(self.ACCOUNT)
-        signed_in = {'account_id': self.ACCOUNT, 'email': self.EMAIL, 'offline_access': True}
-        with patch.object(google, 'finish_auth', return_value=signed_in):
-            self.assertTrue(accounts.complete_google(self.ctx, code='code', state='state')['ok'])
+        self.sign_in_google(adapter)
         # The OAuth return leaves calendar discovery to the companion's next pass.
         report = worker.sync_account(self.ctx.store, self.ctx.providers, self.ctx.store.get_account(self.ACCOUNT), self.ctx.tz)
         self.assertEqual((report['status'], report['calendars']), ('ok', 1), report)
@@ -271,9 +278,7 @@ class AccountReconnectionTests(unittest.TestCase):
                     with patch.object(google, 'load_tokens', return_value={self.EMAIL: {'email': self.EMAIL}}):
                         self.assertEqual(tools.reload_google(self.ctx)['status'], 'ok')
                 else:
-                    signed_in = {'account_id': self.ACCOUNT, 'email': self.EMAIL, 'offline_access': True}
-                    with patch.object(google, 'finish_auth', return_value=signed_in):
-                        self.assertTrue(accounts.complete_google(self.ctx, code='code', state='state')['ok'])
+                    self.sign_in_google(adapter)
                     report = worker.sync_account(self.ctx.store, self.ctx.providers, self.ctx.store.get_account(self.ACCOUNT), self.ctx.tz)
                     self.assertEqual((report['status'], report['calendars'], adapter.fetched), ('ok', 1, [kept]), report)
                 reconnected_at = self.ctx.store.get_account(account_id)['created_at']

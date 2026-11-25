@@ -658,7 +658,8 @@ class AccountsBrowserTests(SkillCase):
         rows, details = linked('diverged')
         for row in details.values():
             row['title'] = LONG
-        self.mount_skill(accounts=accounts, calendars=cals, linkIssues=[issue], events=rows, eventGet=details)
+        self.mount_skill(accounts=accounts, calendars=cals, linkIssues=[issue], events=rows, eventGet=details,
+                         options={'google_sign_in': 'skill'})
         self.page.set_viewport_size({'width': 390, 'height': 900})
         self.open_accounts()
         self.page.locator('section.acc summary').click()

@@ -679,7 +679,7 @@ class UnsentWriteTests(HostSignInCase):
         self.assertTrue(self.google.writes)   # the create reached Google under the host's fresh token
 
     def test_a_composite_command_reports_each_part_its_own_truth(self):
-        self.store.upsert_calendar({'id': 'local:home', 'account_id': 'local:me', 'provider': 'local', 'name': 'Home'})
+        self.store.upsert_calendar({'id': 'local:home', 'account_id': 'local', 'provider': 'local', 'name': 'Home'})
         result = self.create_on('local:home', f'google:{OWNER}:{OWNER}')
         self.assertEqual({a['calendar_id']: a['status'] for a in result['assignments']},
                          {'local:home': 'done', f'google:{OWNER}:{OWNER}': 'pending'})   # the sent part is not declared unsent
@@ -783,6 +783,34 @@ class FollowTests(HostSignInCase):
         self.assertTrue(self.store.get_calendar(f'google:{OWNER}:{OWNER}')['deleted_at'])   # retired, history kept
         self.assertNotIn(OWNER, gp.load_tokens(self.state_dir, VAULT_KEY))
         self.assertEqual(self.store.get_setting(google_host.MOVED), {})
+
+    def test_reload_distinguishes_unavailable_host_accounts_from_empty(self):
+        account_id = 'google:' + OWNER
+        before = self.store.get_account(account_id)
+        with patch.object(host_sign_in.HostSignIn, 'accounts', side_effect=OSError('fixture: temporary refusal')):
+            report = accounts.reload_google(self.context())
+        self.assertEqual((report['status'], report['accounts']), ('unreachable', []))
+        self.assertEqual(self.store.get_account(account_id), before)
+        self.host.accounts.clear()
+        self.assertEqual(accounts.reload_google(self.context())['status'], 'not_connected')
+        self.assertIsNone(self.store.get_account(account_id))
+
+    def test_reload_does_not_restore_account_from_a_snapshot_taken_before_disconnect(self):
+        cid = f'google:{OWNER}:{OWNER}'
+        self.store.update_calendar(cid, {'role_visible': False, 'role_publish': True, 'publish_mode': 'full'})
+        load = gp.load_tokens
+        def snapshot_then_disconnect(*args):
+            saved = load(*args)
+            if self.host.accounts:
+                self.host.accounts.clear()
+                self.assertEqual(self.follow()['withdrawn'], 1)
+            return saved
+        with patch.object(gp, 'load_tokens', side_effect=snapshot_then_disconnect):
+            accounts.reload_google(self.context())
+        self.assertIsNone(self.store.get_account('google:' + OWNER))
+        retired = self.store.get_calendar(cid)
+        self.assertTrue(retired['deleted_at'])
+        self.assertEqual((retired['role_visible'], retired['role_publish'], retired['publish_mode']), (0, 1, 'full'))
 
     def test_an_unreadable_or_undeclared_host_changes_nothing(self):
         self.host.declared = False

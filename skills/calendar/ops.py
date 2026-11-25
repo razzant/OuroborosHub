@@ -363,7 +363,7 @@ def _finish_command(store, providers, stage, owner, *args, **kwargs):
             continue
         outcome = {"status": INTENT_DONE}
         for intent_id in ids:
-            reply = execute_intent(store, providers, store.get_intent(intent_id), owner or lease_owner())
+            reply = execute_intent(store, providers, store.get_intent(intent_id), owner or lease_owner(), only_due=True)
             if outcome["status"] == INTENT_DONE:
                 outcome = reply
         assignment.update(outcome)
@@ -827,7 +827,7 @@ def _read_only_preflight(store, rows: List[Dict[str, Any]], assignments: List[Di
     for target in rows:
         disputed = next((r for r in [target] + store.exceptions_for(target['id'])
                          if r.get('sync_state') == 'conflict'
-                         or any(i['state'] == INTENT_CONFLICT for i in store.intents_for_event(r['id']))), None)
+                         or any(store.needs_reconciliation(i) for i in store.intents_for_event(r['id']))), None)
         if disputed:
             blocked.add(target['id'])
             assignments.append({'calendar_id': target['calendar_id'], 'event_id': disputed['id'],
@@ -1266,7 +1266,7 @@ def _superseded_exception_write(store, intent: Dict[str, Any]) -> Optional[Dict[
     return None
 
 
-def execute_intent(store, providers, intent: Dict[str, Any], owner: str) -> Dict[str, Any]:
+def execute_intent(store, providers, intent: Dict[str, Any], owner: str, *, only_due: bool = False) -> Dict[str, Any]:
     """Lease and run one intent now; returns the per-assignment status dict."""
     if _superseded_exception_write(store, intent) is None:
         pred = _blocked_by(store, intent)
@@ -1274,9 +1274,9 @@ def execute_intent(store, providers, intent: Dict[str, Any], owner: str) -> Dict
             if pred.get("state") == INTENT_PENDING:
                 return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
             return _fail_after_predecessor(store, intent, pred)
-    leased = store.lease_intent(intent["id"], owner, LEASE_SECONDS)
+    leased = store.lease_intent(intent["id"], owner, LEASE_SECONDS, only_due=only_due)
     if leased is None:
-        return {"status": INTENT_PENDING, "message": "операция уже выполняется"}
+        return _kept_outcome(store, intent)
     return run_leased_intent(store, providers, leased)
 
 
@@ -1351,6 +1351,9 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
     if current is None:
         return _kept_outcome(store, intent)
     intent = current
+    if intent['kind'] in ('update', 'delete', 'rsvp') and store.unknown_delivery(intent):
+        return (_finish(store, intent, 'uncertain', {'note': 'prior write delivery unknown'}, 'conflict')
+                or {'status': 'uncertain', 'message': 'исход прежней записи неизвестен; сравни версии до повтора'})
     if _superseded_exception_write(store, intent) is not None:
         return (_finish(store, intent, INTENT_DONE, {"note": "superseded by deletion"})
                 or {"status": INTENT_DONE, "message": "исключение или серия удалены"})
@@ -1362,8 +1365,8 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
         if callable(begin):
             begin()
     if event is None or cal is None:
-        store.settle_intent(intent["id"], INTENT_FAILED, {"error": "event or calendar vanished"})
-        return {"status": INTENT_FAILED, "message": "событие или календарь исчезли"}
+        return (_finish(store, intent, INTENT_FAILED, {"error": "event or calendar vanished"})
+                or {"status": INTENT_FAILED, "message": "событие или календарь исчезли"})
     pred = _blocked_by(store, intent)
     if pred is not None:
         if pred.get("state") != INTENT_PENDING:
@@ -1552,7 +1555,7 @@ def _defer(store, intent: Dict[str, Any], message: str, kind: str = "network", *
         unknown.update(receipt.unknown_delivery(current))   # an earlier unknown write keeps its own reason
         attempts = int(intent.get("attempts") or 1)
         final = kind == 'adapter_error' or kind == 'retry' and not unsent and attempts >= MAX_ATTEMPTS
-        if kind == 'uncertain' or lost and intent['kind'] != 'create' or unknown and final:
+        if kind == 'uncertain' or unknown and (intent['kind'] != 'create' or final):
             # A write that may have taken effect is not resent blindly, failed or forgotten: it waits for comparison.
             # Only a creation's stable identity lets a retry read the first write back.
             receipt.settle_intent(intent['id'], 'uncertain', {'error': message, 'kind': kind, **unknown,

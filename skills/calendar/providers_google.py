@@ -256,9 +256,10 @@ class GoogleAdapter:
         try:
             self._refresh()
         except ProviderError as exc:
-            if exc.kind in ('network', 'server'):
+            if exc.kind in ('network', 'server') or exc.status == 429:
                 # Token I/O is separate from Calendar I/O. Preserve the operation's existing send boundary.
-                raise ProviderError('uncertain' if self._sent else exc.kind, exc.message, exc.status,
+                kind = 'server' if exc.status == 429 else exc.kind
+                raise ProviderError('uncertain' if self._sent else kind, exc.message, exc.status,
                                     unsent=not self._sent, reason=exc.reason) from None
             raise
         finally:
@@ -315,7 +316,8 @@ class GoogleAdapter:
             if exc.code == 401:
                 raise ProviderError("auth", "Google не принял токен даже после обновления — переподключи аккаунт", 401)
             if exc.code == 403 and reason in ("rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"):
-                raise ProviderError("server", f"лимит Google Calendar API ({reason}); повтор позже", 403)
+                raise ProviderError("server", f"лимит Google Calendar API ({reason}); повтор позже", 403,
+                                    unsent=not self._sent)
             if exc.code == 403:
                 raise ProviderError("forbidden", f"Google отказал в доступе ({reason or 403})", 403)
             if exc.code == 404:
@@ -325,7 +327,10 @@ class GoogleAdapter:
             if exc.code == 412:
                 raise ProviderError("conflict", "событие изменилось в Google (412): перечитай и повтори", 412)
             if exc.code == 429 or exc.code >= 500:
-                raise ProviderError("server", f"Google временно не отвечает ({exc.code})", exc.code)
+                # 429 refused this request; a 5xx leaves a write's outcome unknown.
+                # Neither response erases a write from an earlier step of this operation.
+                raise ProviderError("server", f"Google временно не отвечает ({exc.code})", exc.code,
+                                    unsent=not self._sent)
             raise ProviderError("http", f"Google Calendar API: HTTP {exc.code} {reason} {text[:160]}", exc.code)
         except urllib.error.URLError as exc:
             if never_connected(exc):

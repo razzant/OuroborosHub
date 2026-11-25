@@ -188,3 +188,23 @@ class ConflictTests(unittest.TestCase):
         self.assertEqual((guest['optional'],guest['comment'],guest['additionalGuests'],guest['displayName']), (True,'Keep me',2,'Guest'))
         me=next(a for a in server.events[ext]['attendees'] if a['email']=='owner@example.test')
         self.assertEqual(me['responseStatus'],'accepted')
+
+    def test_conflict_shows_stored_unknown_delivery_but_not_an_ordinary_412(self):
+        ctx, cid, server = caldav_context()
+        server.lose_response.add('PUT')
+        out = json.loads(tools.cal_create(ctx, title='Original', start=_day(2).isoformat(), calendars=[cid], confirm=True))
+        eid = out['event']['id']
+        def mutate(cal):
+            next(c for c in cal.walk('VEVENT') if not c.get('RECURRENCE-ID'))['SUMMARY'] = 'Remote'
+        server.edit(next(iter(server.resources)), mutate)
+        run_open_intents(ctx)
+        info = inspection(ctx, eid)
+        self.assertEqual((info['status'], info['delivery_outcome_unknown'], info['provider']['title']), ('conflict', True, 'Remote'))
+        self.assertEqual(resolve(ctx, eid, info, 'local')['status'], 'conflict')
+        birth = ctx.store.intents_for_event(eid)[-1]
+        ctx.store.settle_intent(birth['id'], 'conflict', {'previous': {'kind': 'network', 'error': 'legacy loss'}})
+        self.assertTrue(inspection(ctx, eid)['delivery_outcome_unknown'])
+        plain = create(ctx, cid)
+        remote_edit(ctx, server, plain)
+        self.assertEqual(json.loads(tools.cal_update(ctx, id=plain, title='Mine', confirm=True))['status'], 'conflict')
+        self.assertFalse(inspection(ctx, plain)['delivery_outcome_unknown'])

@@ -29,6 +29,7 @@ UNCONFIRMED = 'handover_unconfirmed'
 UNCONFIRMED_CONTINUITY = 'prior queued writes not carried over: authorization continuity across changed host key could not be confirmed'
 WITHDRAWN_MARKER = 'sign_in_withdrawn.json'  # core-written pre-confirmed Disconnect/break ledger in Calendar's state_dir
 UNCONFIRMED_DISCONNECT = 'held for explicit review: prior sign-in status in sign_in_withdrawn.json could not be confirmed before new local PKCE; not sent'
+UNCONFIRMED_TRANSFER = "held for explicit review: the prior sign-in's move to Ouroboros was not confirmed before a new local sign-in; not sent"
 OFFERED = 'google_handover_clients'  # installation clients already handed over: one the owner removes stays removed
 WITHDRAWN = 'google_withdrawn'       # calendar key → {generation, host_account?, at}: an intentional disconnect, recorded with the removal
 IDENTITIES = 'google_subject_ids'    # verified Google subject → {key, at}: non-secret continuity evidence across disconnects
@@ -138,17 +139,22 @@ def _read_host_withdrawn(state_dir: str):
     return [row for row in data['accounts'] if _text(row.get('service')) == SERVICE]
 
 
+_FRESH = object()   # host_withdrawn_state reads sign_in_withdrawn.json itself unless a pass hands it its one reading
+
+
 def host_withdrawn_state(state_dir: str, key: str, entry: Dict[str, Any], *,
-                         mark: Optional[Dict[str, Any]] = None, withdrawn: Optional[Dict[str, Any]] = None) -> str:
+                         mark: Optional[Dict[str, Any]] = None, withdrawn: Optional[Dict[str, Any]] = None,
+                         rows: Any = _FRESH) -> str:
     """Classify core's sign_in_withdrawn.json for this local entry: ``withdrawn``, ``unknown`` or ``clear``.
     Requires an exact identifier match (stable connection_id or specific local legacy_generation); weak fields
-    (account, subject, legacy_key) may only narrow. Unreadable JSON is ``unknown``, never ``withdrawn``."""
+    (account, subject, legacy_key) may only narrow. Unreadable JSON is ``unknown``, never ``withdrawn``.
+    ``rows``: the one reading a handover pass takes for all its entries; every check before a write reads anew."""
     e_gen, e_sub = _text(entry.get('generation')), _text(entry.get('subject'))
     m_account, m_conn = _text((mark or {}).get('account')), _text((mark or {}).get('connection_id'))
     m_sub, m_gen = _text((mark or {}).get('subject')), _text((mark or {}).get('legacy_generation'))
     fresh_gen = _text((withdrawn or {}).get('fresh_local_generation'))
     is_fresh_local = bool(fresh_gen and e_gen and e_gen == fresh_gen and m_gen != e_gen)
-    rows = _read_host_withdrawn(state_dir)
+    rows = _read_host_withdrawn(state_dir) if rows is _FRESH else rows
     if rows is None:
         return 'clear' if is_fresh_local else ('unknown' if (mark or entry) else 'clear')
     entry_sub = e_sub or m_sub
@@ -192,14 +198,49 @@ def _renewal_refused_before_exchange(attempted: Optional[Dict[str, Any]], entry:
                 and attempted.get('legacy_generation') == entry.get('generation'))
 
 
-def _check_legacy(session, binding, entry, sent=False, *, key=''):
+def _unresolvable(attempted: Optional[Dict[str, Any]], entry: Optional[Dict[str, Any]],
+                  withdrawn: Optional[Dict[str, Any]] = None) -> bool:
+    """A reserved exchange whose outcome Calendar will never learn: the host answered that it cannot tell
+    (``terminal``), the owner withdrew that generation here, or a later local consent replaced the grant a recover
+    would carry. A lost answer about the grant still held is read back instead (``_handover_input``), and a later
+    grant whose refresh complete_google showed to differ (``fresh_generation``) first makes its own attempt."""
+    attempted, entry_generation = attempted or {}, (entry or {}).get('generation')
+    generation = attempted.get('legacy_generation')
+    if entry_generation and entry_generation == attempted.get('fresh_generation'):
+        return False
+    return attempted.get('reason') == UNCONFIRMED and (
+        attempted.get('terminal') is True or withdrawn_generation(withdrawn, {'generation': generation})
+        or entry_generation != generation)
+
+
+def _card_consent(account: Dict[str, Any], subject: Any) -> bool:
+    """The owner's own working sign-in on the card for this verified subject: a new consent on its own connection.
+    It proves nothing about an earlier exchange, and the listing names no consent time, so not that it came later."""
+    return bool(_text(subject) and _verified_subject(account) == subject and _text(account.get('via')) == 'card'
+                and account.get('state') == 'signed_in' and _verified_connection_id(account))
+
+
+def _vault_generation(providers, key: str) -> Any:
+    """The generation the vault holds for ``key`` now; None when it holds none or cannot be read."""
+    try:
+        vault = load_tokens(providers.state_dir, str((getattr(providers, 'secrets', None) or {}).get('CALENDAR_TOKEN_KEY') or ''))
+    except (ProviderError, OSError, ValueError):
+        return None
+    held = vault.get(key) if isinstance(vault, dict) else None
+    return held.get('generation') if isinstance(held, dict) else None
+
+
+def _check_legacy(session, binding, entry, sent=False, *, key='', current=None):
     mark, attempted, withdrawn = binding
     state = session['host'].state()
     attempted_gen = attempted.get('legacy_generation')
     same_attempt_gen = not attempted_gen or not entry.get('generation') or entry.get('generation') == attempted_gen
     hw = host_withdrawn_state(session['store'].state_dir, key, entry, mark=mark, withdrawn=withdrawn)
     if not mark and state != ABSENT and same_attempt_gen and attempted.get('reason') == UNCONFIRMED:
-        message = f'Google sign-in transfer is not confirmed; writes wait. If it cannot be confirmed, sign in on {CARD}.'
+        message = (f"Ouroboros cannot tell how this Google sign-in's transfer ended; sign in on {CARD} to restore the "
+                   'account (writes waiting from before it are withdrawn, not sent).'
+                   if _unresolvable(attempted, entry, withdrawn) else
+                   f'Google sign-in transfer is not confirmed; writes wait. If it cannot be confirmed, sign in on {CARD}.')
     elif not mark and state != ABSENT and same_attempt_gen and attempted.get('reason') == 'account_disconnected':
         message = f'This Google account was disconnected on {CARD}; the old sign-in is not used.'
     elif mark and state != ABSENT:
@@ -208,6 +249,12 @@ def _check_legacy(session, binding, entry, sent=False, *, key=''):
         message = 'This Google account was disconnected; the old sign-in is not used.'
     elif hw == 'unknown':
         message = 'Could not confirm this Google sign-in against Ouroboros ledger (sign_in_withdrawn.json); waiting rather than using the old Google sign-in.'
+    elif (not mark and state != ABSENT and current is not None and attempted.get('legacy_generation')
+          and entry.get('generation') != attempted['legacy_generation']
+          and not (entry.get('generation') and entry.get('generation') == current())):
+        # A copy read before this account's generation changed (an older Providers, a cached adapter): the reservation
+        # names another generation, so it serves only while the vault confirms the same non-empty generation.
+        message = 'This Google sign-in was replaced by a newer one here; the earlier copy is not used.'
     else:
         return
     raise ProviderError('uncertain' if sent else 'retry', message, unsent=not sent)
@@ -223,7 +270,10 @@ def adapter_for(providers, key: str, cached=None):
         state = session['host'].state()
         if (state != ABSENT and handover_pending(mark, entry) and not withdrawn_generation(binding[2], entry)
                 and not _renewal_refused_before_exchange(binding[1], entry)):
-            raise ProviderError('retry', 'The account has a newer sign-in still moving to Ouroboros; its writes '
+            raise ProviderError('retry', (f"Ouroboros cannot tell how the move of this account's newer sign-in ended; sign in "
+                                          f'again on {CARD} to continue (writes waiting from before it are withdrawn, not sent).')
+                                if _unresolvable(binding[1], entry, binding[2]) else
+                                'The account has a newer sign-in still moving to Ouroboros; its writes '
                                           'wait until the move is confirmed.')
         if state == READY:
             # Never hand a cached host access token across commands: each resolution starts fresh with the host.
@@ -233,15 +283,23 @@ def adapter_for(providers, key: str, cached=None):
         if state != ABSENT:   # unknown whether this core holds it: never refresh a moved account here meanwhile
             raise ProviderError('network', 'The Ouroboros sign-in service did not answer; the Google sign-in it '
                                            'holds is kept and nothing is refreshed here.')
-    _check_legacy(session, binding, entry, key=key)
+    def current():   # read only on the disputed path of _check_legacy
+        return _vault_generation(providers, key)
+    _check_legacy(session, binding, entry, key=key, current=current)
     if providers.vault_error:
         raise ProviderError('auth', providers.vault_error)
     if type(cached) is GoogleAdapter and cached._legacy_guard is not None:
         return cached
     adapter = GoogleAdapter.for_account(providers.secrets, providers.state_dir, key, tokens=providers.saved_accounts)
     if adapter is not None:
+        attempted = binding[1]
+        if (attempted.get('reason') == UNCONFIRMED and entry.get('generation')
+                and entry['generation'] not in (attempted.get('legacy_generation'), attempted.get('fresh_generation'))):
+            # A later local grant whose refresh is not shown to differ from the unconfirmed one keeps only its own access
+            # token until it expires; that refresh is never used here (complete_google records a distinct one).
+            adapter.refresh_token = ''
         # An adapter resolved just before reservation must not authorize a later legacy dispatch.
-        adapter._legacy_guard = lambda sent: _check_legacy(session, _binding(session, key), entry, sent, key=key)
+        adapter._legacy_guard = lambda sent: _check_legacy(session, _binding(session, key), entry, sent, key=key, current=current)
     return adapter
 
 
@@ -353,6 +411,7 @@ def _handover_input(view, secrets, state_dir, retry_refused):
     moved, offered = view.get_setting(MOVED) or {}, set(view.get_setting(OFFERED) or [])
     withdrawn, refused = view.get_setting(WITHDRAWN) or {}, view.get_setting(REFUSED) or {}
     returns, clients, grants, recover_grants, fresh_primary = _return_hint(view), {}, [], [], {}
+    ledger = _read_host_withdrawn(state_dir)   # one reading of core's disconnect ledger for this pass's entries
     if retry_refused:
         for prefix in ('GOOGLE_OAUTH', 'GOOGLE_CALENDAR'):
             client_id = str(secrets.get(prefix + '_CLIENT_ID') or '').strip()
@@ -362,11 +421,16 @@ def _handover_input(view, secrets, state_dir, retry_refused):
         if (entry.get('provider', PROVIDER_GOOGLE) != PROVIDER_GOOGLE
                 or not (entry.get('refresh_token') or entry.get('access_token'))
                 or withdrawn_generation(withdrawn.get(key), entry)
-                or host_withdrawn_state(state_dir, key, entry, mark=moved.get(key), withdrawn=withdrawn.get(key)) != 'clear'):
+                or host_withdrawn_state(state_dir, key, entry, mark=moved.get(key), withdrawn=withdrawn.get(key),
+                                        rows=ledger) != 'clear'):
             continue
         mark, subject, generation = moved.get(key), entry.get('subject'), entry.get('generation')
         prior = refused.get(key) or {}
-        if prior.get('reason') == UNCONFIRMED:
+        # A later local grant whose refresh complete_google showed to differ from the unconfirmed one makes its own ordinary
+        # attempt; the unconfirmed one is never read back or sent again, and the core decides whether this one moves.
+        fresh = bool(generation and prior.get('reason') == UNCONFIRMED and prior.get('fresh_generation') == generation
+                     and prior.get('legacy_generation') != generation)
+        if prior.get('reason') == UNCONFIRMED and not fresh:
             # Reconcile/resume a previously started identity check without submitting a second exchange.
             same_gen = prior.get('legacy_generation') == generation
             eligible = (bool(handover_pending(mark, entry) and subject and mark.get('subject') == subject)
@@ -736,18 +800,34 @@ def follow(store, secrets: Dict[str, Any], state_dir: str, host: HostSignIn) -> 
                     continue
                 local_entry = ({**entry, 'subject': subject}
                                if not entry.get('subject') and (projected_identities.get(subject) or {}).get('key') == key else entry)
-                # Never attribute or clear an unconfirmed handover from a listing row by via=card + subject alone.
+                # A listing row never attributes or clears an unconfirmed handover by via=card + subject alone. Once its
+                # outcome can no longer be learnt (or a replaced connection ended the renewal it guarded), the owner's own
+                # card consent takes the account as a new connection and the queue before it is withdrawn. An account
+                # disconnected here first keeps out the card it then sees, until that card is gone or replaced.
                 proof = _generation_proof(None, local_entry, account, attempted)
-                if proof is None:
+                if proof is not None:
+                    mark.update(proof)
+                elif not (_card_consent(account, local_entry.get('subject'))
+                          and (key in replaced_keys or _unresolvable(attempted, entry, withdrawn.get(key)))):
                     continue
-                mark.update(proof)
+                elif key not in replaced_keys and key in withdrawn and 'host_account' not in withdrawn[key]:
+                    plan_withdrawn_host.append((key, host_key, connection_id))
+                    continue
+                else:
+                    cancel_queue = True
                 triggers_rebound = True
             elif (existing is not None and handover_pending(mark, entry) and not withdrawn_generation(withdrawn.get(key), entry)
                   and not _renewal_refused_before_exchange(refused.get(key), entry)):
                 proof = _generation_proof(existing, entry, account, refused.get(key) or {})
-                if proof is None:
+                if proof is not None:
+                    mark.update(proof)
+                elif _unresolvable(refused.get(key), entry, withdrawn.get(key)) and _card_consent(account, mark.get('subject')):
+                    # The owner signed in again on the card after the renewal's move became unknowable: that consent ends
+                    # the renewal, which is never recorded as moved, and the queue before it is withdrawn.
+                    mark.pop('legacy_generation', None)
+                    cancel_queue = True
+                else:
                     continue  # first read of another consent never proves a pending local handover
-                mark.update(proof)
                 triggers_rebound = True
             elif vault is None and ((refused.get(key) or {}).get('legacy_generation')):
                 continue  # cannot clear a recorded exchange using an unreadable local projection

@@ -68,6 +68,12 @@ class MemoryHost(HostSignIn):
             if body.get('recover'):
                 self.recoveries.append(body)
                 return {'ok': True, 'grants': [self.recovered(grant)]}
+            began = self.started.get(grant['legacy_key'])
+            if began and not began.get('receipt') and began['generation'] != grant.get('legacy_generation'):
+                # As b59c: an exchange of this sign-in that left and is unresolved is never displaced; another grant is
+                # refused before its own exchange is claimed, and the answer can only call that exchange unknown.
+                return {'ok': True, 'grants': [{'legacy_key': grant['legacy_key'], 'result': 'refused',
+                                                'reason': 'handover_unconfirmed', 'exchange': 'unknown'}]}
             if self.verified_imports:
                 generation = grant['legacy_generation']
                 self.handover_generations.append(generation)
@@ -945,6 +951,9 @@ class WithdrawalContinuityTests(unittest.TestCase):
         self.assertIsInstance(google_host.adapter_for(old_providers, LOGIN), gp.GoogleAdapter)
 
     def test_ordinary_pass_hands_over_two_distinct_local_accounts_without_restart(self):
+        patcher = patch.object(google_host, '_read_host_withdrawn', wraps=google_host._read_host_withdrawn)
+        ledger = patcher.start()
+        self.addCleanup(patcher.stop)
         second = 'saved@example.test'
         self.vault.entries[second] = dict(provider='google', email=second, subject='sub-saved',
                                           client_id='fixture-client', refresh_token='r-saved', scope=' '.join(gp.SCOPES))
@@ -952,6 +961,7 @@ class WithdrawalContinuityTests(unittest.TestCase):
                                                 self.store.state_dir, self.host,
                                                 {'status': 'ok', 'results': {'imported': 1}}, lambda *a, **kw: None)
         self.assertEqual(handed['results'], {'imported': 2})
+        self.assertEqual(ledger.call_count, 1)   # one reading of core's disconnect ledger for the pass's two grants
         self.assertEqual(facts['follow'], {'status': 'ok', 'added': 1, 'withdrawn': 0})
         marks = self.store.get_setting(google_host.MOVED)
         self.assertEqual(set(marks), {LOGIN, second})
@@ -990,6 +1000,188 @@ class WithdrawalContinuityTests(unittest.TestCase):
         self.assertTrue(done['ok'])
         self.assertNotEqual(done['account_id'], ACCOUNT)
         self.assertTrue(self.store.get_calendar(self.cid)['deleted_at'])
+
+    def lost_first_answer(self, host):
+        # The worker's first handover of g1 got no answer: its exchange is reserved and unconfirmed.
+        with patch.object(host, 'handover', side_effect=OSError('the reply was lost')):
+            self.assertEqual(google_host.handover(self.store, {}, self.store.state_dir, host)['status'], 'unreachable')
+
+    def moved_with_unconfirmed_renewal(self, host, generation):
+        # R holds the account (g0 on conn-card-1); the renewal of ``generation`` got no answer the host can give.
+        host.rows = [dict(verified_row(via='handover', connection_id=CONFIRMED['connection_id']), legacy_generation='g0')]
+        self.store.set_setting(google_host.MOVED, {LOGIN: dict(CONFIRMED, via='handover', legacy_generation='g0')})
+        self.store.set_setting(google_host.REFUSED, {LOGIN: {'reason': google_host.UNCONFIRMED, 'legacy_generation': generation,
+                                                             'exchange': 'unknown', 'terminal': True}})
+        return self.store.get_setting(google_host.MOVED)[LOGIN]
+
+    def late_sign_in(self, host, refresh):
+        # A sign-in the old path started before the update completes for the same subject; returns its generation.
+        secrets = {'GOOGLE_OAUTH_CLIENT_ID': 'fixture-client'}
+        state = gp.start_auth(self.store, secrets, 'http://127.0.0.1/callback')['state']
+        ctx = SimpleNamespace(store=self.store, state_dir=self.store.state_dir, secrets=secrets,
+                              providers=SimpleNamespace(state_dir=self.store.state_dir, google_host={'host': host}))
+
+        def userinfo(adapter):
+            adapter._identity = {'sub': SUBJECT}
+            return LOGIN
+        with patch.object(gp, '_token_request', return_value={'access_token': 'fixture-late-access', 'refresh_token': refresh,
+                                                              'scope': ' '.join(gp.SCOPES), 'expires_in': 3600}), \
+                patch.object(gp.GoogleAdapter, 'primary_email', userinfo), \
+                patch.object(gp, '_mutate_tokens', side_effect=lambda path, key, mutate: mutate(self.vault.entries)):
+            done = accounts.complete_google(ctx, code='fixture-code', state=state)
+        self.assertEqual((done['ok'], done['offline_access']), (True, False))   # no lasting access is promised meanwhile
+        return self.vault.entries[LOGIN]['generation']
+
+    def test_card_consent_after_a_settled_unknown_exchange_restores_the_account_without_its_queue(self):
+        # R5: recover keeps answering exchange=unknown for g1 (terminal). The owner then signs in on the card: that new
+        # consent restores the key, calendars and roles without becoming the old exchange's success, so the writes
+        # waiting from before it are withdrawn and an uncertain one stays for comparison.
+        host = MemoryHost()
+        host.rows, host.recoverable = [], False
+        host.started[LOGIN] = dict(generation='g1', receipt=None)
+        self.store.set_setting(google_host.REFUSED, {LOGIN: {'reason': google_host.UNCONFIRMED, 'legacy_generation': 'g1'}})
+        sent = self.queue_event('Sent?')
+        self.store.settle_intent(sent['id'], 'uncertain', {'error': 'lost after send', 'kind': 'network'})
+        before = (self.store.get_account(ACCOUNT), self.store.get_calendar(self.cid))
+
+        def worker():
+            google_host.worker_pass(self.store, {}, self.store.state_dir, host, None, lambda *a, **kw: None)
+        with patch.object(google_host, 'HostSignIn', return_value=host):
+            worker()
+            self.assertTrue(self.store.get_setting(google_host.REFUSED)[LOGIN]['terminal'])
+            providers = Providers({}, self.store.state_dir)
+            self.assertIsNone(providers.adapter_for(ACCOUNT))
+            self.assertIn('withdrawn, not sent', providers.errors[ACCOUNT])   # the hold names the card and the queue's fate
+            # The same address under another verified subject, or this subject's card while not signed in, is no consent.
+            host.rows = [verified_row(key='a-00000000000000000009', subject='other-subject', connection_id='conn-other'),
+                         dict(verified_row(label='renamed@example.test', connection_id='conn-card-1'), state='sign_in_required')]
+            worker()
+            self.assertNotIn(LOGIN, self.store.get_setting(google_host.MOVED))
+            self.assertEqual(self.store.get_intent(self.intent['id'])['state'], 'pending')
+            host.rows[1]['state'] = 'signed_in'
+            worker()
+            mark = self.store.get_setting(google_host.MOVED)[LOGIN]
+            self.assertEqual((mark['account'], mark['via'], mark['connection_id']), (VERIFIED, 'card', 'conn-card-1'))
+            self.assertFalse({'legacy_generation', 'result'} & set(mark))   # nothing records the old exchange as done
+            self.assertNotIn(LOGIN, self.store.get_setting(google_host.REFUSED))
+            adapter = Providers({}, self.store.state_dir).adapter_for(ACCOUNT)
+            self.assertIsInstance(adapter, google_host.HostGoogleAdapter)
+            adapter._refresh()   # an ordinary read asks the host without naming a connection
+            recovered = len(host.recoveries)
+            worker()
+        self.assertEqual((len(host.recoveries), host.handover_generations), (recovered, []))   # never read back or exchanged again
+        self.assertEqual((host.token_accounts, [body.get('connection_id') for body in host.token_bodies]), ([VERIFIED], [None]))
+        self.assertEqual((self.store.get_account(ACCOUNT), self.store.get_calendar(self.cid)), before)
+        dropped = self.store.get_intent(self.intent['id'])
+        self.assertEqual((dropped['state'], json.loads(dropped['result_json'])['note']),
+                         ('resolved', google_host.UNCONFIRMED_CONTINUITY))
+        self.assertEqual(self.store.get_intent(sent['id'])['state'], 'uncertain')
+
+    def test_card_reconsent_after_an_unknowable_renewal_restores_the_account_without_its_queue(self):
+        host = MemoryHost()
+        moved = self.moved_with_unconfirmed_renewal(host, 'g2')
+        self.vault.entries[LOGIN] = dict(self.vault.entries[LOGIN], generation='g2', refresh_token='fixture-refresh-2')
+        with patch.object(google_host, 'HostSignIn', return_value=host), \
+                patch.object(gp.urllib.request, 'urlopen', side_effect=google_accepts) as send:
+            providers = Providers({}, self.store.state_dir)
+            self.assertIsNone(providers.adapter_for(ACCOUNT))
+            self.assertIn(google_host.CARD, providers.errors[ACCOUNT])   # the hold says where it ends
+            google_host.follow(self.store, {}, self.store.state_dir, host)
+            self.assertEqual(self.store.get_setting(google_host.MOVED)[LOGIN], moved)   # the handed-over consent ends nothing
+            # Signed in again on the card: the host keeps this subject's connection and the account's origin.
+            host.rows = [dict(verified_row(label='renamed@example.test', connection_id=moved['connection_id']), legacy_generation='g0')]
+            google_host.follow(self.store, {}, self.store.state_dir, host)
+            mark = self.store.get_setting(google_host.MOVED)[LOGIN]
+            self.assertEqual((mark['via'], mark['connection_id'], 'legacy_generation' in mark), ('card', 'conn-card-1', False))
+            self.assertNotIn(LOGIN, self.store.get_setting(google_host.REFUSED))
+            dropped = self.store.get_intent(self.intent['id'])
+            self.assertEqual((dropped['state'], json.loads(dropped['result_json'])['note']),
+                             ('resolved', google_host.UNCONFIRMED_CONTINUITY))   # the new sign-in gives the old command no right
+            self.assertEqual(google_host.handover(self.store, {}, self.store.state_dir, host)['status'], 'nothing')
+            later = self.queue_event('After the card')
+            report = retry_due_intents(self.store, Providers({}, self.store.state_dir), owner='test')
+        self.assertEqual(([(item['intent'], item['status']) for item in report], send.call_count, host.recoveries),
+                         ([(later['id'], 'done')], 1, []))
+
+    def test_a_late_sign_in_moves_only_with_another_refresh_and_never_takes_the_queue_before_it(self):
+        # g1's first move got no answer, then the old path's sign-in completes. Before any pass the queue before it is held
+        # for review. The same refresh is neither offered nor refreshed here; another refresh makes its own ordinary
+        # attempt, which the core takes when g1's exchange never left and refuses while that exchange is outgoing.
+        for case in ('same refresh', 'g1 never left', 'g1 outgoing'):
+            with self.subTest(case):
+                self.setUp()
+                host = MemoryHost()
+                host.rows, host.verified_imports = [], True
+                with patch.object(google_host, 'HostSignIn', return_value=host):
+                    stale = Providers({}, self.store.state_dir)   # read while g1 was the working local grant
+                    stale.saved_accounts = {name: dict(saved) for name, saved in stale.saved_accounts.items()}   # as a real read: a copy
+                    kept = stale.adapter_for(ACCOUNT)
+                self.lost_first_answer(host)
+                if case == 'g1 outgoing':
+                    host.started[LOGIN] = dict(generation='g1', receipt=None)
+                new = self.late_sign_in(host, 'fixture-refresh' if case == 'same refresh' else 'fixture-refresh-late')
+                held = self.store.get_intent(self.intent['id'])
+                self.assertEqual((held['state'], json.loads(held['result_json'])['note']), ('conflict', google_host.UNCONFIRMED_TRANSFER))
+                with patch.object(google_host, 'HostSignIn', return_value=host):
+                    adapter = Providers({}, self.store.state_dir).adapter_for(ACCOUNT)
+                    self.assertIs(type(adapter), gp.GoogleAdapter)   # before a pass: the new grant's own fresh access
+                    self.assertEqual(bool(adapter.refresh_token), case != 'same refresh')   # the same refresh is never used here
+                    google_host.worker_pass(self.store, {}, self.store.state_dir, host, None, lambda *a, **kw: None)
+                    after = Providers({}, self.store.state_dir).adapter_for(ACCOUNT)
+                    self.assertIsNot(type(stale.adapter_for(ACCOUNT)), gp.GoogleAdapter)   # never that older copy; the host may serve
+                    with self.assertRaises(ProviderError):
+                        kept._legacy_guard(False)   # nor refreshed or sent through the adapter chosen then
+                self.assertEqual((host.recoveries, host.handover_generations), ([], [new] if case == 'g1 never left' else []))
+                self.assertEqual(self.store.get_intent(self.intent['id'])['state'], 'conflict')   # the queue before it stays apart
+                if case == 'g1 never left':   # the core took it: an ordinary moved account
+                    self.assertEqual(self.store.get_setting(google_host.MOVED)[LOGIN]['legacy_generation'], new)
+                    self.assertIsInstance(after, google_host.HostGoogleAdapter)
+                elif case == 'g1 outgoing':   # refused while g1's exchange is unresolved: never displaced, the card decides
+                    self.assertEqual(self.store.get_setting(google_host.REFUSED)[LOGIN]['legacy_generation'], new)
+                    self.assertIsNone(after)
+                else:   # not offered: only its own access token, and the reservation stays about g1
+                    self.assertEqual(self.store.get_setting(google_host.REFUSED)[LOGIN]['legacy_generation'], 'g1')
+                    self.assertIs(type(after), gp.GoogleAdapter)
+
+    def test_a_moved_accounts_late_sign_in_with_another_refresh_renews_on_its_own(self):
+        # R (g0) holds the account and the renewal of g1 is unconfirmed; the old path's sign-in with another refresh then
+        # makes its own ordinary renewal of R. The queue before it stays held; a new command goes once the core took it.
+        host = MemoryHost()
+        host.verified_imports, host.handover_connection_id = True, CONFIRMED['connection_id']
+        self.moved_with_unconfirmed_renewal(host, 'g1')
+        new = self.late_sign_in(host, 'fixture-refresh-late')
+        self.assertEqual(self.store.get_intent(self.intent['id'])['state'], 'conflict')
+        with patch.object(google_host, 'HostSignIn', return_value=host), \
+                patch.object(gp.urllib.request, 'urlopen', side_effect=google_accepts) as send:
+            google_host.worker_pass(self.store, {}, self.store.state_dir, host, None, lambda *a, **kw: None)
+            later = self.queue_event('After the renewal')
+            report = retry_due_intents(self.store, Providers({}, self.store.state_dir), owner='test')
+        mark = self.store.get_setting(google_host.MOVED)[LOGIN]
+        self.assertEqual((mark['legacy_generation'], mark['connection_id']), (new, CONFIRMED['connection_id']))
+        self.assertEqual(([(item['intent'], item['status']) for item in report], send.call_count), ([(later['id'], 'done')], 1))
+        self.assertEqual((host.recoveries, host.handover_generations), ([], [new]))
+
+    def test_an_account_disconnected_here_comes_back_only_on_another_card_connection(self):
+        # The owner disconnects here while g1's move is unanswered and the owner's card is already listed: that card keeps
+        # the account out; only another connection on the card brings it back.
+        self.lost_first_answer(self.host)
+        self.host.rows = [verified_row(connection_id='conn-card-1')]
+        self.assertEqual(self.follow()['added'], 0)   # while the answer can still be read back, the card settles nothing
+        accounts.withdraw_account(self.store, self.store.state_dir, '', self.store.get_account(ACCOUNT))
+        for _ in range(2):   # the card already listed, signed in again or not, does not undo the disconnect
+            self.assertEqual(self.follow(), {'status': 'ok', 'added': 0, 'withdrawn': 0})
+            self.assertIsNone(self.store.get_account(ACCOUNT))
+        self.assertEqual(self.store.get_setting(google_host.WITHDRAWN)[LOGIN]['host_connection_id'], 'conn-card-1')
+        self.host.rows = [verified_row(label='renamed@example.test', connection_id='conn-card-2')]   # disconnected and signed in again
+        self.assertEqual(self.follow(), {'status': 'ok', 'added': 1, 'withdrawn': 0})
+        mark = self.store.get_setting(google_host.MOVED)[LOGIN]
+        self.assertEqual((mark['account'], mark['connection_id'], 'legacy_generation' in mark), (VERIFIED, 'conn-card-2', False))
+        self.assertNotIn(LOGIN, self.store.get_setting(google_host.REFUSED))
+        self.assertEqual(self.store.get_intent(self.intent['id'])['state'], 'resolved')   # the disconnect's withdrawal stands
+        row = self.store.get_calendar(self.cid)
+        self.assertEqual((row['account_id'], row['role_busy'], row['is_default']), (ACCOUNT, 0, 1))
+        providers = SimpleNamespace(state_dir=self.store.state_dir, google_host={'host': self.host})
+        self.assertIsInstance(google_host.adapter_for(providers, LOGIN), google_host.HostGoogleAdapter)
 
 
 if __name__ == '__main__':
