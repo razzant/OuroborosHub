@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/7f21cf8cbb423644e00858bb11b49245d7c81556",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/482dbb9394da5b3ddc1673571b481ec66f2c6219",
   "schema_version": 1,
   "skills": [
     {
@@ -233,8 +233,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "7aa1904839eae7b773f0e3fd30903ba6c103ae101249f8682918c8c606fbad8e",
-          "size": 21416
+          "sha256": "f6f95535a0ca5a266f9f2ca3ce16c6eb62263c32fc49fbc1ef3c1f21f6a7b441",
+          "size": 21998
         },
         {
           "path": "scripts/amberkeep.py",
@@ -256,7 +256,7 @@
       "slug": "amberkeep",
       "title": "Amberkeep",
       "type": "instruction",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "when_to_use": "The user wants to introduce themselves or carry over memory, decisions, instructions, projects, or unfinished work from another AI assistant (ChatGPT, Claude, Claude Code, Codex, Hermes, Dots, Duet), pastes a summary from a previous assistant, or shares an export file or Portable Memory package to continue work in an Ouroboros room."
     },
     {
@@ -3060,6 +3060,28 @@
       "type": "instruction",
       "version": "0.1.0",
       "when_to_use": "A person wants current public website information, such as flight fares, product prices, listings or availability, and Pomerado is connected or the owner wants help connecting it. Not for private data, website changes, account login or building tools."
+    },
+    {
+      "author": "Ouroboros (@ouroboros-agent), Hub guide; Vasily Lemutov (@vlemutov), upstream Portable Context",
+      "description": "Find, read with sources and, only when the user asks, save notes in a Portable Context library the user has already connected over MCP, so several agents share one living original instead of separate copies.",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "565b282b088ee8c21e7ea9a67817eee235c37acbf9fdd20201a174a683773501",
+          "size": 2835
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "6b8327b4414128581f03269126ad32bca50cebf6c719473e5b53a6e272c14c48",
+          "size": 15667
+        }
+      ],
+      "name": "portable-context-library",
+      "slug": "portable-context-library",
+      "title": "Portable Context library",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "The user mentions their Portable Context library or shared memory, wants the current version of a note, decision or file another connected agent also uses, asks what the library says, or asks to save or change something there."
     },
     {
       "description": "Account credit, key limits and provider-reported usage for configured provider keys.",
