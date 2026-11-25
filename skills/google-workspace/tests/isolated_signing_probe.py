@@ -34,7 +34,7 @@ def main():
     skills = temp_root / "skills"
     skill = skills / "google-workspace"
     skill.mkdir(parents=True)
-    for name in ("SKILL.md", "auth.py", "client.py", "results.py"):
+    for name in ("SKILL.md", "auth.py", "client.py", "results.py", "host_sign_in.py", "user_oauth.py"):
         shutil.copyfile(source_skill / name, skill / name)
     shutil.copyfile(source_skill / "plugin.py", skill / "original_plugin.py")
     shutil.copyfile(source_skill / "tests" / "workspace_fixtures.py", skill / "fixture_data.py")
@@ -45,8 +45,14 @@ import base64
 import json
 from urllib.parse import parse_qs
 import httpx
-from . import original_plugin, auth
+from . import original_plugin, auth, host_sign_in
 from .fixture_data import nested_document
+
+def _old_host(self, method, path, body=None, timeout=40):
+    assert (method, path) == ("GET", "/identity")
+    return {"ok": True}
+
+host_sign_in.HostSignIn._call = _old_host
 
 _Client = httpx.Client
 

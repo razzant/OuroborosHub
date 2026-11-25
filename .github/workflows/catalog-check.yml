@@ -88,7 +88,7 @@ jobs:
       # OUROBOROS_CORE_SHA above. Without it those suites fail; their real-core tests never skip. The widgets suite
       # also reads the core's historical theme bridge with git show, so its checkout carries the history (about 130 MB).
       - name: Check out the pinned core
-        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session", "widgets"]'), matrix.suite)
+        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "google-workspace", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session", "widgets"]'), matrix.suite)
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
@@ -115,6 +115,11 @@ jobs:
           echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
           echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
           echo "OUROBOROS_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+      - name: Install the core's runtime and name the core for Google Workspace
+        if: matrix.suite == 'google-workspace'
+        run: |
+          python -m pip install -r core/requirements.txt
+          echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
       # The Slack Bridge card's browser test mounts it through the core's module bridge in Chromium and WebKit. Without
       # the browsers it fails (TRANSPORT_WIDGET_REQUIRE_BROWSERS in scripts/ci_checks.py); it never skips.
       - name: Install Playwright's browsers for the Slack Bridge card

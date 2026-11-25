@@ -309,7 +309,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/tel
 ```
 
 Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
-mail, Calendar, Smart Lists, the dashboard widgets, GitHub and the Presence consumers of
+mail, Google Workspace, Calendar, Smart Lists, the dashboard widgets, GitHub and the Presence consumers of
 Freshdesk, Slack and Telegram) runs against `OUROBOROS_CORE_SHA` at the top of
 `.github/workflows/catalog-check.yml` in `core`, and the catalog job checks every hosted release
 and connector against that same commit. The one temporary exception is `calendar-skill`, which
@@ -375,6 +375,10 @@ from the pinned core. Set `OUROBOROS_SOURCE_DIR` and
 `python -B scripts/ci_checks.py run email-presence` and
 `python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner
 enables its browser cases and real child-tool/Place-binding checks.
+
+For Google Workspace, install the pinned core's Python requirements (no browsers),
+set `OUROBOROS_SOURCE_DIR` to that checkout, and run `python -B scripts/ci_checks.py run google-workspace`.
+This runs the payload tests, including real child dispatch and readback of saved results.
 
 Chrome (`chrome_browser`) keeps its tests outside the payload, in
 [`tests/chrome_browser`](tests/chrome_browser/README.md). They need no browser, but they need Node 24 and

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, urlsplit, parse_qs
 import httpx
 
@@ -105,6 +105,7 @@ class GoogleWorkspaceClient:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         refresh_token: Optional[str] = None,
+        token_provider: Optional[Callable[[Optional[str]], str]] = None,
     ) -> None:
         self.raw_sa_info = raw_sa_info
         # OAuth bearer tokens are accepted only when explicitly supplied.  A
@@ -114,6 +115,14 @@ class GoogleWorkspaceClient:
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token
+        # A supplied provider owns token selection, including the Settings-to-host transition.
+        # Give it the bearer that was rejected, without replaying a Workspace operation here.
+        self._token_provider = token_provider
+        self._used_token: Optional[str] = None
+        self._token_source = ""
+        self._direct_bearer_committed = False
+        self.sign_in_source = ""
+        self.sign_in_facts: Dict[str, Any] = {}
         self._external_client = http_client is not None
         self.client = http_client or httpx.Client(timeout=DEFAULT_TIMEOUT)
 
@@ -128,10 +137,17 @@ class GoogleWorkspaceClient:
         self.close()
 
     def _get_headers(self, force_refresh: bool = False, scopes: Optional[List[str]] = None) -> Dict[str, str]:
+        self._token_source = ""
+        if self._token_provider is not None:
+            token = self._token_provider(self._used_token if force_refresh else None)
+            self._used_token = token
+            return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         if self.access_token or self.refresh_token or self.client_id or self.client_secret:
             token = get_user_access_token(
                 self.client_id, self.client_secret, self.refresh_token, self.client,
                 access_token=self.access_token, force_refresh=force_refresh,
+                allow_refresh=not self._direct_bearer_committed,
+                on_source=lambda source: setattr(self, "_token_source", source),
             )
         else:
             token = get_access_token(
@@ -158,17 +174,23 @@ class GoogleWorkspaceClient:
     ) -> httpx.Response:
         """Execute an HTTP request with automatic 401 token refresh retry."""
         req_headers = self._get_headers(force_refresh=False, scopes=scopes)
+        used_direct = self._token_source == "direct"
         if headers:
             req_headers.update(headers)
 
-        resp = self.client.request(
-            method=method,
-            url=url,
-            headers=req_headers,
-            params=params,
-            json=json_body,
-            content=content,
-        )
+        try:
+            resp = self.client.request(
+                method=method,
+                url=url,
+                headers=req_headers,
+                params=params,
+                json=json_body,
+                content=content,
+            )
+        except Exception:
+            if used_direct:
+                self._direct_bearer_committed = True
+            raise
 
         # Retry once on 401 Unauthorized with fresh token
         if resp.status_code == 401:
@@ -183,6 +205,8 @@ class GoogleWorkspaceClient:
                 json=json_body,
                 content=content,
             )
+        elif used_direct:
+            self._direct_bearer_committed = True
 
         if resp.status_code >= 400:
             error_detail = resp.text[:1000]
@@ -555,6 +579,7 @@ class GoogleWorkspaceClient:
         if parent:
             metadata["parents"] = [parent]
         headers = self._get_headers()
+        used_direct = self._token_source == "direct"
         headers["Accept"] = "application/json"
         files = {
             "metadata": (None, json.dumps(metadata), "application/json; charset=UTF-8"),
@@ -562,9 +587,16 @@ class GoogleWorkspaceClient:
         }
         url = "https://www.googleapis.com/upload/drive/v3/files"
         params = {"uploadType": "multipart", "supportsAllDrives": "true"}
-        response = self.client.post(url, params=params, headers=headers, files=files)
+        try:
+            response = self.client.post(url, params=params, headers=headers, files=files)
+        except Exception:
+            if used_direct:
+                self._direct_bearer_committed = True
+            raise
         if response.status_code == 401:
             response = self.client.post(url, params=params, headers=self._get_headers(force_refresh=True), files=files)
+        elif used_direct:
+            self._direct_bearer_committed = True
         if response.status_code >= 400:
             raise RuntimeError(f"Google API error ({response.status_code} {response.reason_phrase}): {response.text[:1000]}")
         data = response.json()
@@ -645,6 +677,7 @@ class GoogleWorkspaceClient:
         # Read streaming response bounded to effective_max chars (approx 4x bytes headroom)
         max_bytes_to_read = effective_max * 4 + 4096
         req_headers = self._get_headers(force_refresh=False)
+        used_direct = self._token_source == "direct"
 
         def _read_stream(r_headers: Dict[str, str]) -> bytes:
             with self.client.stream("GET", url, headers=r_headers, params=params) as stream_resp:
@@ -663,9 +696,13 @@ class GoogleWorkspaceClient:
                                 break
                         return b"".join(chunks)
                 elif stream_resp.status_code >= 400:
+                    if used_direct:
+                        self._direct_bearer_committed = True
                     err_text = stream_resp.read().decode("utf-8", errors="replace")[:1000]
                     raise RuntimeError(f"Google API error ({stream_resp.status_code} {stream_resp.reason_phrase}): {err_text}")
                 else:
+                    if used_direct:
+                        self._direct_bearer_committed = True
                     chunks = []
                     total_bytes = 0
                     for chunk in stream_resp.iter_bytes(chunk_size=8192):

@@ -17,7 +17,10 @@ OAUTH = {"client_id": "client-fixture", "client_secret": "secret-fixture", "refr
 
 
 @pytest.fixture(autouse=True)
-def clear_token_cache():
+def clear_token_cache(monkeypatch, tmp_path):
+    monkeypatch.delenv("HOST_SERVICE_URL", raising=False)
+    monkeypatch.delenv("HOST_SERVICE_TOKEN", raising=False)
+    monkeypatch.setattr(FakeAPI, "get_state_dir", lambda self: tmp_path, raising=False)
     auth._TOKEN_CACHE.clear()
     yield
     auth._TOKEN_CACHE.clear()
