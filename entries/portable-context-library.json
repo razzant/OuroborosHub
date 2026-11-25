@@ -1,0 +1,21 @@
+{
+  "author": "Ouroboros (@ouroboros-agent), Hub guide; Vasily Lemutov (@vlemutov), upstream Portable Context",
+  "category": [
+    "search",
+    "documents"
+  ],
+  "description": "Find, read with sources and, only when the user asks, save notes in a Portable Context library the user has already connected over MCP, so several agents share one living original instead of separate copies.",
+  "digest": "fa01cca76b8d3ff62f21114ffa6cbffe958417ea4a892f2d8d3412ac8c97e870",
+  "name": "portable-context-library",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/portable-context-library"
+  },
+  "title": "Portable Context library",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "The user mentions their Portable Context library or shared memory, wants the current version of a note, decision or file another connected agent also uses, asks what the library says, or asks to save or change something there.",
+  "withdrawn": null
+}

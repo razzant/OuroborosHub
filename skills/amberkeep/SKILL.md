@@ -8,7 +8,7 @@ description: >-
   or explicit export files and Portable Memory packages, orients with grounded
   prompts and any open task, reconciles against live memory with revision
   checks, and verifies packages before applying without auto-installing anything.
-version: 0.1.1
+version: 0.1.2
 type: instruction
 when_to_use: >-
   The user wants to introduce themselves or carry over memory, decisions,
@@ -54,6 +54,8 @@ Neither door prepares for the other, and the composer `+` button only pre-fills 
 
 1. **One pasted paragraph is enough** (*"My old assistant wrote this about me"*): no export, no ZIP, no commands. Attribute a line you repeat to whoever the paste itself identifies as its source (an old assistant's summary, the user's own note); when that is unknown or mixed, to "the supplied text". Reply with a short, useful portrait of what it says, then propose one thing to do with it.
 2. **A shared file goes straight in** (*"Continue this work"*): inspect the export, `.zip`, log or package the user chose — Portable Memory `.zip`, chosen ChatGPT/Claude export (an official export ZIP works: only `conversations.json` is read), Claude Code/Codex session log, Hermes `sessions export` JSONL or `MEMORY.md`/`USER.md`, Dots/Duet text — never ask for a summary first. The first reply is the same shape as for a paste — what you learned, from which source, and the one thing that can be continued — before any question about saving.
+
+**A copy, not a living original.** What Amberkeep carries is a copy: a later change at the source never reaches it. If the user wants several agents to keep reading and updating one shared original, point them to the separate, optional `portable-context-library` skill, which works with a Portable Context library they have already connected. Nothing in this flow needs it, connects to one, or exports there.
 
 Only what the user explicitly provides; never scan disks, profiles, browsers or live databases, and read a named folder through its ordinary listing, file by file with the user. Where Ouroboros runs in a cloud or on a server, work only with the text and files the user pastes or uploads there.
 
@@ -122,5 +124,6 @@ Published in OuroborosHub by `ouroboros-agent`:
 
 ## Changes
 
+- **0.1.2:** a user who wants one living original shared by several agents is pointed to the separate, optional `portable-context-library` skill; transfers work as before.
 - **0.1.1:** `version_sha256` now also covers the date and is reported with its scheme (`amberkeep-version/2`); a 0.1.0 binding is re-checked once against the source and updated in place; a receipt also binds the reading rules; only a full chain hop keeps hop fields; a dropped link's field names never travel; a stated empty collection stays, a value the strip emptied verifies no projection; split Claude Code words stay separate excerpts, nested harness notes are balanced and a record whose type and role disagree is `unknown`; a Codex echo pairs with its item whole or by the item's visible parts, and the pair is kept once, at its first-seen record (an echo that holds a harness block, as one of the whole item does, gives way to the item's visible parts), and Codex text mixing a harness block with other words is `unknown`; dropped field names travel only as the schema's canonical names, and fields outside a citation's or link's shape are only counted; a role that conflicts with its provenance is refused, and the content check covers unselected records too; `quote --original` also reports `provenance_match`; commands run as `python3 -B` from the task's own folder; outputs only there, whole and never overwritten; the verified package goes out through `outputs` and `send_file`, the rows table stays private; a changed date or author updates the saved record; a missing workpad page is created with `expected_revision=""`.
 - **0.1.0:** first release.
