@@ -109,10 +109,13 @@ it (`api.get_state_dir()`):
   (`win`), time, and reserve before the first reported reset (conditional
   estimate, never a dispatch guarantee), and surfaces open binding-window
   caveats with Details closed whenever another governing limit (such as a
-  5-hour window) can still stop accounts earlier. When runnable (unblocked)
-  reserve hits zero while another spent limit temporarily holds the remaining
-  selected-window share, the strip reports the blocked blackout window and
-  marks the exact curve point rather than promising uninterrupted reserve. When
+  5-hour window) can still stop accounts earlier. An account that cannot run
+  now (another spent limit, or its own known state: disabled, signed out,
+  cooling down, the selected model reported out; a state not read holds
+  nothing) keeps its share in the total but is neither drained nor counted as
+  usable until that ends. When usable reserve runs out, the strip says from
+  when to when (the end is the first known event that brings it back, the
+  same on both spans) and marks the point on the drawn line. When
   Typical is unknown (fewer than 12 valid hours, history unavailable, or held)
   or when **Combined** (`joint`) is active, Typical draws **no** numeric future
   line, checkpoints or schedule under Typical's name and explains why, while
@@ -1078,9 +1081,11 @@ fitted to the lines.
     at least 12 valid hours and 80% pool coverage — 100% for 1–4 accounts)
     across the currently measured accounts so pooled demand shifts onto
     remaining accounts when one hits zero, refilling each account once at its
-    next reported reset. When fewer than 12 valid hours exist, history is
-    unavailable, or all accounts are held by scope or another unknown/unreset
-    binding limit, Typical draws no numeric future line, checkpoints or
+    next reported reset. When fewer than 12 valid hours exist, accounts sat at
+    their limit so their use could not be seen (`reason`:
+    `all_observed_at_limit`), history is unavailable, or all accounts are held
+    (scope, another unknown/unreset limit, or their own restriction with no
+    reported end), Typical draws no numeric future line, checkpoints or
     schedule and explains why (a measured zero with sufficient pool coverage
     and non-exhausted capacity is distinct and drawn as 0.000 win/h). Combined
     (`joint`) emits no `typical` scenario and draws no Typical line; switching
@@ -1107,12 +1112,13 @@ fitted to the lines.
   last of them (`total_after`) — `later` (the first reported reset past the
   span: when and for how many, never how much), `checkpoints` (the total an
   hour, 6 and 12 hours and a day ahead; a day, 3 days and a week on the
-  7-day span) and, at the recent pace, `runs_out` (when accounts reach zero
-  inside the span: before their reported reset, with none reported, or again
-  after their refill). Every one of them is read off the same functions the
-  line is drawn from; a reset exactly at the horizon is drawn with its
-  refill. The horizon is one instant: the whole second published as `end`
-  (now plus the span, rounded to the second). Which resets fall inside it,
+  7-day span) and, at a pace, `runs_out` (when the reserve that can run
+  reaches zero inside the span, Typical's pool or each recent-pace account:
+  before a reported reset, with none reported, or again after a refill).
+  Every one of them is read off the same functions the line is drawn from;
+  a reset exactly at the horizon is drawn with its refill. The horizon is one
+  instant: the whole second published as `end` (now plus the span, rounded to
+  the second). Which resets fall inside it,
   both lines and the older ones, `later`, `runs_out`, the checkpoints (each
   read off at the whole second it is published at) and the table's rows are
   all decided against that instant, never a fraction of a second either side
@@ -1144,17 +1150,22 @@ field, in `legacy_assumptions` and never shown.
 A cursor carries the numbers: a hairline, a dot on each line and one tooltip,
 driven by the pointer or by arrow keys on the focused plot, with a spoken
 read-out of the historical total and its membership at that moment, carried
-counts and age/source, plus the separate fresh-only scenario. Under the chart:
-one compact legend explains solid/dashed history and what the future assumes,
-including its current account count when no pace qualifies;
-then, at the recent pace, who runs out and when; the checkpoints; the first
-two reported resets with the rest on request, and "Details, notes and data" —
-the limit's details (scope, restrictions with the unrestricted windows, what
-is not counted, plans, shared sign-ins, resets, even use and recent pace), every
-caveat, the record and watch, the time zone, and a bounded table of the same
-display history with carried counts and provenance, followed by the scenarios
-at reported resets and checkpoints. The older strict-series table and paged
-single-sweep sightings remain only as a renderer fallback for answers without
+counts and age/source, plus the separate fresh-only scenario. Above the chart
+the verdict strip reads the chosen future up to the first reported reset: for
+*Typical* whether the pool lasts to it, what is left just before and after it,
+and from when to when no usable reserve is left (a stop is said as one, never
+as "almost"), or why no line is drawn; for *No new use* what is left before
+the reset if nothing more is used. It is not shown while the answer for a newly
+chosen model or request kind is read. Under the chart one compact legend
+explains solid/dashed history and the line drawn; "Details, notes and data"
+holds the full legend, when the pool runs out at the typical pace, the
+checkpoints, the first two reported resets with the rest on request, the
+limit's details (scope, restrictions with the unrestricted windows, what is
+not counted, plans, shared sign-ins, resets, even use and the trailing-hour
+recent pace), every caveat, the record and watch, the time zone, and a bounded
+table of the same display history with carried counts and provenance, followed
+by the scenarios at reported resets and checkpoints. The older strict-series
+table and paged single-sweep sightings remain only as a renderer fallback for answers without
 `chart.history`. The timeline, span, future, details, keyboard focus and cursor
 survive the automatic 30-second redraw.
 Refresh is disabled while a read is in the air, and a disabled button cannot

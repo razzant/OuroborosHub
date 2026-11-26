@@ -700,6 +700,9 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     holds: Counter = Counter()
     pooled_members: List[qs.Member] = []
     pooled_blocks: List[Optional[float]] = []
+    # Why each pooled account is held with no known end (Typical's own count;
+    # ``holds`` above stays the legacy scenarios' count).
+    pooled_held: Counter = Counter()
     for acct in accounts:
         bound = [key for key in keys if key == chart.key or acct.members.get(key) is not None]
         w = acct.wins(bound, recent=True)
@@ -729,6 +732,20 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                         blk = sibling.reset if blk is None else max(blk, sibling.reset)
         own_member = acct.members.get(chart.key)
         if own_member is not None and own_member.status == "measured":
+            # The account's own known state (disabled, signed out, cooling
+            # down, the selected model reported out) holds it as well, and so
+            # does every known hold of another window that binds this request
+            # (``bound``): a model reported out on its own window stops that
+            # model's requests whatever the share of a shared one. The share
+            # stays measured; Typical neither drains it nor counts it as
+            # usable until every hold has ended.
+            binding = [own_member] + [
+                m for key in bound if key != chart.key
+                for m in (acct.members.get(key),) if m is not None and m.status == "measured"]
+            blk = qf.later_of(blk, *(m.hold_until for m in binding))
+            if blk is not None and not math.isfinite(blk):
+                endless = [m for m in binding if m.hold_until is not None and not math.isfinite(m.hold_until)]
+                pooled_held[why or (qf.held_why(endless[0]) if endless else "other_limit_spent")] += 1
             pooled_members.append(own_member)
             pooled_blocks.append(blk)
         rows.append((w, _own_pace(own_member)))
@@ -744,7 +761,7 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
         futures["no_new_use"]["verdict"] = qf.build_no_new_use_verdict(pooled_members, now, end)
         held_reason = ("scope_unknown" if own_unknown
                        else "scope_not" if not scope_applies
-                       else (holds.most_common(1)[0][0] if holds else "other_limit_spent"))
+                       else (pooled_held.most_common(1)[0][0] if pooled_held else "other_limit_spent"))
         other_labels: List[str] = []
         for k in keys:
             if k == chart.key:

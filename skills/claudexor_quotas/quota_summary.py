@@ -1166,6 +1166,11 @@ class Member:
     last_known: Optional["LastKnown"] = None
     # Earliest reported end of evidence behind this member's time-limited flags.
     restriction_boundary: Optional[float] = None
+    # When every restriction known now ends, so the account can run again: None
+    # when nothing known holds it now (an account state not read holds nothing),
+    # math.inf when one has no reported end. A forecast holds the share until
+    # then instead of draining it; it is not a reset and not a share.
+    hold_until: Optional[float] = None
     # Earliest known end of a competing current source; not a reset prediction.
     conflict_boundary: Optional[float] = None
 
@@ -1517,6 +1522,15 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
         boundaries.extend(other.resets_at for other in blockers)
     member.restriction_boundary = min((end for end in boundaries if end is not None), default=None)
     member.flags = tuple(flags)
+    # The holds known now and when each ends (None: no reported end). A failed
+    # check alone, or an account state that was not read, is no hold.
+    holds: List[Optional[float]] = [None] if ("disabled" in flags or "signed_out" in flags) else []
+    holds.extend(ends[held] for held in {"-", scope} if held in ends)
+    if scoped_end is not None:
+        holds.append(scoped_end)
+    holds.extend(other.resets_at for other in blockers)
+    member.hold_until = (None if not holds else math.inf if any(end is None for end in holds)
+                         else max(holds))
 
 
 def _shared_identities(norm: Normalized, members: List[Member]) -> int:
@@ -3042,7 +3056,14 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
         typical_info = qf.estimate_typical_pace(calc, state)
         no_new_use_sc = _scenario(members, [], now, end, horizon)
         no_new_use_sc["verdict"] = qf.build_no_new_use_verdict(members, now, end)
-        typical_sc = qf.build_typical_scenario(members, now, end, horizon, typical_info)
+        # Each account's known restrictions hold its share out of the usable
+        # reserve until they end; the measured balance is not changed by them.
+        blocks = [m.hold_until for m in members]
+        held = Counter(qf.held_why(m) for m, blk in zip(members, blocks)
+                       if blk is not None and not math.isfinite(blk))
+        typical_sc = qf.build_typical_scenario(
+            members, now, end, horizon, typical_info, blocked_until=blocks,
+            held_reason=held.most_common(1)[0][0] if held else "")
         scenarios = {
             "typical": typical_sc,
             "no_new_use": no_new_use_sc,

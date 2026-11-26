@@ -380,15 +380,33 @@ def test_estimator_hygiene_resets_jitter_drops_plans_gaps_failed_multisource_and
 
 
 def test_24h_and_7d_compute_same_48h_typical_rate_and_verdict(tmp_path):
+    """Distinct burn rates in >48h, 24..48h, and 0..24h verify that BOTH 24h and 7d
+    spans use the exact 48-hour lookback (neither truncating to 24h nor leaking >48h)."""
     now = _aligned_now()
     reset_at = now + 48 * H  # past 24h span, inside 7d span
-    times = [now - 18 * H + k * 300.0 for k in range(18 * 12 + 1)]
+    base = now - 54 * H
+    # 6-minute cadence (< SIGHTING_GAP_SEC = 420s) lands exactly on -54h, -48h, -24h, now.
+    times = [base + k * 360.0 for k in range(54 * 10 + 1)]
+
+    def ratios_at(t):
+        # >48h ago [-54h..-48h]: pooled 0.080 win/h (control sentinel outside 48h window)
+        # 24..48h  [-48h..-24h]: pooled 0.025 win/h (a: 0.015/h, b: 0.010/h -> 0.60 burn)
+        # 0..24h   [-24h..0h]:   pooled 0.010 win/h (a: 0.005/h, b: 0.005/h -> 0.24 burn)
+        age_h = (now - t) / H
+        if age_h >= 48.0:
+            dt = 54.0 - age_h
+            return 0.02 + 0.04 * dt, 0.02 + 0.04 * dt
+        if age_h >= 24.0:
+            dt = 48.0 - age_h
+            return 0.26 + 0.015 * dt, 0.26 + 0.010 * dt
+        dt = 24.0 - age_h
+        return 0.62 + 0.005 * dt, 0.50 + 0.005 * dt
 
     def sweep(t):
-        dt = (t - (now - 18 * H)) / H
+        u_a, u_b = ratios_at(t)
         return [
-            _snap("codex", "a", [_con("primary", 0.10 + 0.02 * dt, WEEK, reset_at, label="Weekly")], observed_at=t - 10),
-            _snap("codex", "b", [_con("primary", 0.15 + 0.01 * dt, WEEK, reset_at, label="Weekly")], observed_at=t - 10),
+            _snap("codex", "a", [_con("primary", u_a, WEEK, reset_at, label="Weekly")], observed_at=t),
+            _snap("codex", "b", [_con("primary", u_b, WEEK, reset_at, label="Weekly")], observed_at=t),
         ], ("a", "b")
 
     store, status = _record_sweeps(tmp_path, "codex", sweep, times)
@@ -397,9 +415,12 @@ def test_24h_and_7d_compute_same_48h_typical_rate_and_verdict(tmp_path):
     t24 = rv24["chart"]["scenarios"]["typical"]
     t7d = rv7d["chart"]["scenarios"]["typical"]
 
+    expected_rate = (0.60 + 0.24) / 48.0  # 0.0175 win/h (vs 0.010 for 24h, 0.0244 for 54h)
     assert t24["status"] == t7d["status"] == "ok"
     assert t24["rate_per_hour"] == t7d["rate_per_hour"]
-    assert t24["valid_hours"] == t7d["valid_hours"]
+    assert math.isclose(t24["rate_per_hour"], expected_rate, abs_tol=1e-4)
+    assert t24["valid_hours"] == t7d["valid_hours"] == 48.0
+    assert t24["valid_seconds"] == t7d["valid_seconds"] == 48 * 3600
     assert t24["verdict"]["state"] == t7d["verdict"]["state"] == "runs_out"
     assert t24["verdict"]["before_first_reset"] == t7d["verdict"]["before_first_reset"] == 0.0
     assert t24["verdict"]["empty_at"] == t7d["verdict"]["empty_at"]
@@ -535,13 +556,14 @@ def test_verdict_states_and_unified_simulation():
     assert sc_tight["verdict"]["state"] == "tight"
     assert math.isclose(sc_tight["verdict"]["before_first_reset"], 0.03, abs_tol=1e-3)
 
-    # Tight: empties 5 min before reset (< 15m gap threshold)
+    # A real stop of 3 min before the reset is a stop, never "almost": runs_out, and
+    # its short length (under the 15 min tone threshold) is what the widget softens.
     sc_tight_gap = qf.build_typical_scenario(
         [_member(0.395, now + 4 * H)], now, end, "24h",
         {"state": "ok", "rate_per_hour": 0.10, "valid_hours": 24.0, "valid_seconds": 86400, "min_valid_hours": 12},
     )
-    assert sc_tight_gap["verdict"]["state"] == "tight"
-    assert sc_tight_gap["verdict"]["gap_seconds"] < qf.VERDICT_GAP_BAD_SEC
+    assert sc_tight_gap["verdict"]["state"] == "runs_out"
+    assert 0 < sc_tight_gap["verdict"]["gap_seconds"] < qf.VERDICT_GAP_BAD_SEC
 
     # Lasts comfortably: 0.60 left before reset
     sc_lasts = qf.build_typical_scenario(
@@ -835,8 +857,8 @@ def test_real_browser_blocked_gap_and_unknown_typical_honesty(browser, tmp_path_
             overflow: document.documentElement.scrollWidth > window.innerWidth,
         })""")
         assert "lasts" not in got["head"].lower(), got
-        assert "unblocked" in got["head"].lower() and "blocked until" in got["head"].lower(), got
-        assert "0.40 win sits on blocked accounts" in got["verdict"], got
+        assert got["head"].startswith("No usable ") and " from ~" in got["head"] and " to ~" in got["head"], got
+        assert "0.40 win is on restricted accounts" in got["verdict"], got
         assert "Usable empty" in got["verdict"] and "Resumes" in got["verdict"], got
         # Depletion dot stands at y(0.40) strictly ABOVE the 0 baseline!
         assert got["dotCy"] is not None and got["dotCy"] < got["baseY"] - 5, got
