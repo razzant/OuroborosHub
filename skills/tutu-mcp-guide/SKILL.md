@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants tickets or hotels found and compared on Tutu.ru, a Russian travel service, or asks to connect Tutu's MCP server. Payment always happens on tutu.ru through a link."
 model_experience:
-  what_model_sees: "A short guide: the server address, how to add it under Extensions → MCP servers, the tools the server listed on 2026-11-26, which one has side effects, and its limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, how to add it under Settings → Extensions → MCP servers, the tools the server listed on 2026-11-26, which one has side effects, and its limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -34,9 +34,9 @@ below; the tools then come from Tutu's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `Tutu`, **Server ID** `tutu`, **Transport**
    Streamable HTTP and **Address** `https://mcp.tutu.ru/mcp`. Leave the headers empty.
 3. Press **Test**. On 2026-11-26 it reported a working connection with 17 tools.
@@ -64,7 +64,11 @@ Search and details, read-only:
 Checkout:
 
 - `create_checkout_link` is the default hand-off. It returns a link to tutu.ru for the
-  chosen offer; the cart is created in the person's own browser.
+  chosen offer; the cart is created in the person's own browser. For a flight built from
+  separate tickets (`kind="deeplink_parts"`), the top-level `checkout_url` opens search
+  and the purchase links are in `checkout_parts[]`: the assistant must return every
+  ticket link in order and tell the person that each ticket has its own cart and
+  payment. A result with `kind="search_redirect"` is a search page, not a purchase link.
 - `register_checkout_passengers` is the one tool with side effects. With passport data
   that the person provides, it registers the passengers, fills a cart and returns a
   payment link, `pay_url`. For a flight it creates an unpaid order; for a train it

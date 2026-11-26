@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants current crypto prices, market overviews, technical indicators, news or on-chain holder data from CoinMarketCap, or asks to connect its MCP server. Not for trading: the server cannot place orders or move funds."
 model_experience:
-  what_model_sees: "A short guide: the server address, the two ways to connect under Extensions → MCP servers, the tools listed on 2026-11-26, which calls are billed, plans, the call timeout and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, the two ways to connect under Settings → Extensions → MCP servers, the tools listed on 2026-11-26, which calls are billed, plans, the call timeout and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -47,9 +47,9 @@ below; the tools then come from CoinMarketCap's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `CoinMarketCap`, **Server ID**
    `coinmarketcap`, **Transport** Streamable HTTP and **Address**
    `https://mcp.coinmarketcap.com/mcp`.

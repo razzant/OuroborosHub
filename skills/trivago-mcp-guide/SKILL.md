@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants to find or compare hotels, check prices for dates or plan when to travel, and asks to use trivago or to connect its MCP server. Not for booking or payment: trivago returns links to the booking sites."
 model_experience:
-  what_model_sees: "A short guide: the server address, how to add it under Extensions → MCP servers, the tools the server listed on 2026-11-26 and its limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, how to add it under Settings → Extensions → MCP servers, the tools the server listed on 2026-11-26 and its limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -33,9 +33,9 @@ below; the tools then come from trivago's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `trivago`, **Server ID** `trivago`,
    **Transport** Streamable HTTP and **Address** `https://mcp.trivago.com/mcp`. Leave
    the headers empty.

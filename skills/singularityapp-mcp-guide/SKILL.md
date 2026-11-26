@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants Ouroboros to read or manage their SingularityApp tasks, projects, habits or Kanban boards, or asks how to connect SingularityApp's MCP server. Needs the person's SingularityApp account and sign-in."
 model_experience:
-  what_model_sees: "A short guide: the server address and its toolsets option, the sign-in steps under Extensions → MCP servers, the tool groups, plans and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address and its toolsets option, the sign-in steps under Settings → Extensions → MCP servers, the tool groups, plans and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server after the person signs in; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -39,9 +39,9 @@ below; the tools then come from SingularityApp's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `SingularityApp`, **Server ID**
    `singularityapp`, **Transport** Streamable HTTP and **Address**
    `https://mcp.singularity-app.com/mcp`, with `?toolsets=...` added if you want specific

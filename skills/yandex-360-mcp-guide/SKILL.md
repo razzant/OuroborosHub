@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person with Yandex 360 or a Yandex Cloud organization wants Ouroboros to work with their Yandex Mail, Calendar, Disk, Telemost, Wiki, Forms, Tracker or organization settings, or asks how to connect Yandex 360's MCP servers."
 model_experience:
-  what_model_sees: "A short guide: one address per Yandex service, who can use each, how to get a token and add it as a header under Extensions → MCP servers, what each server can read and change, and its limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: one address per Yandex service, who can use each, how to get a token and add it as a header under Settings → Extensions → MCP servers, what each server can read and change, and its limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the servers the person adds; the Wiki and Tracker servers list 36 and 73 tools, so leaving Schemas from task start off lets Ouroboros load call schemas only when needed."
 ---
 
@@ -60,9 +60,9 @@ All use Streamable HTTP and a token in the `Authorization` header.
 
 ## Add a server to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** (for example `Yandex Disk`), **Server ID**
    (for example `yandex_disk`), **Transport** Streamable HTTP and the **Address** from
    the table.
@@ -109,11 +109,12 @@ Test before any token; no real token was used.
   upload, download and delete attachments (`DeleteAttachment`); and read or add
   comments. Yandex's `wiki:write` access covers creating, changing and deleting content.
 - **Forms** (18 tools): list and read forms and questions; create and change forms,
-  questions and display conditions; publish or unpublish; submit form responses with
-  `submit_form` (by default `dry_run=false`, which submits and saves the response, after
-  which any integrations configured on the form may run, such as creating an issue in
-  Tracker; `dry_run=true` only validates the data without saving it or running
-  integrations); and read answers, up to 500 per call.
+  questions and display conditions (`delete_question_condition` removes a whole condition
+  group of a question); publish or unpublish; submit form responses with `submit_form`
+  (by default `dry_run=false`, which submits and saves the response, after which any
+  integrations configured on the form may run, such as creating an issue in Tracker;
+  `dry_run=true` only validates the data without saving it or running integrations); and
+  read answers, up to 500 per call.
 - **Tracker** (73 tools): search and read issues, history and comments; create, update
   and move issues through their workflow; comments, worklogs, links, attachments,
   boards and sprints, projects, portfolios and goals, queue triggers and bulk changes.

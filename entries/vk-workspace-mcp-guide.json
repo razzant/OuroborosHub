@@ -4,7 +4,7 @@
     "business"
   ],
   "description": "How to add VK WorkSpace's official MCP server to Ouroboros and sign in with a company account: read and send messages and email, manage chats, mail threads and files, share files and change access, and create, change and delete calendar events. For organizations on VK WorkSpace with the paid Assistant option on the Extended or Individual plan.",
-  "digest": "22b455c94d89f6b871a96fd2cee0b4728532a458a6acd661d9379816e55d99f8",
+  "digest": "587f7f3f62a25541dbd8dbddf7fbb886748688c0dbb8857ab48b8c3f8027871d",
   "name": "vk-workspace-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

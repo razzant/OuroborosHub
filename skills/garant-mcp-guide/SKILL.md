@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person with GARANT API access wants Ouroboros to search or cite Russian legal documents and court practice in the GARANT system, or asks how to connect GARANT's MCP server. Needs a GARANT API token."
 model_experience:
-  what_model_sees: "A short guide: the server address, how to get a token and add it as a header under Extensions → MCP servers, the tools the server listed on 2026-11-26 and GARANT's monthly limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, how to get a token and add it as a header under Settings → Extensions → MCP servers, the tools the server listed on 2026-11-26 and GARANT's monthly limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -43,14 +43,17 @@ below; the tools then come from GARANT's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `GARANT`, **Server ID** `garant`,
    **Transport** Streamable HTTP and **Address** `https://mcp.garant.ru/`.
 3. Open **More: headers, tools, schemas**, press **Add header** and enter **Header
    name** `Authorization` with **Header value** `Bearer <token>`.
 4. Press **Test**, then switch on **Use this server** and press **Save**.
+5. Because the server lists its tools even with a placeholder token, a passing Test does
+   not check the token; confirm access by asking the assistant for a simple read such as
+   checking remaining limits (`garant_limits`).
 
 On 2026-11-26 the server answered HTTP 401 without a token and listed 18 tools to Test
 with a placeholder token; no real token was used, so no call was tried.
@@ -61,8 +64,9 @@ The server listed 18 tools on 2026-11-26:
 
 - `garant_search`: full-text search in the main GARANT collection or the court practice
   bank.
-- `garant_snippets`: the parts of a document that match a phrase or cite another
-  document.
+- `garant_snippets`: returns the matching block IDs and table-of-contents headings in a
+  document for a phrase or citation, not the block text itself; reading the block text
+  uses `garant_export_block_html`, which counts toward the export quota.
 - `garant_document_info` and `garant_document_redactions`: a document's metadata and its
   editions.
 - `garant_export_html`, `garant_export_block_html`, `garant_export_pdf`,
@@ -81,8 +85,9 @@ The server listed 18 tools on 2026-11-26:
 GARANT's limits for the Internet version apply through the server too:
 
 - Adding links and checking documents or parts on control: 1,000 requests a calendar
-  month in total.
-- Exports: 30 documents or parts a calendar month.
+  month in total. `garant_find_modified` takes at most 100 documents per call (sending
+  more than 100 returns HTTP 400).
+- Exports (including `garant_export_block_html`): 30 documents or parts a calendar month.
 - Document information: 300 requests a calendar month.
 - PRIME news: not older than one year.
 - Text for adding links and request bodies: up to 20 MB.

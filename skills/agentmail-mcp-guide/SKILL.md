@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants Ouroboros to have its own email address for sending and receiving mail, or asks to connect AgentMail's MCP server. AgentMail inboxes belong to the AgentMail account; this is not access to the person's existing mailbox."
 model_experience:
-  what_model_sees: "A short guide: the server address, the two ways to connect under Extensions → MCP servers, the tools the server listed on 2026-11-26 with their regional and Labs conditions, plans and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, the two ways to connect under Settings → Extensions → MCP servers, the tools the server listed on 2026-11-26 with their regional and Labs conditions, plans and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; with 54 tools, leaving Schemas from task start off lets Ouroboros load call schemas only when needed."
 ---
 
@@ -41,9 +41,9 @@ below; the tools then come from AgentMail's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `AgentMail`, **Server ID** `agentmail`,
    **Transport** Streamable HTTP and **Address** `https://mcp.agentmail.to/mcp`.
 3. Then choose one way:
@@ -57,7 +57,10 @@ These steps are for Ouroboros 7.11 or later.
      on under **Details** and press **Finish sign-in**.
    - **With an API key:** open **More: headers, tools, schemas**, press **Add header**,
      enter **Header name** `x-api-key` and the key as **Header value**, and press **Test**.
-     Then switch on **Use this server** and press **Save**.
+     Then switch on **Use this server** and press **Save**. Because the server lists its
+     tools even with a placeholder key, a passing Test does not check the key; confirm
+     access by asking the assistant for a simple read such as listing inboxes
+     (`list_inboxes`).
 
 On 2026-11-26 Test without credentials reported that the server needs sign-in, Sign in
 was checked up to the AgentMail console's sign-in page, and Test with a placeholder
@@ -77,11 +80,15 @@ The server listed 54 tools on 2026-11-26:
   at once; the server describes sent mail as impossible to recall.
 - Drafts: create (optionally with a scheduled send time), update, send and delete.
 - Calendar: agenda and events, create, update and delete events with optional
-  invitations, answer invitations, and the calendar's default time zone. Per the tool
-  descriptions, the calendar works in AgentMail's US production; EU production answers
-  403.
-- Agent Drive: upload, list, get and delete an inbox's files. Per the tool descriptions,
-  Agent Drive is in AgentMail Labs, US only; an organization outside Labs gets 403.
+  invitations, answer invitations (`respond_to_invitation` emails the organizer
+  immediately by default; setting `sendReply=false` only records the answer on the
+  calendar), and the calendar's default time zone. Per the tool descriptions, the
+  calendar works in AgentMail's US production; EU production answers 403.
+- Agent Drive: upload, list, get and delete an inbox's files. `get_file` issues a
+  download link that anyone holding it can use without signing in for up to an hour, and
+  a link issued before `delete_file` keeps working until it expires. Per the tool
+  descriptions, Agent Drive is in AgentMail Labs, US only; an organization outside Labs
+  gets 403.
 - Allow and block lists: list, read, add (`create_list_entry`) and remove
   (`delete_list_entry`) email addresses or domains on an inbox's `send`, `receive` or
   `reply` lists. Adding the first allow entry for a direction turns that allow list on,

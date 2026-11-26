@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person runs email newsletters or transactional email with RuSender, a Russian email service, and wants Ouroboros to manage campaigns, contacts or statistics or to send email, or asks how to connect RuSender's MCP server. Needs the person's RuSender account and sign-in."
 model_experience:
-  what_model_sees: "A short guide: the server address, the sign-in steps under Extensions → MCP servers, the access the sign-in asks for, the tool groups with their effects, plans and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, the sign-in steps under Settings → Extensions → MCP servers, the access the sign-in asks for, the tool groups with their effects, plans and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server after the person signs in; with many tools, leaving Schemas from task start off lets Ouroboros load call schemas only when needed."
 ---
 
@@ -39,9 +39,9 @@ below; the tools then come from RuSender's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `RuSender`, **Server ID** `rusender`,
    **Transport** Streamable HTTP and **Address** `https://mcp.rusender.ru/mcp`. Leave
    the headers empty.
@@ -68,9 +68,13 @@ they give a type: reading, changing data, or sending and irreversible.
   only), archive and unarchive, and schedule or start sending after moderation, with A/B
   tests, resending to non-openers and sending in parts; recipients, opens, clicks and
   statistics by mail system.
-- Folders for campaigns.
-- Contacts: search, read, update, delete (up to 1,000 per call), unsubscribe or
-  resubscribe, statistics and send history.
+- Folders for campaigns: list, read, create, rename and delete (`public_folders_delete`
+  soft-deletes the folder and unlinks its campaigns, which remain), and add, move or
+  remove campaigns in folders without deleting the campaigns.
+- Contacts: search, read, update, permanently delete from the account and every list
+  (`public_contacts_delete`, or up to 1,000 per call with `public_contacts_bulk_delete`;
+  by contrast, removing a contact from one list or from all lists keeps the contact
+  record), unsubscribe or resubscribe, statistics and send history.
 - Lists, segments and list variables: lists can be read, created, edited and deleted,
   with contact import (up to 1,000 contacts per call), adding, removing and moving
   contacts between lists; segments can be read, created and have their conditions edited

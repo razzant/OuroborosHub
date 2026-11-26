@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants to estimate a PEK freight delivery, check a cargo's status by its tracking number or find a PEK branch, or asks to connect PEK's MCP server. Not for placing an order: ordering and payment stay on the PEK website."
 model_experience:
-  what_model_sees: "A short guide: the server address, how to add it under Extensions → MCP servers, the tools the server listed on 2026-11-26 beside the names on PEK's page, the connection record and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, how to add it under Settings → Extensions → MCP servers, the tools the server listed on 2026-11-26 beside the names on PEK's page, the connection record and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -37,9 +37,9 @@ below; the tools then come from PEK's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `PEK`, **Server ID** `pek`, **Transport**
    Streamable HTTP and **Address** `https://pecom.ru/mcp`. Leave the headers empty.
 3. Press **Test**. The successful Test on 2026-11-26 listed 3 tools. If Test times out,

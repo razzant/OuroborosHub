@@ -4,7 +4,7 @@
     "search"
   ],
   "description": "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and booking links, and monthly price forecasts for a destination. For anyone planning a stay; free, no account, read-only.",
-  "digest": "3107d4c0fb1beae4d2513a1b2d6e269374577b95fdc3e656154dd5026913a985",
+  "digest": "a436f02c503d3c5b768d5af2b36f7dba9f252865faf6eacad76579718f0a3a2d",
   "name": "trivago-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

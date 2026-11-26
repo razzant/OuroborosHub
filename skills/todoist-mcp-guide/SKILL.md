@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants Ouroboros to read or manage their Todoist tasks and projects, or asks how to connect Todoist's MCP server. Needs the person's own Todoist account and sign-in."
 model_experience:
-  what_model_sees: "A short guide: the server address, the sign-in steps under Extensions → MCP servers, the access the sign-in asks for, the tool groups and Todoist's limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, the sign-in steps under Settings → Extensions → MCP servers, the access the sign-in asks for, the tool groups and Todoist's limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server after the person signs in; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -39,9 +39,9 @@ below; the tools then come from Todoist's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `Todoist`, **Server ID** `todoist`,
    **Transport** Streamable HTTP and **Address** `https://ai.todoist.net/mcp`. Leave the
    headers empty.
@@ -72,7 +72,8 @@ The source of Todoist's server is open on GitHub. Its tools:
   Todoist and Comms (`set-user-status`, which replaces the whole status and can also
   pause Comms notifications or Karma and streaks);
 - read workspace insights, project health and productivity statistics, and export or
-  import project templates.
+  import project templates (`export-project-template` returns CSV content by default;
+  `format="url"` uploads a copy and returns a link that anyone holding it can open).
 
 The source also has a delete tool; deleting needs the separate permissions above. The
 exact list appears on the server's page in Ouroboros after sign-in.

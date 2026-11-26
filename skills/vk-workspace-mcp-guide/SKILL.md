@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person whose organization uses VK WorkSpace wants Ouroboros to read, send or manage company messages, mail, files or calendar events, or asks how to connect VK WorkSpace's MCP server. Needs a company account and the Assistant option enabled by the organization's administrator."
 model_experience:
-  what_model_sees: "A short guide: the server address, who can use it, the sign-in steps under Extensions → MCP servers, the 57 tools VK documents with their effects, plans and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, who can use it, the sign-in steps under Settings → Extensions → MCP servers, the 57 tools VK documents with their effects, plans and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server after the person signs in; with 57 tools, leaving Schemas from task start off lets Ouroboros load call schemas only when needed."
 ---
 
@@ -39,9 +39,9 @@ below; the tools then come from VK WorkSpace's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `VK WorkSpace`, **Server ID**
    `vk_workspace`, **Transport** Streamable HTTP and **Address**
    `https://ai.workspace.vk.ru/mcp`. Leave the headers empty.
@@ -63,11 +63,13 @@ walked in a clean Ouroboros with another sign-in server. No account was used.
 VK's user guide lists 57 tools:
 
 - Messenger (24): list and search chats, messages and folders, find people and chats,
-  read chat details, reactions and files; send messages in chats and threads, set or clear a
-  chat's draft, open a thread, mark a chat as read; create, rename and delete chat
-  folders (chats stay) and change which chats they hold; create group chats, add or
-  remove members, join or leave groups and channels; and re-create the session and its
-  chat cache.
+  read chat details, reactions and attachment metadata (`get-file` returns only the
+  attachment's name, size and type, not its contents); send messages in chats and
+  threads, set or clear a chat's draft, open a thread, mark a chat as read; create,
+  rename and delete chat folders (chats stay) and change which chats they hold; create
+  group chats, add or remove members, join or leave groups and channels (`join-chat` may
+  send a request to join, in which case membership waits for approval); and re-create the
+  session and its chat cache.
 - Mail (13): unread mail, folders, threads, search and contacts; send an email,
   schedule it, save a draft; flag messages, move threads, delete threads (to Trash) and
   unsubscribe from a mailing.

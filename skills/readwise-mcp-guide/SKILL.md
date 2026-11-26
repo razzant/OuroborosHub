@@ -7,7 +7,7 @@ type: instruction
 permissions: []
 when_to_use: "A person wants Ouroboros to search or use their Readwise highlights, Reader library or Readwise Books, save something to Reader, or asks how to connect Readwise's MCP server. Needs the person's Readwise account and sign-in."
 model_experience:
-  what_model_sees: "A short guide: the server address, the sign-in steps under Extensions → MCP servers, the tools Readwise publishes, plans and limits. The guide adds no tools, servers or credentials."
+  what_model_sees: "A short guide: the server address, the sign-in steps under Settings → Extensions → MCP servers, the tools Readwise publishes, plans and limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server after the person signs in; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
 ---
 
@@ -44,9 +44,9 @@ below; the tools then come from Readwise's server.
 
 ## Add it to Ouroboros
 
-These steps are for Ouroboros 7.11 or later.
+These steps are for Ouroboros 7.12 or later.
 
-1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
+1. Open **Settings → Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `Readwise`, **Server ID** `readwise`,
    **Transport** Streamable HTTP and **Address** `https://mcp2.readwise.io/mcp`. Leave
    the headers empty.
@@ -68,16 +68,19 @@ walked in a clean Ouroboros with another sign-in server. No account was used.
 
 - Readwise highlights (6): search and list highlights, today's Daily Review, and create,
   update or delete highlights.
-- Reader documents (8): search, list and read documents and their details, create a
-  document, move documents between the inbox, archive and shortlist, bulk edit document
-  metadata (up to 50 documents per call), and export documents.
+- Reader documents (8): search, list and read documents (`reader_get_document_details`
+  reads one document's metadata and full Markdown content), create a document, move
+  documents between the inbox, archive and shortlist, bulk edit document metadata (up to
+  50 documents per call), and export the whole Reader library as a ZIP of Markdown files
+  (`reader_export_documents` and `reader_get_export_documents_status`).
 - Reader tags (3): list tags and add or remove a document's tags.
 - Reader highlights (5): a document's highlights, create a highlight, add or remove a
   highlight's tags, and set a highlight's note.
 - Readwise Books (13): list, add (up to 10 at a time), update and remove books; list,
   log (optionally posting to the feed), re-caption and delete reading sessions, where
-  deleting also removes their feed posts; daily reading totals and yearly statistics;
-  and create, list or revoke tokens that let a site read the person's public book feed.
+  deleting also removes their feed posts and the XP they earned; daily reading totals and
+  yearly statistics; and create, list or revoke tokens that let a site read the person's
+  public book feed.
 
 Readwise's documentation page lists the Reader and highlights tools only. The exact list
 appears on the server's page in Ouroboros after sign-in.
