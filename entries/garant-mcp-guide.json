@@ -3,8 +3,8 @@
     "search",
     "documents"
   ],
-  "description": "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. Token from GARANT's servicing organization.",
-  "digest": "f7663d2ddd3e9634b01e95c930364164b178fffcd03f4c31df0c6d20087cdc2b",
+  "description": "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. For GARANT subscribers with API access: the token and the price come from GARANT's servicing organization.",
+  "digest": "ae3892fa555c344afbaad49583dfe680f2adbfca6fbdece71fcf03ae28d88a62",
   "name": "garant-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

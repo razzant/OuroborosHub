@@ -1,7 +1,7 @@
 ---
 name: garant-mcp-guide
 title: "GARANT MCP: Russian legal database"
-description: "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. Token from GARANT's servicing organization."
+description: "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. For GARANT subscribers with API access: the token and the price come from GARANT's servicing organization."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -14,10 +14,11 @@ model_experience:
 # GARANT MCP
 
 GARANT is a Russian legal reference system. Its MCP server is a second way into the
-GARANT API: an assistant can search legislation and court practice, find the relevant
-parts of a document, export documents, check what changed, add links to the GARANT
-documents a text cites, and read the PRIME news feed. It uses the same access rights and
-limits as the API.
+GARANT API and is for GARANT subscribers with API access: the token and the price come
+from GARANT's servicing organization, and GARANT publishes no price. An assistant can
+search legislation and court practice, find the relevant parts of a document, export
+documents, check what changed, add links to the GARANT documents a text cites, and read
+the PRIME news feed. It uses the same access rights and limits as the API.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from GARANT's server.
@@ -40,7 +41,7 @@ below; the tools then come from GARANT's server.
    **Transport** Streamable HTTP and **Address** `https://mcp.garant.ru/`.
 3. Open **More: headers, tools, schemas**, press **Add header** and enter **Header
    name** `Authorization` with **Header value** `Bearer <token>`.
-4. Press **Test**, then **Save**, and switch on **Use this server**.
+4. Press **Test**, then switch on **Use this server** and press **Save**.
 
 On 2026-11-26 the server answered HTTP 401 without a token and listed 18 tools to Test
 with a placeholder token; no real token was used, so no call was tried.

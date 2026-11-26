@@ -2,8 +2,8 @@
   "category": [
     "city"
   ],
-  "description": "How to add Lenta's official MCP server to Ouroboros: search the Lenta storefront for a delivery address or a store, read product cards and categories, list stores, and create a cart link to order on lenta.com. No account.",
-  "digest": "1691cfd27a430f85c2cc57b0a3007efe41e170289d5144375917390bd2bf01f2",
+  "description": "How to add Lenta's official MCP server to Ouroboros: search the Lenta storefront for a delivery address or a store, read product cards and categories, list stores, and create a cart link to order on lenta.com. For shoppers at Lenta in Russia; no account for these, and Lenta names no fee.",
+  "digest": "0be6fa4c9c3b1af2fc995cda09b62532cb5f13dafd2bfc7bc38fe031135857a5",
   "name": "lenta-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

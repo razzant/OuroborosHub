@@ -1,7 +1,7 @@
 ---
 name: trivago-mcp-guide
 title: "trivago MCP: hotel search and price trends"
-description: "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and booking links, and monthly price forecasts for a destination. Free, no account, read-only."
+description: "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and booking links, and monthly price forecasts for a destination. For anyone planning a stay; free, no account, read-only."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -13,10 +13,11 @@ model_experience:
 
 # trivago MCP
 
-trivago runs a public MCP server for its hotel metasearch. An assistant can search
-hotels and other stays around a place or by name, compare the prices trivago collects
-from booking sites, and forecast nightly prices for a destination. Results link to the
-booking sites, where the person books and pays.
+trivago runs a public MCP server for its hotel metasearch. It is for anyone planning a
+stay, and it is free and needs no account. An assistant can search hotels and other
+stays around a place or by name, compare the prices trivago collects from booking sites,
+and forecast nightly prices for a destination. Results link to the booking sites, where
+the person books and pays.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from trivago's server.
@@ -37,7 +38,7 @@ below; the tools then come from trivago's server.
    **Transport** Streamable HTTP and **Address** `https://mcp.trivago.com/mcp`. Leave
    the headers empty.
 3. Press **Test**. On 2026-11-26 it reported a working connection with 3 tools.
-4. Press **Save** and switch on **Use this server**.
+4. Switch on **Use this server** and press **Save**.
 
 ## Tools
 

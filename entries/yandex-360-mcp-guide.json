@@ -3,8 +3,8 @@
     "documents",
     "messaging"
   ],
-  "description": "How to add Yandex 360's official MCP servers to Ouroboros with an OAuth token: Mail, Calendar, Disk, Telemost and organization management, plus Wiki, Forms and Tracker for organizations. Needs a paid Yandex 360 subscription; preview.",
-  "digest": "fbc60050c3a2c0b67bb28c0679ee80c59f6f5a1c617639428dcb3bb5ce9e0ae4",
+  "description": "How to add Yandex 360's official MCP servers to Ouroboros with a token: Mail, Calendar, Disk and Telemost with a paid Yandex 360 subscription, organization management for Yandex 360 for Business, and Wiki, Forms and Tracker for organizations on Yandex 360 for Business or Yandex Cloud. No separate MCP fee is stated; preview.",
+  "digest": "b524be44b7638b072a5f1b24a5b4774998ddcbc3d30484c11fb264f5ad4eb4e6",
   "name": "yandex-360-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,
@@ -15,6 +15,6 @@
   "title": "Yandex 360 MCP: Mail, Calendar, Disk, Tracker and more",
   "type": "instruction",
   "version": "0.1.0",
-  "when_to_use": "A person with Yandex 360 wants Ouroboros to work with their Yandex Mail, Calendar, Disk, Telemost, Wiki, Forms, Tracker or organization settings, or asks how to connect Yandex 360's MCP servers. Needs a paid Yandex 360 subscription or Yandex 360 for Business.",
+  "when_to_use": "A person with Yandex 360 or a Yandex Cloud organization wants Ouroboros to work with their Yandex Mail, Calendar, Disk, Telemost, Wiki, Forms, Tracker or organization settings, or asks how to connect Yandex 360's MCP servers.",
   "withdrawn": null
 }

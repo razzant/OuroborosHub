@@ -1,7 +1,7 @@
 ---
 name: singularityapp-mcp-guide
 title: "SingularityApp MCP: tasks, projects and habits"
-description: "How to add SingularityApp's official MCP server to Ouroboros and sign in: read, create and edit tasks, checklists, projects, habits, tags and Kanban boards, with an optional batch mode. MCP is marked for the Pro and Elite plans."
+description: "How to add SingularityApp's official MCP server to Ouroboros and sign in: read, create and edit tasks, checklists, projects, habits, tags and Kanban boards, with an optional batch mode. For SingularityApp users; MCP is marked for the Pro and Elite plans, from US$3.33 a month billed annually."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -13,9 +13,10 @@ model_experience:
 
 # SingularityApp MCP
 
-SingularityApp is a planner for tasks, projects and habits. Its MCP server lets an
-assistant read, create and edit tasks and checklists, projects, habits, tags and Kanban
-boards in the person's account after sign-in.
+SingularityApp is a planner for tasks, projects and habits. It is for SingularityApp
+users; the vendor marks MCP for the Pro and Elite plans, from US$3.33 a month billed
+annually. After the person signs in, an assistant can read, create and edit tasks and
+checklists, projects, habits, tags and Kanban boards.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from SingularityApp's server.
@@ -44,15 +45,18 @@ below; the tools then come from SingularityApp's server.
    `https://mcp.singularity-app.com/mcp`, with `?toolsets=...` added if you want specific
    groups. Leave the headers empty.
 3. Press **Test**. Before sign-in it reports that the server needs the owner's sign-in.
-4. Press **Save**. The server's page now shows **Sign-in needed** and a **Sign in**
-   button.
-5. Press **Sign in**, then sign in to SingularityApp and allow access on the page that
-   opens. When the browser comes back, Ouroboros lists the tools. If it does not come
-   back, paste the address it stopped on under **Details** and press **Finish sign-in**.
-6. Switch on **Use this server**.
+4. Switch on **Use this server** at the top of the form and press **Save**. Ouroboros
+   returns to the list of servers, where the server's row shows **Sign in**.
+5. Open the server from the list and press **Sign in**. Ouroboros opens
+   SingularityApp's sign-in page; **Open the sign-in page** shows the same link. Sign in
+   and allow access.
+6. When the browser comes back to Ouroboros, the server's page lists the tools. If it
+   does not come back, paste the address the browser stopped on under **Details** and
+   press **Finish sign-in**.
 
-On 2026-11-26 this flow was checked up to SingularityApp's sign-in page, both with the
-plain address and with `?toolsets=tasks,projects`; no account was used.
+On 2026-11-26 the sign-in was checked up to SingularityApp's sign-in page, both with the
+plain address and with `?toolsets=tasks,projects`; the step order was walked in a clean
+Ouroboros with another sign-in server. No account was used.
 
 ## Tools
 

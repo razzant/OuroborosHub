@@ -1,22 +1,24 @@
 ---
 name: rusender-mcp-guide
 title: "RuSender MCP: email campaigns and transactional email"
-description: "How to add RuSender's official MCP server to Ouroboros and sign in: create, schedule and send email campaigns, manage contacts, lists, segments, templates, senders and domains, send transactional email and read statistics. The free plan covers 500 contacts."
+description: "How to add RuSender's official MCP server to Ouroboros and sign in: create, schedule and send email campaigns, manage contacts, lists, segments, templates, senders and domains, send transactional email and read statistics. For senders of newsletters and transactional email; free plans cover 500 contacts for campaigns and 100 transactional sends a month."
 version: 0.1.0
 type: instruction
 permissions: []
-when_to_use: "A person runs email newsletters or transactional email with RuSender, a Russian email service, and wants Ouroboros to manage campaigns, contacts or statistics, or asks how to connect RuSender's MCP server. Needs the person's RuSender account and sign-in."
+when_to_use: "A person runs email newsletters or transactional email with RuSender, a Russian email service, and wants Ouroboros to manage campaigns, contacts or statistics or to send email, or asks how to connect RuSender's MCP server. Needs the person's RuSender account and sign-in."
 model_experience:
   what_model_sees: "A short guide: the server address, the sign-in steps under Extensions → MCP servers, the access the sign-in asks for, the tool groups with their effects, plans and limits. The guide adds no tools, servers or credentials."
-  token_effect: "Read only as an instruction. Tools come from the server after the person signs in; with about a hundred tools, leaving Schemas from task start off lets Ouroboros load call schemas only when needed."
+  token_effect: "Read only as an instruction. Tools come from the server after the person signs in; with many tools, leaving Schemas from task start off lets Ouroboros load call schemas only when needed."
 ---
 
 # RuSender MCP
 
-RuSender is a Russian service for email newsletters and transactional email. Its MCP
-server lets an assistant work with the person's RuSender account: prepare, schedule and
-send campaigns, manage contacts, lists and segments, templates, senders and domains,
-send single transactional emails and read statistics.
+RuSender is a Russian service for email newsletters and transactional email. It is for
+people who send newsletters or transactional email; the free plans cover up to 500
+contacts and 2,000 campaign emails a month, and 100 transactional sends a month through
+the API or SMTP. After the person signs in, an assistant can prepare, schedule and send
+campaigns, manage contacts, lists and segments, templates, senders and domains, send
+single transactional emails and read statistics.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from RuSender's server.
@@ -29,8 +31,10 @@ below; the tools then come from RuSender's server.
   registers itself automatically. The sign-in asks for read and write access to
   contacts, campaigns, templates, senders, domains, webhooks, files, segments and
   sending keys, and for sending and reading email (`email.send`, `email.read`).
-- Plans: the Free plan costs 0 ₽ and covers up to 500 contacts and 2,000 emails a month.
-  Premium, uCombo and API+SMTP plans are priced by contacts or by sends a month.
+- Plans, per RuSender's tariffs page: for campaigns, Free costs 0 ₽ for up to 500
+  contacts and 2,000 emails a month, and Premium and uCombo are priced by the number of
+  contacts. For transactional email through the API or SMTP, Free API+SMTP costs 0 ₽ for
+  100 sends a month, and Premium API+SMTP is priced by sends a month.
 - Language: Russian service and documentation.
 
 ## Add it to Ouroboros
@@ -40,20 +44,22 @@ below; the tools then come from RuSender's server.
    **Transport** Streamable HTTP and **Address** `https://mcp.rusender.ru/mcp`. Leave
    the headers empty.
 3. Press **Test**. Before sign-in it reports that the server needs the owner's sign-in.
-4. Press **Save**. The server's page now shows **Sign-in needed** and a **Sign in**
-   button.
-5. Press **Sign in**, then sign in to RuSender and press «Разрешить» (Allow) on the
-   page that opens. When the browser comes back, Ouroboros lists the tools. If it does
-   not come back, paste the address it stopped on under **Details** and press **Finish
-   sign-in**.
-6. Switch on **Use this server**.
+4. Switch on **Use this server** at the top of the form and press **Save**. Ouroboros
+   returns to the list of servers, where the server's row shows **Sign in**.
+5. Open the server from the list and press **Sign in**. Ouroboros opens RuSender's
+   sign-in page; **Open the sign-in page** shows the same link. Sign in and press
+   «Разрешить» (Allow).
+6. When the browser comes back to Ouroboros, the server's page lists the tools. If it
+   does not come back, paste the address the browser stopped on under **Details** and
+   press **Finish sign-in**.
 
-On 2026-11-26 this flow was checked up to RuSender's sign-in page; no account was used.
+On 2026-11-26 the sign-in was checked up to RuSender's sign-in page; the step order was
+walked in a clean Ouroboros with another sign-in server. No account was used.
 
 ## Tools
 
-RuSender documents about a hundred tools and marks each as reading, changing data, or
-sending and irreversible:
+RuSender's tool page groups the tools as below. Its tables mark tools by effect where
+they give a type: reading, changing data, or sending and irreversible.
 
 - Campaigns: list, read, create and edit drafts, delete drafts, archive, and schedule or
   start sending after moderation, with A/B tests, resending to non-openers and sending
@@ -86,6 +92,7 @@ The exact list appears on the server's page in Ouroboros after sign-in.
   sign-in. Checked 2026-11-26.
 - [RuSender MCP tools](https://rusender.ru/knowledge-base/email-service/vozmozhnosti-mcp-rusender/):
   tool groups, their effects and limits. Checked 2026-11-26.
-- [RuSender plans](https://rusender.ru/pricing/). Checked 2026-11-26.
+- [RuSender plans](https://rusender.ru/pricing/): campaign and API+SMTP plans. Checked
+  2026-11-26.
 - Sign-in discovery, client registration and the sign-in page: Ouroboros's Test and
   Sign in on 2026-11-26.

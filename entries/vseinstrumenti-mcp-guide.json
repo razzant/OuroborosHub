@@ -3,8 +3,8 @@
     "city",
     "search"
   ],
-  "description": "How to add VseInstrumenti.ru's official MCP server to Ouroboros: search, compare and find alternatives among tools, machines and supplies for building, repair and DIY, with reviews, prices and availability for the Moscow region. No account; no ordering.",
-  "digest": "1aca24c97d720dc64d7ce965b1eb80d1b7ddaaceba17ef7ab39688795174b5f5",
+  "description": "How to add VseInstrumenti.ru's official MCP server to Ouroboros: search, compare and find alternatives among tools, machines and supplies for building, repair and DIY, with reviews, prices and availability for Moscow (city). For buyers of tools and building supplies; no account, the vendor names no fee, and no ordering.",
+  "digest": "ef23b14f29771b07b24b7e3c567f072922f52f651df6674739cdc01f0e0bcef1",
   "name": "vseinstrumenti-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

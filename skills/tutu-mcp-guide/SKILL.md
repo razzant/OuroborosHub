@@ -1,7 +1,7 @@
 ---
 name: tutu-mcp-guide
 title: "Tutu MCP: trains, flights, buses and hotels"
-description: "How to add Tutu.ru's official MCP server to Ouroboros: search flights, Russian Railways trains, buses, commuter trains and hotels, compare routes, read seat maps and get a checkout link to tutu.ru. No account; an opt-in tool registers passengers and creates an unpaid order."
+description: "How to add Tutu.ru's official MCP server to Ouroboros: search flights, Russian Railways trains, buses, commuter trains and hotels, compare routes, read seat maps and get a checkout link to tutu.ru. For travellers booking on Tutu.ru; no account, and the vendor names no fee; an opt-in tool registers passengers and creates an unpaid order."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -13,7 +13,8 @@ model_experience:
 
 # Tutu MCP
 
-Tutu.ru is a Russian travel booking service. Its public MCP server lets an assistant
+Tutu.ru is a Russian travel booking service. Its public MCP server is for travellers
+booking on Tutu.ru: it needs no account, and the vendor names no fee. An assistant can
 search flights, Russian Railways trains, intercity buses, commuter trains and hotels,
 compare transport modes for one route, read offer details and train seat maps, and
 give the person a checkout link to tutu.ru. The person pays on tutu.ru; the server
@@ -37,7 +38,7 @@ below; the tools then come from Tutu's server.
 2. Press **Add server** and fill in **Name** `Tutu`, **Server ID** `tutu`, **Transport**
    Streamable HTTP and **Address** `https://mcp.tutu.ru/mcp`. Leave the headers empty.
 3. Press **Test**. On 2026-11-26 it reported a working connection with 17 tools.
-4. Press **Save** and switch on **Use this server**.
+4. Switch on **Use this server** and press **Save**.
 
 ## Tools
 
@@ -64,14 +65,20 @@ Checkout:
   chosen offer; the cart is created in the person's own browser.
 - `register_checkout_passengers` is the one tool with side effects. With passport data
   that the person provides, it registers the passengers, fills the cart and returns a
-  payment link. For a flight it places an unpaid booking; for a train it reserves the
-  chosen seats, and each repeated call holds more seats. It never charges money. The
-  server's instructions ask the assistant to read the passenger data and the trip back
-  and to get an explicit yes before calling it.
+  payment link, `pay_url`. For a flight it places an unpaid booking; for a train it
+  reserves the chosen seats, and each repeated call holds more seats. It never charges
+  money. The server's instructions ask the assistant to read the passenger data and the
+  trip back and to get an explicit yes before calling it.
+- Unlike the link from `create_checkout_link`, a `pay_url` works once and for about an
+  hour: the first opening takes the cart, and later openings get a 404. Per the server,
+  it should be handed over as plain text for the person to open, never opened to check
+  it, and not sent where a link preview would open it first, as some messengers do.
 
 ## Limits
 
 - Payment is made only by the person, on tutu.ru.
+- A spent or expired `pay_url` cannot be renewed cheaply: calling the tool again
+  repeats the registration, and for a flight places a second unpaid order.
 - Passport data reaches Tutu only through `register_checkout_passengers`.
 - Tutu's page states no usage limits.
 

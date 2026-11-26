@@ -1,7 +1,7 @@
 ---
 name: vseinstrumenti-mcp-guide
 title: "VseInstrumenti MCP: tools and building supplies"
-description: "How to add VseInstrumenti.ru's official MCP server to Ouroboros: search, compare and find alternatives among tools, machines and supplies for building, repair and DIY, with reviews, prices and availability for the Moscow region. No account; no ordering."
+description: "How to add VseInstrumenti.ru's official MCP server to Ouroboros: search, compare and find alternatives among tools, machines and supplies for building, repair and DIY, with reviews, prices and availability for Moscow (city). For buyers of tools and building supplies; no account, the vendor names no fee, and no ordering."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -14,8 +14,9 @@ model_experience:
 # VseInstrumenti MCP
 
 VseInstrumenti.ru is a Russian retailer of tools and building supplies. Its public MCP
-server lets an assistant search the catalogue, compare products, find alternatives and
-read reviews. It helps choose; it does not place orders or take payment.
+server is for buyers of tools and supplies: it needs no account, and the vendor names no
+fee. An assistant can search the catalogue, compare products, find alternatives and read
+reviews. It helps choose; it does not place orders or take payment.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from VseInstrumenti's server.
@@ -26,7 +27,7 @@ below; the tools then come from VseInstrumenti's server.
 - Transport: Streamable HTTP
 - Sign-in: none. The vendor page says it works without authorization.
 - Price: the vendor page names no fee.
-- Coverage and language: prices and availability for the Moscow region, in rubles; the
+- Coverage and language: prices and availability for Moscow (city), in rubles; the
   region cannot be changed through the tools. Product data and tool texts are in Russian.
 
 ## Add it to Ouroboros
@@ -36,7 +37,7 @@ below; the tools then come from VseInstrumenti's server.
    `vseinstrumenti`, **Transport** Streamable HTTP and **Address**
    `https://mcp.vseinstrumenti.ru/mcp`. Leave the headers empty.
 3. Press **Test**. On 2026-11-26 it reported a working connection with 6 tools.
-4. Press **Save** and switch on **Use this server**.
+4. Switch on **Use this server** and press **Save**.
 
 ## Tools
 

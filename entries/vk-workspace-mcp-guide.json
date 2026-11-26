@@ -3,8 +3,8 @@
     "messaging",
     "business"
   ],
-  "description": "How to add VK WorkSpace's official MCP server to Ouroboros and sign in with a company account: an assistant works with the organization's VK WorkSpace data within the user's own access rights. Needs the paid Assistant option on the Extended or Individual plan.",
-  "digest": "f144f9af3014b2fb8298c9cbc4cda50abaf9ce045d363dce17c5e0c5add17855",
+  "description": "How to add VK WorkSpace's official MCP server to Ouroboros and sign in with a company account: read and send messages and email, manage chats, mail threads and files, share files and change access, and create, change and delete calendar events. For organizations on VK WorkSpace with the paid Assistant option on the Extended or Individual plan.",
+  "digest": "79f0606b2629e8b2a9c099b73b37f5cf6cf559fb4be8aa26862b8dd3586b6f80",
   "name": "vk-workspace-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,
@@ -12,9 +12,9 @@
     "kind": "hosted",
     "path": "skills/vk-workspace-mcp-guide"
   },
-  "title": "VK WorkSpace MCP: a company's workspace data",
+  "title": "VK WorkSpace MCP: messenger, mail, disk and calendar",
   "type": "instruction",
   "version": "0.1.0",
-  "when_to_use": "A person whose organization uses VK WorkSpace wants Ouroboros to search or use the company's workspace data, or asks how to connect VK WorkSpace's MCP server. Needs a company account and the Assistant option enabled by the organization's administrator.",
+  "when_to_use": "A person whose organization uses VK WorkSpace wants Ouroboros to read, send or manage company messages, mail, files or calendar events, or asks how to connect VK WorkSpace's MCP server. Needs a company account and the Assistant option enabled by the organization's administrator.",
   "withdrawn": null
 }
