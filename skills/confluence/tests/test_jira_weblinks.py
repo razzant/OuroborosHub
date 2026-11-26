@@ -44,8 +44,10 @@ def twg_error(code, status=None, kind=None):
 
 
 def remote(identifier, url, title):
+    # Jira upserts a remote link on its globalId, so records that share a URL carry independent global IDs.
     return {'id': identifier, 'self': f'https://example.invalid/rest/api/3/issue/10042/remotelink/{identifier}',
-            'globalId': f'system={url}', 'application': {'type': 'com.example.git', 'name': 'Example Git'},
+            'globalId': f'system={url}&id={identifier}',
+            'application': {'type': 'com.example.git', 'name': 'Example Git'},
             'relationship': 'links to', 'object': {'url': url, 'title': title}}
 
 
@@ -60,6 +62,8 @@ def jira(tmp_path):
         'links': [remote(10001, MR, '!7 first'), remote(10002, MR, '!7 second'), remote(10003, OTHER, 'Design')],
         'faults': {'get': [], 'unlink': []}, 'calls': [], 'deletes': [], 'other_id': 10003,
     }
+    # The two same-URL links must be separate records, as Jira's upsert on globalId would require.
+    assert len({link['globalId'] for link in state['links']}) == len(state['links'])
     path = tmp_path / 'fake-state.json'
     path.write_text(json.dumps(state), encoding='utf-8')
 
@@ -127,9 +131,8 @@ def jira(tmp_path):
     instance = Jira()
     shipped = package_inventory()
     yield instance
-    for cmd in instance.emitted:  # every test: bare `twg` in agent mode, never human (user) mode
+    for cmd in instance.emitted:  # every test: bare `twg`, exactly one `--mode agent`; a profile may be named `user`
         assert cmd[0] == 'twg' and cmd[cmd.index('--mode') + 1] == 'agent' and cmd.count('--mode') == 1
-        assert 'user' not in cmd
     assert package_inventory() == shipped  # no run adds, changes or removes anything in the skill package
 
 
@@ -149,12 +152,18 @@ def test_selected_duplicate_is_the_only_change_and_surviving_same_url_is_reporte
     assert code == 0
     assert [(link['id'], link['matches_expected_url']) for link in listing['web_links']] == [
         ('10001', True), ('10002', True), ('10003', False)]
+    by_id = {link['id']: link for link in listing['web_links']}
+    # Links that share a URL are still separate records: own ID, own global ID, own title.
+    assert len({link['global_id'] for link in by_id.values()}) == len(by_id) == 3
+    assert by_id['10001']['url'] == by_id['10002']['url'] == MR
+    assert (by_id['10001']['title'], by_id['10002']['title']) == ('!7 first', '!7 second')
     assert listing['issue'] == {'id': '10042', 'key': 'DEMO-42', 'url': 'https://example.invalid/browse/DEMO-42',
                                 'site': 'example'}
     assert 'Merged in' not in json.dumps(listing)
 
     code, chosen = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002')
     assert code == 0 and chosen['other_links_with_same_url'] == ['10001']
+    assert chosen['selected']['global_id'] == by_id['10002']['global_id']
     assert 'atomic' in chosen['url_check_scope'].lower()
     delete, after = (step['cmd'] for step in chosen['run_command'])
     assert delete == ['twg', '--profile', 'demo-reader', '--mode', 'agent', '--output-summary', 'none',
@@ -173,6 +182,9 @@ def test_selected_duplicate_is_the_only_change_and_surviving_same_url_is_reporte
     state = jira.read()
     assert state['deletes'] == [['10042', '10002']]
     assert [link['id'] for link in state['links']] == [10001, 10003]
+    # The other same-URL record and the unrelated link remain whole; only the selected record is gone.
+    assert state['links'] == [remote(10001, MR, '!7 first'), remote(10003, OTHER, 'Design')]
+    assert all(link['globalId'] != by_id['10002']['global_id'] for link in state['links'])
     assert state['issue']['description'] == f'Merged in {MR}'
     assert state['issue']['issuelinks'] == [{'id': '20001', 'outwardIssue': 'DEMO-7'}]
     assert state['mr'] == {'url': MR, 'state': 'merged'}
@@ -470,6 +482,7 @@ def test_plan_refuses_unbound_or_unsafe_context(jira, change, error):
 @pytest.mark.parametrize('profile,selector', [
     ('demo-reader', ['--profile', 'demo-reader']),
     ('default', ['--profile', 'default']),
+    ('user', ['--profile', 'user']),  # an ordinary profile name; the mode is checked by exact `--mode agent`
     ('_personal', ['--profile', '_personal']),
     ('p' * 64, ['--profile', 'p' * 64]),
     ('-ops_2', ['--profile=-ops_2']),  # a separate argument starting with "-" would read as another option

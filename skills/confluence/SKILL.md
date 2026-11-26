@@ -1,5 +1,6 @@
 ---
 name: confluence
+title: "Atlassian: Confluence & Jira"
 description: Read, search and author Confluence Cloud pages, comments and attachments with an existing Confluence API token, or inspect and remove one selected Jira web link through a signed-in Atlassian TWG CLI without Confluence credentials.
 version: 0.2.0
 type: extension
@@ -195,13 +196,19 @@ automatically; pass them to the person.
 
 Deleting a web link needs two separate permission layers:
 
-- **TWG authorization:** the saved login's OAuth grant must allow the action.
-  An organization admin chooses TWG's
-  [Read, Write and manage, and Delete permissions](https://developer.atlassian.com/cloud/twg-cli/getting-started/configure-permissions/);
-  after a change, the person may need to sign in again.
-- **Jira:** issue linking enabled, the *Browse Projects*, *Edit Issues* and
-  *Link Issues* project permissions, and visibility of the issue where
-  issue-level security applies. *Delete Issues* is not required.
+- **TWG authorization:** prefer an OAuth login. For OAuth logins, TWG's documented
+  [Read, Write and manage, and Delete permission categories](https://developer.atlassian.com/cloud/twg-cli/getting-started/configure-permissions/)
+  apply: an organization admin chooses them, the login's grant must allow the
+  action, and after a policy change the person may need to sign in again. A saved
+  profile that was already authorized independently of this skill uses the rights
+  that authorization granted. The skill never collects, creates, stores, copies,
+  asks for or teaches an alternate token to get around a restriction, and never
+  borrows Confluence settings or an MCP connection's credentials for Jira.
+  A refusal follows the outcome rules above and is reported to the person.
+- **Jira:** whichever way the profile was authorized, the same Jira project
+  permissions also apply: issue linking enabled, the *Browse Projects*, *Edit
+  Issues* and *Link Issues* project permissions, and visibility of the issue
+  where issue-level security applies. *Delete Issues* is not required.
 
 ## API references
 
