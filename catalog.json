@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/009291a9ae6fa81b1c42c6dd6edb0925daa6d1dd",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/162be81b23cf149006c65b024af347db2007c823",
   "schema_version": 1,
   "skills": [
     {
@@ -1465,17 +1465,22 @@
       "when_to_use": "A person wants current crypto prices, market overviews, technical indicators, news or on-chain holder data from CoinMarketCap, or asks to connect its MCP server. Not for trading: the server cannot place orders or move funds."
     },
     {
-      "description": "Read, search and author Confluence Cloud pages, comments and attachments using an existing personal or scoped API token.",
+      "description": "Read, search and author Confluence Cloud pages, comments and attachments with an existing Confluence API token, or inspect and remove one selected Jira web link through a signed-in Atlassian TWG CLI without Confluence credentials.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "59e478bcedcf3a389a567dd9b2fa316f3926de583b34a7b26d539a54d8495e52",
-          "size": 6606
+          "sha256": "1c142b3febd474027c369240c8ea6c6531f65cb60c22c6e8f45f1f9437a18231",
+          "size": 15666
         },
         {
           "path": "client.py",
           "sha256": "b8c5d02e1f30d5d7989895dc0b4d6b205ceb2b9b9f778ee9556635516e8c5b8e",
           "size": 11167
+        },
+        {
+          "path": "jira_weblinks.py",
+          "sha256": "bdce098c8a3a2eacb50215ad27e812c7ba49c3d45870d83774cd2325d9951f26",
+          "size": 25816
         },
         {
           "path": "operations.py",
@@ -1493,9 +1498,19 @@
           "size": 252
         },
         {
+          "path": "tests/fake_twg.py",
+          "sha256": "bbdcdd2f9dd7924215e44db31050071390195135931a8ab5b5e5a28d8263ed19",
+          "size": 9989
+        },
+        {
           "path": "tests/test_confluence.py",
           "sha256": "933941140078258bbab1c146784bc7bbcfa284d7e9f1f14e2dcd7d437ecb7057",
           "size": 21324
+        },
+        {
+          "path": "tests/test_jira_weblinks.py",
+          "sha256": "92f63ba96339ab53359209f9911e15fc36ea013c57c38d78c2395f478506dd8a",
+          "size": 33221
         }
       ],
       "install_specs": [
@@ -1503,8 +1518,9 @@
       ],
       "name": "confluence",
       "slug": "confluence",
+      "title": "Atlassian: Confluence & Jira",
       "type": "extension",
-      "version": "0.1.2"
+      "version": "0.2.0"
     },
     {
       "description": "Read-only chart of model-request input sizes from the local usage store, with honest freshness and coverage.",
