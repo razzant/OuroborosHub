@@ -441,6 +441,7 @@ class GoogleAdapter:
         cal_path = f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events"
         rows: List[Dict[str, Any]] = []
         cancelled: List[str] = []
+        items: List[Dict[str, Any]] = []
         page = None
         next_sync = ""
         while True:
@@ -452,18 +453,30 @@ class GoogleAdapter:
                 params["timeMin"] = (now_utc() - timedelta(days=INITIAL_PAST_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 params["showDeleted"] = "false"
             _, _, data = self._request("GET", cal_path, params)
-            for item in data.get("items", []):
-                if str(item.get("status") or "") == "cancelled":
-                    cancelled.append(str(item.get("id") or ""))
-                    if not item.get("recurringEventId"):
-                        continue
-                row = gevent_to_row(item, calendar["id"], tz)
-                if row is not None:
-                    rows.append(row)
+            items.extend(data.get("items", []))
             page = data.get("nextPageToken")
             if not page:
                 next_sync = str(data.get("nextSyncToken") or "")
                 break
+        # One read can carry an event twice (it changed between pages): only its last observation is current,
+        # whether that is a change or a cancellation.
+        last = {str(item.get("id") or "") or index: index for index, item in enumerate(items)}
+        last_slot = {}   # address evidence, not an earlier live/cancelled outcome
+        for index, item in enumerate(items):
+            identity = str(item.get('id') or '') or index
+            if last[identity] != index:
+                if item.get('recurringEventId') and item.get('originalStartTime'):
+                    last_slot[identity] = {key: item[key] for key in ('recurringEventId', 'originalStartTime')}
+                continue
+            if str(item.get("status") or "") == "cancelled":
+                cancelled.append(str(item.get("id") or ""))
+                if not item.get("recurringEventId"):
+                    if identity not in last_slot:
+                        continue
+                    item = {**last_slot[identity], **item}
+            row = gevent_to_row(item, calendar["id"], tz)
+            if row is not None:
+                rows.append(row)
         return rows, next_sync, "google_sync_token", cancelled
 
     def exists_event(self, calendar: Dict[str, Any], external_id: str) -> bool:
@@ -524,7 +537,8 @@ class GoogleAdapter:
             return self.create(calendar, event, payload)
         body = row_to_gevent(event, mute=bool(payload.get("mute_provider_reminders")))
         changes = payload.get('changes') or {}
-        if (event.get('master_id') and payload.get('scope', 'this') == 'this'
+        held = not event.get('master_id') and bool(event.get('recurrence_id'))   # an instance whose series is not held here
+        if ((held or (event.get('master_id') and payload.get('scope', 'this') == 'this'))
                 and not payload.get('previous_recurrence_id') and 'changes' in payload):
             names = {'title':'summary', 'description':'description', 'location':'location',
                      'availability':'transparency', 'attendees':'attendees',
@@ -577,7 +591,8 @@ class GoogleAdapter:
                 f"{urllib.parse.quote(external_id, safe='')}")
         _, headers, data = self._request('GET', path)
         row = gevent_to_row(data, calendar['id'], get_tz(event.get('tz') or ''))
-        return {'event': row, 'etag': str(data.get('etag') or headers.get('etag') or '')}
+        return {'event': row, 'etag': str(data.get('etag') or headers.get('etag') or ''),
+                'cancelled': data.get('status') == 'cancelled'}
 
     def respond(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         external_id = str(event.get("external_id") or "")
@@ -801,8 +816,8 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
             vals = [x.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for x in extra if x]
             if vals:
                 recurrence.append("RDATE:" + ",".join(vals))
-    if not event.get("master_id") and (recurrence or event.get("rrule") == ""):
-        body["recurrence"] = recurrence   # instances (exceptions) never carry recurrence: Google rejects it
+    if not event.get("master_id") and not event.get("recurrence_id") and (recurrence or event.get("rrule") == ""):
+        body["recurrence"] = recurrence   # instances (exceptions, held instances) never carry recurrence: Google rejects it
     body["status"] = event_status(event.get("status"))
     body["transparency"] = "transparent" if event.get("availability") == "free" else "opaque"
     offsets = own_reminders(event.get("reminders_json"))   # None = the calendar's defaults, [] = explicitly none

@@ -906,18 +906,23 @@ class CalDAVAdapter:
         rows = ics_to_rows(text, calendar['id'], href, etag, get_tz(event.get('master_tz') or event.get('tz') or ''))
         key = event.get('recurrence_id') or ''
         row = next((r for r in rows if r.get('recurrence_id', '') == key), None)
+        excluded = False
         if row is None and key:
             master = next((r for r in rows if not r.get('recurrence_id')), None)
             if master and has_recurrence(master):
-                from ops import _expand_master
+                from ops import _expand_master, excluded_slots
                 start = parse_stored(key)
+                excluded = key in excluded_slots(master)
                 exceptions = [{**r, 'id': r['recurrence_id']} for r in rows if r.get('recurrence_id')]
-                expanded = _expand_master({**master, 'id': 'provider-master'}, start,
+                candidate = {**master, 'id': 'provider-master', **({'exdates': ''} if excluded else {})}
+                expanded = _expand_master(candidate, start,
                                           start + timedelta(days=2), exceptions, strict=True)
                 row = next((r for r in expanded if r.get('occurrence_start_utc') == key), None)
                 if row:
                     row = {**row, 'rrule': '', 'rdates': '', 'exdates': '', 'recurrence_id': key, 'raw_payload': ''}
-        return {'event': row, 'etag': etag}
+                    if excluded:
+                        row['status'] = 'cancelled'
+        return {'event': row, 'etag': etag, **({'excluded_occurrence': True} if excluded and row else {})}
 
     def respond(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         """RSVP the CalDAV way: rewrite our own ATTENDEE PARTSTAT in the resource. Whether Yandex notifies the organizer
@@ -928,7 +933,7 @@ class CalDAVAdapter:
             raise ProviderError("unsupported", "response: accepted | declined | tentative")
         current = self.read_current(calendar, event, payload)
         expected = payload.get('_expected_etag') or event.get('master_etag') or event.get('etag') or ''
-        if not current['event'] or not expected or current['etag'] != expected:
+        if not current['event'] or current.get('excluded_occurrence') or not expected or current['etag'] != expected:
             raise ProviderError('conflict', 'приглашение изменилось на сервере', 412)
         attendees = json.loads(current['event'].get('attendees_json') or '[]')
         me = self.login.lower()
@@ -997,6 +1002,18 @@ class CalDAVAdapter:
             else:
                 master.add("EXDATE", [parse_stored(d).astimezone(slot_tz).replace(tzinfo=None) if slot_floating else parse_stored(d).astimezone(slot_tz) for d in all_dates])
         else:
+            existing = master.get("EXDATE")
+            if existing is not None:
+                # A date written back as a live override is no longer excluded (a cancelled date given back).
+                dates = [d for d in _dt_list(existing, slot_tz) if d not in keys]
+                if len(dates) != len(_dt_list(existing, slot_tz)):
+                    del master["EXDATE"]
+                    if dates and slot_date:
+                        master.add("EXDATE", [parse_stored(d).astimezone(slot_tz).date() for d in dates])
+                        master["EXDATE"].params["VALUE"] = "DATE"
+                    elif dates:
+                        master.add("EXDATE", [parse_stored(d).astimezone(slot_tz).replace(tzinfo=None) if slot_floating
+                                              else parse_stored(d).astimezone(slot_tz) for d in dates])
             retained = ''
             if temporal_source is not None:
                 retained_calendar = icalendar.Calendar()
