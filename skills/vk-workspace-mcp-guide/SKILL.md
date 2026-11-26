@@ -39,6 +39,8 @@ below; the tools then come from VK WorkSpace's server.
 
 ## Add it to Ouroboros
 
+These steps are for Ouroboros 7.11 or later.
+
 1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `VK WorkSpace`, **Server ID**
    `vk_workspace`, **Transport** Streamable HTTP and **Address**

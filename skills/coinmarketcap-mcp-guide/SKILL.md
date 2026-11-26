@@ -47,6 +47,8 @@ below; the tools then come from CoinMarketCap's server.
 
 ## Add it to Ouroboros
 
+These steps are for Ouroboros 7.11 or later.
+
 1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `CoinMarketCap`, **Server ID**
    `coinmarketcap`, **Transport** Streamable HTTP and **Address**

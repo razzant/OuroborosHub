@@ -41,6 +41,8 @@ below; the tools then come from AgentMail's server.
 
 ## Add it to Ouroboros
 
+These steps are for Ouroboros 7.11 or later.
+
 1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `AgentMail`, **Server ID** `agentmail`,
    **Transport** Streamable HTTP and **Address** `https://mcp.agentmail.to/mcp`.
@@ -67,7 +69,8 @@ and no tool was called.
 The server listed 54 tools on 2026-11-26:
 
 - Inboxes: list, search, get, create, update and delete. Deleting an inbox permanently
-  removes its threads, messages and drafts.
+  removes its threads, messages, drafts, calendar and calendar events; a new inbox
+  created later with the same address starts with an empty calendar.
 - Mail: list, search and read threads and messages, change labels, delete threads, and
   read attachments.
 - Sending: `send_message`, `reply_to_message`, `forward_message` and `send_draft` send
@@ -107,6 +110,7 @@ The server listed 54 tools on 2026-11-26:
   API key, tool groups. Checked 2026-11-26.
 - [AgentMail pricing](https://www.agentmail.to/pricing) and
   [rate limits](https://docs.agentmail.to/knowledge-base/rate-limits). Checked 2026-11-26.
-- [AgentMail calendar](https://docs.agentmail.to/calendar): regions. Checked 2026-11-26.
+- [AgentMail calendar](https://docs.agentmail.to/calendar): regions and inbox deletion.
+  Checked 2026-11-26.
 - Sign-in discovery, client registration, the sign-in page and the tool list with its
   descriptions: Ouroboros's Test and Sign in on 2026-11-26.

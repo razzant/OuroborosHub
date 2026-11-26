@@ -3,7 +3,7 @@
     "planning"
   ],
   "description": "How to add SingularityApp's official MCP server to Ouroboros and sign in: read, create and edit tasks, checklists, projects, habits, tags and Kanban boards, with an optional batch mode. For SingularityApp users; MCP is marked for the Pro and Elite plans, from US$3.33 a month billed annually.",
-  "digest": "06bd4e5139af2857b0ed5a8bacd7ed138df92e813f730ec54bfdfeed11afad0d",
+  "digest": "207e08e87f45187f9c3b7fe374e556b3e07d47fca0339d09cec00b2bc8ecdd8d",
   "name": "singularityapp-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

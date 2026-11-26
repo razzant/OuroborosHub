@@ -32,6 +32,8 @@ below; the tools then come from VseInstrumenti's server.
 
 ## Add it to Ouroboros
 
+These steps are for Ouroboros 7.11 or later.
+
 1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `VseInstrumenti`, **Server ID**
    `vseinstrumenti`, **Transport** Streamable HTTP and **Address**
@@ -60,7 +62,9 @@ The server listed six tools on 2026-11-26:
   buying.
 - The server's rules limit it to goods for building, repair and DIY: tools, machines,
   consumables, building and finishing materials and related goods.
-- The vendor page states no usage limits.
+- No numeric quota is published, but the server's instructions describe rate limiting:
+  make catalogue requests one at a time rather than in parallel, and when rate-limited
+  stop and wait for `Retry-After` if the server gives it.
 
 ## Sources
 

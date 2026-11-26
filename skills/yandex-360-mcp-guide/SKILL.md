@@ -60,6 +60,8 @@ All use Streamable HTTP and a token in the `Authorization` header.
 
 ## Add a server to Ouroboros
 
+These steps are for Ouroboros 7.11 or later.
+
 1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** (for example `Yandex Disk`), **Server ID**
    (for example `yandex_disk`), **Transport** Streamable HTTP and the **Address** from
@@ -98,12 +100,20 @@ Test before any token; no real token was used.
 - **Organization management:** read organizations, users, groups and departments;
   create domain users, update users, create, update and delete groups and departments,
   and change group members.
-- **Wiki** (36 tools listed on 2026-11-26): search, read and list pages; create, edit,
-  append to, move and delete pages; work with tables (grids), attachments and comments.
-  Yandex's `wiki:write` access covers creating, changing and deleting content.
+- **Wiki** (36 tools listed on 2026-11-26): search, read and list pages; create, edit and
+  append to pages; move pages with `MovePage` (moves the page together with all its
+  child pages; when the parent changes, the caller chooses via `copy_inherited_access`
+  whether to keep inherited access); delete pages with `DeletePage` (deletes one page by
+  default, and the whole subtree with `recursive=true`); create, edit and delete tables
+  (grids, including removing rows or columns and deleting a grid with `DeleteGrid`);
+  upload, download and delete attachments (`DeleteAttachment`); and read or add
+  comments. Yandex's `wiki:write` access covers creating, changing and deleting content.
 - **Forms** (18 tools): list and read forms and questions; create and change forms,
-  questions and display conditions; publish or unpublish; fill in a form; read answers,
-  up to 500 per call.
+  questions and display conditions; publish or unpublish; submit form responses with
+  `submit_form` (by default `dry_run=false`, which submits and saves the response, after
+  which any integrations configured on the form may run, such as creating an issue in
+  Tracker; `dry_run=true` only validates the data without saving it or running
+  integrations); and read answers, up to 500 per call.
 - **Tracker** (73 tools): search and read issues, history and comments; create, update
   and move issues through their workflow; comments, worklogs, links, attachments,
   boards and sprints, projects, portfolios and goals, queue triggers and bulk changes.

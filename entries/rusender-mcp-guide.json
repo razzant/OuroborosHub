@@ -4,7 +4,7 @@
     "business"
   ],
   "description": "How to add RuSender's official MCP server to Ouroboros and sign in: create, schedule and send email campaigns, manage contacts, lists, segments, templates, senders and domains, send transactional email and read statistics. For senders of newsletters and transactional email; free plans cover 500 contacts for campaigns and 100 transactional sends a month.",
-  "digest": "252f56c5307e370c4f76b5a20ba9ceb3c9ee54778966d82a39e8de075bbb892c",
+  "digest": "ead7861af5331ea5a2feed14fbe43491fe4c3c5da16f76627e4b9e864ebf2199",
   "name": "rusender-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

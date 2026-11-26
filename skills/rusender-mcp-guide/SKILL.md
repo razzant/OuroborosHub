@@ -39,6 +39,8 @@ below; the tools then come from RuSender's server.
 
 ## Add it to Ouroboros
 
+These steps are for Ouroboros 7.11 or later.
+
 1. Open **Extensions → MCP servers** and turn on **Use MCP servers** if it is off.
 2. Press **Add server** and fill in **Name** `RuSender`, **Server ID** `rusender`,
    **Transport** Streamable HTTP and **Address** `https://mcp.rusender.ru/mcp`. Leave
@@ -69,17 +71,23 @@ they give a type: reading, changing data, or sending and irreversible.
 - Folders for campaigns.
 - Contacts: search, read, update, delete (up to 1,000 per call), unsubscribe or
   resubscribe, statistics and send history.
-- Lists, segments and list variables: create, edit, delete, import up to 1,000 contacts
-  per call, and move contacts between lists.
+- Lists, segments and list variables: lists can be read, created, edited and deleted,
+  with contact import (up to 1,000 contacts per call), adding, removing and moving
+  contacts between lists; segments can be read, created and have their conditions edited
+  (updating conditions replaces the previous list, and no delete tool is published); list
+  variables can be read, created, edited and permanently deleted (`public_variables_delete`
+  also deletes all of the variable's values).
 - Transactional email: send one email at once with HTML, text or a saved template, and
   read sending history and delivery details. Sending keys for verified domains: list,
   read, create (active after moderation), rename or set as default, read statistics, and
   permanently delete (which stops sending through that key).
 - Automation chains: start an already active chain for a contact.
-- Domains (DKIM, SPF and DMARC records and DNS checks), senders, templates, files, and
-  webhooks (list, read, create and update the receiving URL, event set and active status;
-  updating events replaces the previous list, and MCP can disable a webhook but does not
-  delete it).
+- Domains (DKIM, SPF and DMARC records and DNS checks), senders (list and read sender
+  addresses; `public_senders_create` adds a sender address and sends a confirmation email
+  to it, and `public_senders_resend_confirmation` sends that confirmation email again),
+  templates, files, and webhooks (list, read, create and update the receiving URL, event
+  set and active status; updating events replaces the previous list, and MCP can disable
+  a webhook but does not delete it).
 
 The exact list appears on the server's page in Ouroboros after sign-in.
 
