@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,29 @@ FAKE = Path(__file__).with_name('fake_twg.py')
 MR = 'https://git.example.invalid/demo/app/-/merge_requests/7'
 OTHER = 'https://docs.example.invalid/demo/design'
 
-# Clean host environment baseline for tests: strips any TWG_ vars from the runner's shell.
-BASE_ENV = {k: v for k, v in os.environ.items() if not k.upper().startswith('TWG_')}
+# Clean host environment baseline for tests: strips any TWG_ and PYTHON* vars from the runner's shell.
+BASE_ENV = {k: v for k, v in os.environ.items() if not k.upper().startswith(('TWG_', 'PYTHON'))}
+
+
+def python_command(env=None, *flags):
+    # -I ignores every PYTHON* variable, so a run that restricts the stream encoding uses -s -B instead.
+    isolation = ['-s', '-B'] if 'PYTHONIOENCODING' in (env or {}) else ['-I']
+    return [sys.executable, *isolation, *flags]
+
+
+def package_inventory():
+    """Every payload file with its content hash; interpreter bytecode caches are not payload."""
+    return {path.relative_to(PAYLOAD).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in PAYLOAD.rglob('*') if path.is_file() and '__pycache__' not in path.parts}
+
+
+def twg_error(code, status=None, kind=None):
+    """A failed-command error in the shape of TWG's public output reference, with synthetic text."""
+    body = {'code': code, 'kind': kind or code.lower(), 'message': f'Synthetic {code} failure',
+            'repair': 'twg login --force', 'retry': {'recommended': False, 'guidance': 'do_not_retry_unchanged'}}
+    if status is not None:
+        body['statusCode'] = status
+    return body
 
 
 def remote(identifier, url, title):
@@ -59,9 +81,9 @@ def jira(tmp_path):
 
         def helper_raw(self, *args, env=None, isolated_stdlib=False):
             run_env = {**BASE_ENV, **(env or {})}
-            flags = ['-I', '-S'] if isolated_stdlib else ['-I']
+            command = python_command(env, *(['-S'] if isolated_stdlib else []))
             # cwd mirrors run_command(cwd=skill_payload); nothing is written beside the helper.
-            return subprocess.run([sys.executable, *flags, str(HELPER), *args], cwd=PAYLOAD,
+            return subprocess.run([*command, str(HELPER), *args], cwd=PAYLOAD,
                                   capture_output=True, text=True, timeout=60, env=run_env)
 
         def helper(self, *args, env=None, isolated_stdlib=False):
@@ -77,7 +99,7 @@ def jira(tmp_path):
             # Explicit fixture runner: only the test maps bare `twg` to fake_twg.py.
             assert cmd[0] == 'twg' and all(isinstance(part, str) for part in cmd)
             run_env = {**BASE_ENV, **(env or {}), 'FAKE_TWG_STATE': str(path)}
-            done = subprocess.run([sys.executable, '-I', str(FAKE), *cmd[1:]], capture_output=True, text=True,
+            done = subprocess.run([*python_command(env), str(FAKE), *cmd[1:]], capture_output=True, text=True,
                                   timeout=60, env=run_env)
             assert 'Traceback' not in done.stderr, done.stderr
             return done.returncode
@@ -103,10 +125,12 @@ def jira(tmp_path):
             return self.helper('verify', '--workdir', str(self.workdir), env=env)
 
     instance = Jira()
+    shipped = package_inventory()
     yield instance
     for cmd in instance.emitted:  # every test: bare `twg` in agent mode, never human (user) mode
         assert cmd[0] == 'twg' and cmd[cmd.index('--mode') + 1] == 'agent' and cmd.count('--mode') == 1
         assert 'user' not in cmd
+    assert package_inventory() == shipped  # no run adds, changes or removes anything in the skill package
 
 
 def test_selected_duplicate_is_the_only_change_and_surviving_same_url_is_reported(jira):
@@ -141,7 +165,7 @@ def test_selected_duplicate_is_the_only_change_and_surviving_same_url_is_reporte
 
     code, report = jira.verify()
     assert code == 0 and report['outcome'] == 'removed'
-    assert report['write'] == {'status': 'acknowledged', 'definite_no_write': False}
+    assert report['write'] == {'status': 'acknowledged'}
     assert report['other_links'] == {'missing': [], 'changed': []} and report['target_present'] is False
     assert report['surviving_same_url_links'] == ['10001']
     assert report['new_links'] == []
@@ -154,7 +178,34 @@ def test_selected_duplicate_is_the_only_change_and_surviving_same_url_is_reporte
     assert state['mr'] == {'url': MR, 'state': 'merged'}
     assert [call[:3] for call in state['calls']] == [['jira', 'workitem', 'get'], ['jira', 'workitem', 'unlink'],
                                                      ['jira', 'workitem', 'get']]
-    assert sorted(path.name for path in PAYLOAD.iterdir() if path.suffix == '.json') == []
+
+
+def test_removing_the_only_web_link_ends_with_an_explicit_empty_list(jira):
+    state = jira.read()
+    state['links'] = state['links'][:1]
+    jira.write_state(state)
+    code, chosen = jira.prepared('10001')
+    assert code == 0 and chosen['other_links_with_same_url'] == []
+    assert jira.run_steps(chosen) == [0, 0]
+    after = json.loads((jira.workdir / 'after.json').read_text(encoding='utf-8'))
+    assert after['data'][0]['remoteLinks'] == []
+    code, report = jira.verify()
+    assert code == 0 and report['outcome'] == 'removed' and report['target_present'] is False
+    assert report['other_links'] == {'missing': [], 'changed': []}
+    assert report['new_links'] == [] and report['surviving_same_url_links'] == []
+    code, listing = jira.helper('list', '--workdir', str(jira.workdir), '--which', 'after')
+    assert code == 0 and listing['web_links'] == []
+
+
+def test_read_only_listing_of_an_issue_without_web_links_is_empty(jira):
+    state = jira.read()
+    state['links'] = []
+    jira.write_state(state)
+    _, out = jira.plan(url=None)
+    assert jira.twg(out['run_command']['cmd']) == 0
+    code, listing = jira.helper('list', '--workdir', str(jira.workdir))
+    assert code == 0 and listing['web_links'] == []
+    assert jira.read()['deletes'] == [] and not (jira.workdir / 'selection.json').exists()
 
 
 def test_list_only_is_a_finished_read_only_outcome(jira):
@@ -238,25 +289,6 @@ def test_unusable_before_read_selects_nothing(jira, fault, error):
     assert jira.read()['deletes'] == [] and not (jira.workdir / 'selection.json').exists()
 
 
-@pytest.mark.parametrize('fault,expected_code,expected_status', [
-    ('refuse', 'unauthorized', 403),
-    ('http_401', 'unauthenticated', 401),
-])
-def test_documented_http_rejection_is_classified_as_definite_no_write_refusal(
-        jira, fault, expected_code, expected_status):
-    jira.fault('unlink', fault)
-    _, chosen = jira.prepared()
-    assert jira.run_steps(chosen) == [1, 0]
-    code, report = jira.verify()
-    assert code == 3 and report['ok'] is False and report['outcome'] == 'refused'
-    assert report['target_present'] is True
-    assert report['surviving_same_url_links'] == ['10001', '10002']
-    assert report['write']['status'] == 'refused' and report['write']['definite_no_write'] is True
-    assert report['write']['error']['code'] == expected_code
-    assert report['write']['error']['statusCode'] == expected_status
-    assert jira.read()['deletes'] == []
-
-
 @pytest.mark.parametrize('fault,reason,expected_code,expected_status', [
     ('timeout_present', 'provider_error', 'timeout', None),
     ('http_408_present', 'provider_error', 'request_timeout', 408),
@@ -265,8 +297,17 @@ def test_documented_http_rejection_is_classified_as_definite_no_write_refusal(
     ('unfamiliar_present', 'provider_error', 'unfamiliar_fault', None),
     ('crash', 'missing_file', None, None),
     ('mismatched_ack', 'mismatched_acknowledgement', None, None),
+    # A status never shows which request failed: a transport failure can carry an earlier read's status.
+    pytest.param(twg_error('TWG_NETWORK_ERROR', 403, 'network'), 'provider_error', 'TWG_NETWORK_ERROR', 403,
+                 id='network_error_with_403'),
+    pytest.param(twg_error('AUTH_INVALID', 401), 'provider_error', 'AUTH_INVALID', 401, id='credential_401'),
+    pytest.param(twg_error('AUTH_INVALID', 403), 'provider_error', 'AUTH_INVALID', 403, id='credential_403'),
+    pytest.param(twg_error('TWG_COMMAND_FAILED', 403), 'provider_error', 'TWG_COMMAND_FAILED', 403,
+                 id='generic_failure_403'),
+    pytest.param(twg_error('unfamiliar_code', 404), 'provider_error', 'unfamiliar_code', 404,
+                 id='unfamiliar_code_404'),
 ])
-def test_ambiguous_or_unfamiliar_delete_while_still_present_is_not_definite_no_write(
+def test_unacknowledged_delete_with_the_link_still_present_stays_ambiguous(
         jira, fault, reason, expected_code, expected_status):
     jira.fault('unlink', fault)
     _, chosen = jira.prepared()
@@ -275,12 +316,14 @@ def test_ambiguous_or_unfamiliar_delete_while_still_present_is_not_definite_no_w
     assert code == 3 and report['ok'] is False and report['outcome'] == 'ambiguous_present'
     assert report['target_present'] is True
     assert report['surviving_same_url_links'] == ['10001', '10002']
-    assert report['write']['status'] == 'ambiguous' and report['write']['definite_no_write'] is False
+    assert report['write']['status'] == 'ambiguous'
     assert report['write']['reason'] == reason
     if expected_code is not None:
         assert report['write']['error']['code'] == expected_code
         assert report['write']['error']['statusCode'] == expected_status
+        assert 'repair' not in report['write']['error']  # vendor repair hints are not relayed for execution
     assert 'do not resend' in report['note'].lower()
+    assert jira.read()['deletes'] == []
     # Replay in the same workdir remains blocked.
     code, replay = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002')
     assert code == 2 and replay['error'] == 'already_attempted'
@@ -299,7 +342,7 @@ def test_ambiguous_delete_when_absent_does_not_attribute_cause(jira, fault, reas
     assert code == 3 and report['ok'] is False and report['outcome'] == 'absent_without_acknowledgement'
     assert report['target_present'] is False
     assert report['surviving_same_url_links'] == ['10001']
-    assert report['write']['status'] == 'ambiguous' and report['write']['definite_no_write'] is False
+    assert report['write']['status'] == 'ambiguous'
     assert report['write']['reason'] == reason
     assert 'attribute' in report['note'].lower()
     assert len(jira.read()['deletes']) == 1
@@ -369,20 +412,27 @@ def test_malformed_url_syntax_returns_typed_json_never_traceback(jira, bad_url):
 
 
 def test_non_ascii_titles_and_paths_emit_lossless_json_under_ascii_pipe_encoding(jira, tmp_path):
+    env = {'PYTHONIOENCODING': 'ascii'}
+    probe = subprocess.run([*python_command(env), '-c', 'import sys; print(sys.stdout.encoding)'],
+                           capture_output=True, text=True, timeout=60, env={**BASE_ENV, **env})
+    assert probe.stdout.strip() == 'ascii', 'the restriction must reach both the helper and the fake TWG'
     unicode_title = 'Задача — MR !7 ✓'
     state = jira.read()
     state['links'][0]['object']['title'] = unicode_title
     jira.write_state(state)
     jira.workdir = tmp_path / 'задача-папка' / 'run-1'
-    env = {'PYTHONIOENCODING': 'ascii'}
     code, planned = jira.plan(env=env)
     assert code == 0 and Path(planned['workdir']) == jira.workdir.resolve()
-    assert jira.twg(planned['run_command']['cmd']) == 0
+    assert jira.twg(planned['run_command']['cmd'], env=env) == 0
     raw = jira.helper_raw('list', '--workdir', str(jira.workdir), env=env)
     assert raw.returncode == 0 and raw.stderr == ''
     raw.stdout.encode('ascii')  # pure ASCII on piped stdout
     listing = json.loads(raw.stdout)
     assert listing['web_links'][0]['title'] == unicode_title
+    code, chosen = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002', env=env)
+    assert code == 0 and jira.run_steps(chosen, env=env) == [0, 0]
+    code, report = jira.verify(env=env)
+    assert code == 0 and report['outcome'] == 'removed'
 
 
 def test_existing_empty_writable_dir_and_symlink_workdir_are_refused(jira, tmp_path):
@@ -404,14 +454,41 @@ def test_existing_empty_writable_dir_and_symlink_workdir_are_refused(jira, tmp_p
 @pytest.mark.parametrize('change,error', [
     ({'workdir': 'relative/dir'}, 'invalid_argument'), ({'workdir': str(PAYLOAD / 'run')}, 'invalid_argument'),
     ({'issue': 'DEMO-42 OR 1'}, 'invalid_argument'),
-    ({'profile': 'two words'}, 'invalid_argument'), ({'site': 'example.invalid/x?'}, 'invalid_argument'),
+    ({'profile': 'two words'}, 'invalid_argument'), ({'profile': 'demo.reader'}, 'invalid_argument'),
+    ({'profile': 'reader@example'}, 'invalid_argument'), ({'profile': 'читатель'}, 'invalid_argument'),
+    ({'profile': 'p' * 65}, 'invalid_argument'), ({'profile': ''}, 'invalid_argument'),
+    ({'site': 'example.invalid/x?'}, 'invalid_argument'), ({'site': '_example'}, 'invalid_argument'),
 ])
 def test_plan_refuses_unbound_or_unsafe_context(jira, change, error):
     args = {'workdir': str(jira.workdir), 'site': 'example', 'profile': 'demo-reader', 'issue': 'DEMO-42',
             'url': MR, **change}
     code, out = jira.helper('plan', *[part for key, value in args.items() for part in (f'--{key}', value)])
     assert code == 2 and out['error'] == error
-    assert not (PAYLOAD / 'run').exists()
+    assert not (PAYLOAD / 'run').exists() and not jira.workdir.exists()
+
+
+@pytest.mark.parametrize('profile,selector', [
+    ('demo-reader', ['--profile', 'demo-reader']),
+    ('default', ['--profile', 'default']),
+    ('_personal', ['--profile', '_personal']),
+    ('p' * 64, ['--profile', 'p' * 64]),
+    ('-ops_2', ['--profile=-ops_2']),  # a separate argument starting with "-" would read as another option
+])
+def test_every_valid_profile_name_reaches_twg_as_one_unambiguous_selector(jira, profile, selector):
+    state = jira.read()
+    state['profile'] = profile
+    jira.write_state(state)
+    code, out = jira.helper('plan', '--workdir', str(jira.workdir), '--site', 'example', '--issue', 'DEMO-42',
+                            f'--profile={profile}', '--url', MR)
+    assert code == 0
+    assert jira.twg(out['run_command']['cmd']) == 0
+    code, chosen = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002')
+    assert code == 0 and jira.run_steps(chosen) == [0, 0]
+    for step in [out['run_command'], *chosen['run_command']]:
+        assert step['cmd'][1:1 + len(selector)] == selector
+        assert step['cmd'][1 + len(selector)] == '--mode'
+    code, report = jira.verify()
+    assert code == 0 and report['outcome'] == 'removed'
 
 
 @pytest.mark.parametrize('var_name', ['TWG_TOKEN', 'TWG_OAUTH_ACCESS_TOKEN'])

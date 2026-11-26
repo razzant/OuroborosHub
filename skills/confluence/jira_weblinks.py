@@ -16,6 +16,10 @@ ordinary `run_command`, and checks the JSON that TWG writes through
             print the single delete argv and the follow-up read argv
     verify  classify the delete outcome separately from the follow-up read
 
+A delete is either `acknowledged` by a clean TWG success envelope or
+`ambiguous`: TWG's error fields do not say which request failed, so no reported
+error is treated as proof that nothing was removed.
+
 Output is one ASCII-escaped JSON object on stdout (parseable and lossless
 regardless of piped terminal encoding). Exit status: 0 success, 2 refused
 input or unusable snapshot, 3 verification finished without a clean removal.
@@ -34,7 +38,8 @@ PLAN, SELECTION = 'plan.json', 'selection.json'
 FILES = {'before': 'before.json', 'unlink': 'unlink.json', 'after': 'after.json'}
 ISSUE = re.compile(r'(?:[A-Z][A-Z0-9_]*-[1-9][0-9]*|[1-9][0-9]*)')
 LINK_ID = re.compile(r'[1-9][0-9]{0,18}')
-TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:@-]{0,199}')
+SITE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:@-]{0,199}')
+PROFILE = re.compile(r'[A-Za-z0-9_-]{1,64}')  # TWG login profile names may start with "_" or "-"
 GET_COMMAND, UNLINK_COMMAND = 'jira.workitem.get', 'jira.workitem.unlink.weblink'
 
 # Personal-Jira TWG auth override variables that bypass a saved login profile.
@@ -42,11 +47,6 @@ GET_COMMAND, UNLINK_COMMAND = 'jira.workitem.get', 'jira.workitem.unlink.weblink
 # auth.db, TWG_ADMIN_TOKEN for independent admin commands, and TWG_PROFILE
 # overridden by --profile) stay allowed.
 AMBIENT_AUTH_OVERRIDES = frozenset({'TWG_TOKEN', 'TWG_OAUTH_ACCESS_TOKEN'})
-
-# Narrow set of documented HTTP rejection statuses where the delete was declined
-# without applying it (excluding 408 Request Timeout, 499, all 5xx, and errors
-# without an HTTP statusCode, which remain ambiguous by default).
-DEFINITE_NO_WRITE_HTTP = frozenset({400, 401, 403, 404, 405, 409, 410, 422, 429})
 
 
 class Refused(Exception):
@@ -164,7 +164,10 @@ def existing_workdir(value):
 
 def argv(plan, *command, output):
     # Agent mode with explicit output flags, as Atlassian's agent guide asks; the full result goes to the file.
-    return ['twg', '--profile', plan['profile'], '--mode', 'agent', '--output-summary', 'none',
+    profile = plan['profile']
+    # A separate "-name" argument would read as another option; the joined form keeps it the profile value.
+    selector = [f'--profile={profile}'] if profile.startswith('-') else ['--profile', profile]
+    return ['twg', *selector, '--mode', 'agent', '--output-summary', 'none',
             '--output-file', str(output), *command, '--site', plan['site'], '--output', 'json']
 
 
@@ -244,27 +247,22 @@ def compact(view, expected_url):
                           for link in view['links']]}
 
 
-def _is_definite_no_write(error):
-    status_code = error.get('statusCode')
-    return type(status_code) is int and status_code in DEFINITE_NO_WRITE_HTTP
-
-
 def delete_outcome(workdir, selection):
-    """Classify unlink.json: acknowledged, refused (definite no-write), or ambiguous."""
+    """Classify unlink.json: acknowledged, or ambiguous."""
     try:
         doc, _ = read_json(workdir / FILES['unlink'], 'delete')
     except Refused as exc:
-        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': exc.code, 'detail': str(exc)}
+        return {'status': 'ambiguous', 'reason': exc.code, 'detail': str(exc)}
     if not isinstance(doc, dict):
-        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'unrecognized_output',
+        return {'status': 'ambiguous', 'reason': 'unrecognized_output',
                 'detail': 'The delete output is not a JSON object.'}
     if doc.get('ok') is False and isinstance(doc.get('error'), dict):
+        # Neither a code nor a statusCode says the DELETE itself was declined (a transport failure can carry the
+        # status of an earlier read), so every reported error is retained as ambiguous.
         error = doc['error']
         payload = {key: error.get(key) for key in ('code', 'kind', 'statusCode', 'message', 'retry')}
-        if _is_definite_no_write(error):
-            return {'status': 'refused', 'definite_no_write': True, 'error': payload}
-        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'provider_error', 'error': payload,
-                'detail': 'TWG reported a non-definite error; whether the delete applied or will apply is uncertain.'}
+        return {'status': 'ambiguous', 'reason': 'provider_error', 'error': payload,
+                'detail': 'TWG reported an error; whether the delete applied or will apply is uncertain.'}
     data = doc.get('data')
     request = doc.get('request')
     meta = doc.get('meta') if isinstance(doc.get('meta'), dict) else {}
@@ -280,11 +278,11 @@ def delete_outcome(workdir, selection):
         site_ok = req_site is None or req_site == selection['issue']['site']
         clean_ok = not doc.get('warnings') and not meta.get('partial')
         if issue_ok and req_issue_ok and link_ok and site_ok and clean_ok:
-            return {'status': 'acknowledged', 'definite_no_write': False}
-        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'mismatched_acknowledgement',
+            return {'status': 'acknowledged'}
+        return {'status': 'ambiguous', 'reason': 'mismatched_acknowledgement',
                 'detail': 'The delete acknowledgement does not cleanly match the selected issue, site, and link ID.'}
-    return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'unrecognized_output',
-            'detail': 'The delete output is neither a valid acknowledgement for this link nor a definite refusal.'}
+    return {'status': 'ambiguous', 'reason': 'unrecognized_output',
+            'detail': 'The delete output is neither a valid acknowledgement for this link nor a TWG error.'}
 
 
 def cmd_plan(args):
@@ -292,8 +290,8 @@ def cmd_plan(args):
     require_no_ambient_auth_overrides()
     plan = {
         'schema': 2,
-        'profile': checked(args.profile, TOKEN, '--profile'),
-        'site': checked(args.site, TOKEN, '--site'),
+        'profile': checked(args.profile, PROFILE, '--profile'),
+        'site': checked(args.site, SITE, '--site'),
         'issue': checked(args.issue.upper(), ISSUE, '--issue'),
         'expected_url': checked_url(args.url) if args.url is not None else None,
     }
@@ -412,8 +410,6 @@ def cmd_verify(args):
     elif target_present:
         if write['status'] == 'acknowledged':
             outcome = 'acknowledged_but_present'
-        elif write['status'] == 'refused':
-            outcome = 'refused'
         else:
             outcome = 'ambiguous_present'
             report['note'] = ('The link is still present in this read, but the delete outcome is ambiguous; '
@@ -437,7 +433,9 @@ def parser():
     plan = commands.add_parser('plan', help='bind the context and print the first read')
     plan.add_argument('--workdir', required=True, help='new absolute leaf path under a private task-owned parent')
     plan.add_argument('--site', required=True, help='TWG site prefix or cloud ID, e.g. example')
-    plan.add_argument('--profile', required=True, help='saved TWG login profile; `default` for the saved default')
+    plan.add_argument('--profile', required=True,
+                      help='saved TWG login profile; `default` for the saved default; '
+                           'write --profile=NAME for a name starting with "-"')
     plan.add_argument('--issue', required=True, help='issue key, e.g. DEMO-42')
     plan.add_argument('--url', help='exact URL stored in the web link, when already known')
     listing = commands.add_parser('list', help='show compact web links')

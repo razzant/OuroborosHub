@@ -4,7 +4,11 @@ State lives in the JSON file named by FAKE_TWG_STATE. Every value is synthetic.
 Shapes follow TWG 1.4.8's JSON written through `--output-file`: a success is the
 v2 envelope {apiVersion, command, request, data, meta[, warnings]} (agent mode
 drops warnings); a failure is {ok: false, error: {code, kind, message, ...}}.
-Faults are consumed in order from state["faults"][<command>].
+Failure fields follow TWG's public agent output reference (code, kind, message,
+repair, retry.recommended/guidance); statusCode, message texts and the retryable
+guidance value are synthetic. Faults are consumed in order from
+state["faults"][<command>]; a dict fault is an error envelope reported while the
+link stays in place.
 """
 from __future__ import annotations
 
@@ -30,7 +34,8 @@ def meta(resource, **extra):
 
 
 def error(code, message, status=None, *, kind='jira', retryable=False):
-    body = {'code': code, 'kind': kind, 'message': message, 'retry': {'retryable': retryable}}
+    body = {'code': code, 'kind': kind, 'message': message,
+            'retry': {'recommended': retryable, 'guidance': 'retry_later' if retryable else 'do_not_retry_unchanged'}}
     if status is not None:
         body['statusCode'] = status
     return {'ok': False, 'error': body}
@@ -54,8 +59,11 @@ def main():
     argv = sys.argv[1:]
     root = {}
     while argv and argv[0].startswith('--'):
-        flag = argv.pop(0)
-        root[flag] = argv.pop(0)
+        flag, joined, value = argv.pop(0).partition('=')
+        if not joined:
+            value = argv.pop(0)
+            assert not value.startswith('-'), f'ambiguous option value after {flag}'
+        root[flag] = value
     assert set(root) == ROOT_OPTIONS, root
     assert root['--mode'] == 'agent' and root['--output-summary'] == 'none', root
     assert root['--profile'] == state['profile'], 'the login profile is pinned per plan'
@@ -70,7 +78,6 @@ def main():
     def finish(code=0, document=None, raw=None):
         if document is not None or raw is not None:
             output.write_text(raw if raw is not None else json.dumps(document, indent=2), encoding='utf-8')
-            print(f'stdout={output}')
         state_path.write_text(json.dumps(state, indent=2), encoding='utf-8')
         return code
 
@@ -123,10 +130,8 @@ def main():
         issue_ref, link_id = take(rest, '--id'), take(rest, '--link-id')
         assert rest == [], 'only --id and --link-id select the record; never --url'
         fault = faults['unlink'].pop(0) if faults['unlink'] else None
-        if fault == 'refuse':
-            return finish(1, error('unauthorized', 'Jira REST API 403: delete:jira-platform:twg-cli missing', 403))
-        if fault == 'http_401':
-            return finish(1, error('unauthenticated', 'Jira REST API 401: authentication required', 401))
+        if isinstance(fault, dict):  # the reported error envelope, with the record left in place
+            return finish(1, {'ok': False, 'error': fault})
         if fault == 'timeout_present':
             return finish(1, error('timeout', 'Request timed out waiting for Jira', None, kind='network', retryable=True))
         if fault == 'http_408_present':

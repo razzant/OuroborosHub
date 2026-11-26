@@ -145,6 +145,8 @@ record, or unknown source, and never install or sign in automatically.
 1. `plan --workdir DIR --site SITE --profile NAME --issue DEMO-42 [--url URL]`
    binds the site prefix or cloud ID, saved login profile (`default` for the
    saved default), and issue; add `--url` when the exact URL is already known.
+   A profile name is 1–64 letters, digits, `_` or `-`; write `--profile=NAME`
+   when it starts with `-` (the printed `twg` commands then use that form too).
    Run the printed read once.
 2. `list --workdir DIR` returns each web link's ID, URL, title, global ID, and
    application (and `matches_expected_url` when bound). **List-only is a
@@ -161,23 +163,23 @@ record, or unknown source, and never install or sign in automatically.
    first. `select` prints the delete (`twg jira workitem unlink weblink --id
    <issue ID> --link-id <ID>`, never a URL selector) and the follow-up read.
    Run the delete once, then the follow-up read regardless of the delete result.
-4. `verify --workdir DIR` classifies the delete (`acknowledged`, definite
-   no-write `refused` for a narrow set of documented HTTP rejection statuses
-   such as 401/403/400/404/429 when actually reported, or `ambiguous` by default
-   for unfamiliar errors, errors without an HTTP status, 408/5xx such as 504,
-   missing/malformed output, or mismatched acknowledgement, always retaining
-   the exact `code`/`statusCode`) separately from the follow-up read, and
-   reports `surviving_same_url_links` (all observed IDs still carrying the
-   expected URL, whether pre-existing or newly added):
+4. `verify --workdir DIR` classifies the delete as `acknowledged` (a clean TWG
+   success result for this issue and link ID) or `ambiguous` (any TWG error,
+   missing or malformed output, or a mismatched acknowledgement). TWG error
+   fields do not say which request failed (a status such as `403` may belong to
+   an earlier read rather than the delete), so no error is treated as proof
+   that nothing was removed; the report keeps TWG's `code`, `statusCode` and
+   message. The follow-up read is judged separately, and the report lists
+   `surviving_same_url_links` (all observed IDs still carrying the expected
+   URL, whether pre-existing or newly added):
    - `removed` (exit 0): valid acknowledgement, target absent, same issue/site,
      and every pre-existing other link returned identically. Report any
      `surviving_same_url_links` without deleting extra records.
-   - Non-success (exit 3): `refused` (definite no-write and still present),
-     `ambiguous_present` (still seen now, but an ambiguous write cannot prove
-     the request will never complete), `acknowledged_but_present`,
-     `absent_without_acknowledgement` (absent without a valid acknowledgement;
-     do not attribute cause to this run), `other_links_changed`,
-     `identity_changed`, or `unverified`.
+   - Non-success (exit 3): `ambiguous_present` (still seen now, but an ambiguous
+     write cannot prove the request will never complete),
+     `acknowledged_but_present`, `absent_without_acknowledgement` (absent
+     without a valid acknowledgement; do not attribute cause to this run),
+     `other_links_changed`, `identity_changed`, or `unverified`.
 
 A read that is a TWG error, reports warnings or partial data, lacks or garbles
 `remoteLinks`, repeats an ID, names another issue or site, or is truncated is
@@ -187,8 +189,19 @@ through TWG, and TWG 1.4.8 itself can normalize an unexpected non-array
 provider response to `[]`, so these results are TWG observations rather than
 raw provider certainty. A work directory never replays a delete: after any
 non-success or ambiguous outcome, do not resend; report it and re-read in a
-new workdir before the person decides on another attempt. The delete needs the
-login's Jira delete permission.
+new workdir before the person decides on another attempt. Do not run TWG's
+`repair` suggestions (which can include sign-in or setup commands)
+automatically; pass them to the person.
+
+Deleting a web link needs two separate permission layers:
+
+- **TWG authorization:** the saved login's OAuth grant must allow the action.
+  An organization admin chooses TWG's
+  [Read, Write and manage, and Delete permissions](https://developer.atlassian.com/cloud/twg-cli/getting-started/configure-permissions/);
+  after a change, the person may need to sign in again.
+- **Jira:** issue linking enabled, the *Browse Projects*, *Edit Issues* and
+  *Link Issues* project permissions, and visibility of the issue where
+  issue-level security applies. *Delete Issues* is not required.
 
 ## API references
 
