@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/6d8b00ab4cf3b8d65eb49ff0ca3ce1a2f728cb3f",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/911a0dba851bc9d59f4cb15add24708b610d8138",
   "schema_version": 1,
   "skills": [
     {
@@ -172,6 +172,22 @@
       "type": "instruction",
       "version": "0.1.0",
       "when_to_use": "Review external code changes, assess a project or library for adoption, or check research and analysis code, including folders without Git."
+    },
+    {
+      "description": "How to add AgentMail's official MCP server to Ouroboros: give the agent its own email inboxes to send, receive, reply and forward mail, keep drafts, a calendar and files, and sign up to apps with an inbox. For anyone who wants the agent to have its own address; a free plan with 3 inboxes, sign-in or API key.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c714ec9012f3ef5e38f556781e5a64719853f7c25a3a420c2302a0f3670d6580",
+          "size": 7724
+        }
+      ],
+      "name": "agentmail-mcp-guide",
+      "slug": "agentmail-mcp-guide",
+      "title": "AgentMail MCP: email inboxes for the agent",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants Ouroboros to have its own email address for sending and receiving mail, or asks to connect AgentMail's MCP server. AgentMail inboxes belong to the AgentMail account; this is not access to the person's existing mailbox."
     },
     {
       "connects": [
@@ -1431,6 +1447,22 @@
       "type": "extension",
       "version": "0.13.2",
       "when_to_use": "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
+    },
+    {
+      "description": "How to add CoinMarketCap's official MCP server to Ouroboros: crypto quotes, market and derivatives metrics, technical analysis, news, narratives, holder data and hosted analysis skills. For anyone following crypto markets; a free Basic key or sign-in works, paid plans from US$29 a month billed yearly; market data only.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "67108a398688c8f0133a70969abe4992155189b58aac8ff4e190bc3f842b2bbb",
+          "size": 7356
+        }
+      ],
+      "name": "coinmarketcap-mcp-guide",
+      "slug": "coinmarketcap-mcp-guide",
+      "title": "CoinMarketCap MCP: crypto market data",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants current crypto prices, market overviews, technical indicators, news or on-chain holder data from CoinMarketCap, or asks to connect its MCP server. Not for trading: the server cannot place orders or move funds."
     },
     {
       "description": "Read, search and author Confluence Cloud pages, comments and attachments using an existing personal or scoped API token.",
@@ -2771,6 +2803,22 @@
       "when_to_use": "Focused fact checks, finding primary sources, documentation lookup, reading a known URL, site/date-filtered retrieval, or supplying sources for Ouroboros's own research. Use live fetch for current pages and a focused extraction question for a section beyond the excerpt. Choose a broader research workflow when the task needs many searches and a synthesized report."
     },
     {
+      "description": "How to add Lenta's official MCP server to Ouroboros: search the Lenta storefront for a delivery address or a store, read product cards and categories, list stores, and create a cart link to order on lenta.com. For shoppers at Lenta in Russia; no account for these, and Lenta names no fee.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "0b36708aecd8380832c1c23752626ef465f0d05214651368163f33a6edf48de9",
+          "size": 4794
+        }
+      ],
+      "name": "lenta-mcp-guide",
+      "slug": "lenta-mcp-guide",
+      "title": "Lenta MCP: groceries, stores and cart links",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants groceries or household goods found and compared at Lenta, a Russian retail chain, a nearby store found, or a cart prepared for ordering on lenta.com, or asks to connect Lenta's MCP server."
+    },
+    {
       "description": "Структурирует OCR-текст лабораторных анализов и объясняет отклонения; не заменяет врача или экстренную помощь.",
       "files": [
         {
@@ -3042,6 +3090,22 @@
       "when_to_use": "The user attached a PDF and asks to read, summarize, search, or compare it, or asks to produce or export a PDF."
     },
     {
+      "description": "How to add PEK's official MCP server to Ouroboros: estimate the cost and transit time of a freight shipment in Russia, check a cargo's status by its number and find the nearest PEK branches. For anyone shipping with PEK; free per PEK, no account, read-only.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "f68e98823e69d4ee1fb96956b23a4477430729663722bc1a5c3a908e56bb453c",
+          "size": 3911
+        }
+      ],
+      "name": "pecom-mcp-guide",
+      "slug": "pecom-mcp-guide",
+      "title": "PEK MCP: freight cost, cargo tracking and branches",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants to estimate a PEK freight delivery, check a cargo's status by its tracking number or find a PEK branch, or asks to connect PEK's MCP server. Not for placing an order: ordering and payment stay on the PEK website."
+    },
+    {
       "description": "Deep web research via OpenRouter web_search server tool. Uses any model + grounded search with citations. Requires OPENROUTER_API_KEY in Settings.",
       "files": [
         {
@@ -3154,6 +3218,22 @@
       "type": "instruction",
       "version": "0.1.0",
       "when_to_use": "Use when a claim depends on a shipped artifact, binary or package behavior, decompilation, runtime observation, browser capture, or a version comparison that ordinary source-repository tools cannot establish."
+    },
+    {
+      "description": "How to add Readwise's official MCP server to Ouroboros and sign in: search and read highlights and Reader documents, save, tag, move and annotate them, and manage a Readwise Books library and reading sessions. Highlights and Reader are free for 30 days, then from US$7.99 a month billed yearly for one or US$9.99 for both; Readwise Books is free without a subscription (in invite-only beta, with direct access for Readwise subscribers).",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "3e013bbe1155b7b6a6dd83cd9c22c7cd8ca5d5dcdce632e92c9ed7c63e3d9dfd",
+          "size": 6653
+        }
+      ],
+      "name": "readwise-mcp-guide",
+      "slug": "readwise-mcp-guide",
+      "title": "Readwise MCP: highlights, Reader and Books",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants Ouroboros to search or use their Readwise highlights, Reader library or Readwise Books, save something to Reader, or asks how to connect Readwise's MCP server. Needs the person's Readwise account and sign-in."
     },
     {
       "description": "Оркестратор автоматического бронирования ресторанов: нормализует список ресторанов, формирует задачу для агента-исполнителя и валидирует результат.",
@@ -3427,6 +3507,22 @@
       "type": "extension",
       "version": "0.1.0",
       "when_to_use": "The user asks for papers, studies, preprints or open-access PDFs on a topic, wants a reference resolved from a DOI, PMID, PMCID, arXiv id or OpenAlex id, or asks how often a paper is cited and by whom. Not for general web search."
+    },
+    {
+      "description": "How to add SingularityApp's official MCP server to Ouroboros and sign in: read, create and edit tasks, checklists, projects, habits, tags and Kanban boards, with an optional batch mode. For SingularityApp users; MCP is marked for the Pro and Elite plans, from US$3.33 a month billed annually.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "e0170386050f170930f5996217f5b50a9d08cb664f13fa50fd378265da20b209",
+          "size": 5429
+        }
+      ],
+      "name": "singularityapp-mcp-guide",
+      "slug": "singularityapp-mcp-guide",
+      "title": "SingularityApp MCP: tasks, projects and habits",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants Ouroboros to read or manage their SingularityApp tasks, projects, habits or Kanban boards, or asks how to connect SingularityApp's MCP server. Needs the person's SingularityApp account and sign-in."
     },
     {
       "connects": [
@@ -4363,6 +4459,22 @@
       "version": "0.4.5"
     },
     {
+      "description": "How to add Todoist's official MCP server to Ouroboros and sign in: find, add, edit, complete and reschedule tasks and work with projects, sections, comments, labels, filters and reminders. For Todoist users on any plan, including the free one; the sign-in asks for read and write access.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "a8eed76f95e3b5f5cde24b5b49316a1e4041c908ebf55152c09b49b0799ae22b",
+          "size": 6142
+        }
+      ],
+      "name": "todoist-mcp-guide",
+      "slug": "todoist-mcp-guide",
+      "title": "Todoist MCP: tasks and projects",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants Ouroboros to read or manage their Todoist tasks and projects, or asks how to connect Todoist's MCP server. Needs the person's own Todoist account and sign-in."
+    },
+    {
       "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",
       "files": [
         {
@@ -4441,6 +4553,38 @@
       "type": "extension",
       "version": "1.2.0",
       "when_to_use": "Inspect token usage across Ouroboros models, harnesses, projects and tasks over the retained history."
+    },
+    {
+      "description": "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and deal links on trivago, and monthly price forecasts for a destination. For anyone planning a stay; free, no account, read-only.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "744ed6af515f1349ff0241ebc82d2924a22a46c9b4dc6b3b9194b539ce99fb3a",
+          "size": 3848
+        }
+      ],
+      "name": "trivago-mcp-guide",
+      "slug": "trivago-mcp-guide",
+      "title": "trivago MCP: hotel search and price trends",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants to find or compare hotels, check prices for dates or plan when to travel, and asks to use trivago or to connect its MCP server. Not for booking or payment: results return deal links on trivago, where the person continues to a partner booking site or books through trivago Book & Go."
+    },
+    {
+      "description": "How to add Tutu.ru's official MCP server to Ouroboros: search flights, Russian Railways trains, buses, commuter trains and hotels, compare routes, read seat maps and get a checkout link to tutu.ru. For travellers booking on Tutu.ru; no account, and the vendor names no fee; an opt-in tool registers passengers (creating an unpaid order for flights, reserving seats for trains, or creating a cart for buses and hotels), while payment always stays with the user.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "dacc43e31e270f571c2bc886bd18d319cc7f384859fb7e4711e342f175bf64d7",
+          "size": 5900
+        }
+      ],
+      "name": "tutu-mcp-guide",
+      "slug": "tutu-mcp-guide",
+      "title": "Tutu MCP: trains, flights, buses and hotels",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants tickets or hotels found and compared on Tutu.ru, a Russian travel service, or asks to connect Tutu's MCP server. Payment always happens on tutu.ru through a link."
     },
     {
       "description": "Generate a short video clip via OpenRouter's video generation API using Seedance 2.0 (bytedance/seedance-2.0). Output is saved to the skill state directory.",
@@ -4530,6 +4674,22 @@
       "when_to_use": "User wants to generate a photorealistic cinematic video, film scene, documentary, live-action style video, or realistic narrative with consistent characters, Gemini multimodal quality control, and Hollywood-grade production quality. Separate from anime_studio which generates 2D anime cartoons."
     },
     {
+      "description": "How to add VK WorkSpace's official MCP server to Ouroboros and sign in with a company account: read and send messages and email, manage chats, mail threads and files, share files and change access, and create, change and delete calendar events. For organizations on VK WorkSpace with the paid Assistant option on the Extended or Individual plan.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "e0a7b0f87fbb6f21dcdd7c3da73a49cb454f4c1be5e4c32c85e7b5ce84bd2570",
+          "size": 6302
+        }
+      ],
+      "name": "vk-workspace-mcp-guide",
+      "slug": "vk-workspace-mcp-guide",
+      "title": "VK WorkSpace MCP: messenger, mail, disk and calendar",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person whose organization uses VK WorkSpace wants Ouroboros to read, send or manage company messages, mail, files or calendar events, or asks how to connect VK WorkSpace's MCP server. Needs a company account and the Assistant option enabled by the organization's administrator."
+    },
+    {
       "description": "Поиск товаров ВкусВилл, просмотр деталей (состав, КБЖУ, цена, рейтинг) и создание ссылки на корзину через официальный MCP API ВкусВилл.",
       "files": [
         {
@@ -4552,6 +4712,22 @@
       "slug": "vkusvill",
       "type": "extension",
       "version": "1.0.1"
+    },
+    {
+      "description": "How to add VseInstrumenti.ru's official MCP server to Ouroboros: search, compare and find alternatives among tools, machines and supplies for building, repair and DIY, with reviews, prices and availability for Moscow (city). For buyers of tools and building supplies; no account, the vendor names no fee, and no ordering.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "99998a75c9fccf74fbbb595722cd604908a8da82f68d0deb35aafe9ad3128a8c",
+          "size": 4077
+        }
+      ],
+      "name": "vseinstrumenti-mcp-guide",
+      "slug": "vseinstrumenti-mcp-guide",
+      "title": "VseInstrumenti MCP: tools and building supplies",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants tools, machines, consumables or building materials found, compared or replaced with alternatives at VseInstrumenti.ru, a Russian retailer, or asks to connect its MCP server. Not for ordering or payment, and not for goods outside building, repair and DIY."
     },
     {
       "description": "Wide polished weather widget — current conditions, compact forecast, astronomy, and resilient wttr.in cache (no API key).",
@@ -4694,6 +4870,22 @@
       "type": "script",
       "version": "0.1.0",
       "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file."
+    },
+    {
+      "description": "How to add Yandex 360's official MCP servers to Ouroboros with a token: Mail, Calendar, Disk and Telemost with a paid Yandex 360 subscription, organization management for Yandex 360 for Business, and Wiki, Forms and Tracker for organizations on Yandex 360 for Business or Yandex Cloud. No separate MCP fee is stated; preview.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "f573ab03971f49f197b2eeae57f4405574e149033add3932ace2bf12546add41",
+          "size": 9290
+        }
+      ],
+      "name": "yandex-360-mcp-guide",
+      "slug": "yandex-360-mcp-guide",
+      "title": "Yandex 360 MCP: Mail, Calendar, Disk, Tracker and more",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person with Yandex 360 or a Yandex Cloud organization wants Ouroboros to work with their Yandex Mail, Calendar, Disk, Telemost, Wiki, Forms, Tracker or organization settings, or asks how to connect Yandex 360's MCP servers."
     },
     {
       "description": "Read-only observer for a YYLO-orchestrated coding workspace. Explains the typed task and merge lifecycle and how to answer status questions with the yylo CLI's read-only commands (info, task doctor, task status, merge status, wiki). Never mutates task, merge, Kanban, or Git state.",
