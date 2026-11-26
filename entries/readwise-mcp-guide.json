@@ -1,0 +1,20 @@
+{
+  "category": [
+    "documents",
+    "search"
+  ],
+  "description": "How to add Readwise's official MCP server to Ouroboros and sign in: search and read highlights and Reader documents, save, tag, move and annotate them, and manage a Readwise Books library and reading sessions. Highlights and Reader are free for 30 days, then from US$7.99 a month billed yearly for one or US$9.99 for both; Readwise Books is free without a subscription (in invite-only beta, with direct access for Readwise subscribers).",
+  "digest": "82d682aa27ea43abc61c60e1c63b24a6509e660e09241135aa845c6091647ae7",
+  "name": "readwise-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/readwise-mcp-guide"
+  },
+  "title": "Readwise MCP: highlights, Reader and Books",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants Ouroboros to search or use their Readwise highlights, Reader library or Readwise Books, save something to Reader, or asks how to connect Readwise's MCP server. Needs the person's Readwise account and sign-in.",
+  "withdrawn": null
+}

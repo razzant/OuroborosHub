@@ -1,0 +1,20 @@
+{
+  "category": [
+    "city",
+    "planning"
+  ],
+  "description": "How to add Tutu.ru's official MCP server to Ouroboros: search flights, Russian Railways trains, buses, commuter trains and hotels, compare routes, read seat maps and get a checkout link to tutu.ru. For travellers booking on Tutu.ru; no account, and the vendor names no fee; an opt-in tool registers passengers (creating an unpaid order for flights, reserving seats for trains, or creating a cart for buses and hotels), while payment always stays with the user.",
+  "digest": "ec1e8e119e48400fa0cfeb5d822e3c69e5b9058afce71eb5bc54d16b4736eaec",
+  "name": "tutu-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/tutu-mcp-guide"
+  },
+  "title": "Tutu MCP: trains, flights, buses and hotels",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants tickets or hotels found and compared on Tutu.ru, a Russian travel service, or asks to connect Tutu's MCP server. Payment always happens on tutu.ru through a link.",
+  "withdrawn": null
+}

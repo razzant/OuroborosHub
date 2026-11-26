@@ -1,0 +1,20 @@
+{
+  "category": [
+    "city",
+    "business"
+  ],
+  "description": "How to add PEK's official MCP server to Ouroboros: estimate the cost and transit time of a freight shipment in Russia, check a cargo's status by its number and find the nearest PEK branches. For anyone shipping with PEK; free per PEK, no account, read-only.",
+  "digest": "fb8973fcc458fae13efdb031a955f80e828c3498d163ee5293a7c1ae798bf86e",
+  "name": "pecom-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/pecom-mcp-guide"
+  },
+  "title": "PEK MCP: freight cost, cargo tracking and branches",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants to estimate a PEK freight delivery, check a cargo's status by its tracking number or find a PEK branch, or asks to connect PEK's MCP server. Not for placing an order: ordering and payment stay on the PEK website.",
+  "withdrawn": null
+}
