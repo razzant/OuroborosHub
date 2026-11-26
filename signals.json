@@ -4,7 +4,7 @@
       "stars": 0
     }
   },
-  "generated_at": "2026-11-25T14:32:39.437000Z",
+  "generated_at": "2026-11-26T13:59:07.723744Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -195,6 +195,11 @@
     "pomerado": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/244",
+      "votes": 0
+    },
+    "portable-context-library": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/359",
       "votes": 0
     },
     "provider_keys": {
