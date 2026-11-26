@@ -185,7 +185,11 @@ record, or unknown source, and never install or sign in automatically.
 A read that is a TWG error, reports warnings or partial data, lacks or garbles
 `remoteLinks`, repeats an ID, names another issue or site, or is truncated is
 refused, not treated as an empty list: TWG omits `remoteLinks` when it cannot
-read them, and in agent mode its warning is not in the file. Observations come
+read them, and in agent mode its warning is not in the file. With an explicitly
+selected UUID cloud ID, TWG may omit the issue's display-only browse URL. The
+site, issue ID and key must still match, any returned browse URL must be valid,
+and two returned browse URLs must agree. This does not relax the exact web-link
+URL check for the selected record. Observations come
 through TWG, and TWG 1.4.8 itself can normalize an unexpected non-array
 provider response to `[]`, so these results are TWG observations rather than
 raw provider certainty. A work directory never replays a delete: after any

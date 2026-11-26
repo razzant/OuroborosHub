@@ -39,6 +39,7 @@ FILES = {'before': 'before.json', 'unlink': 'unlink.json', 'after': 'after.json'
 ISSUE = re.compile(r'(?:[A-Z][A-Z0-9_]*-[1-9][0-9]*|[1-9][0-9]*)')
 LINK_ID = re.compile(r'[1-9][0-9]{0,18}')
 SITE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:@-]{0,199}')
+CLOUD_ID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
 PROFILE = re.compile(r'[A-Za-z0-9_-]{1,64}')  # TWG login profile names may start with "_" or "-"
 GET_COMMAND, UNLINK_COMMAND = 'jira.workitem.get', 'jira.workitem.unlink.weblink'
 
@@ -94,17 +95,31 @@ def checked(value, pattern, label):
     return value
 
 
-def checked_url(value):
+def http_url_parts(value):
     if not isinstance(value, str) or not value or any(c.isspace() or ord(c) < 0x20 for c in value):
-        raise Refused('invalid_argument', '--url must be one absolute http(s) URL, exactly as stored in the web link.')
+        return None
     try:
         parts = urlsplit(value)
         _ = parts.port
     except ValueError:
-        raise Refused('invalid_argument', '--url must be one absolute http(s) URL, exactly as stored in the web link.') from None
-    if parts.scheme not in {'http', 'https'} or not parts.hostname:
+        return None
+    return parts if parts.scheme in {'http', 'https'} and parts.hostname else None
+
+
+def checked_url(value):
+    if http_url_parts(value) is None:
         raise Refused('invalid_argument', '--url must be one absolute http(s) URL, exactly as stored in the web link.')
     return value
+
+
+def browse_url_matches(item, key, site):
+    if 'url' not in item:
+        # TWG may have the issue and remote links but no display hostname for a cloud ID.
+        return CLOUD_ID.fullmatch(site) is not None
+    url = item['url']
+    parts = http_url_parts(url)
+    return (parts is not None and parts.username is None and not any(c in url for c in '\\?#')
+            and parts.path.endswith('/browse/' + key))
 
 
 def ambient_auth_overrides(env=None):
@@ -224,8 +239,9 @@ def snapshot(workdir, plan, name):
         raise Refused('unrecognized_output', f'{name} read does not hold exactly one work item.')
     item = data[0]
     issue_id, key, url = item.get('id'), item.get('key'), item.get('url')
-    if not (isinstance(issue_id, str) and issue_id.isdigit() and isinstance(key, str) and isinstance(url, str)
-            and url.endswith('/browse/' + key) and plan['issue'] in {issue_id, key.upper()}):
+    if not (isinstance(issue_id, str) and issue_id.isdigit() and isinstance(key, str)
+            and '-' in key and ISSUE.fullmatch(key.upper()) and plan['issue'] in {issue_id, key.upper()}
+            and browse_url_matches(item, key, plan['site'])):
         raise Refused('context_mismatch', f'{name} read does not identify the planned issue.')
     if 'remoteLinks' not in item:
         # TWG omits the key when it could not read remote links (agent mode also drops the warning).
@@ -387,7 +403,10 @@ def cmd_verify(args):
     except Refused as exc:
         return emit({**report, 'ok': False, 'outcome': 'unverified', 'read_after': {'error': exc.code,
                      'detail': str(exc)}, 'next': 'Read the issue again with a new plan before any further change.'}, 3)
-    if after['issue'] != selection['issue']:
+    before_issue, after_issue = selection['issue'], after['issue']
+    browse_urls = before_issue['url'], after_issue['url']
+    if (any(before_issue[field] != after_issue[field] for field in ('id', 'key', 'site'))
+            or (None not in browse_urls and browse_urls[0] != browse_urls[1])):
         return emit({**report, 'ok': False, 'outcome': 'identity_changed', 'after_issue': after['issue']}, 3)
     others = selection['others']
     # Every other remote link must come back as the identical provider record, field for field.

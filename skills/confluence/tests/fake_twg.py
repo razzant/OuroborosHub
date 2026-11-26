@@ -117,8 +117,17 @@ def main():
             item['id'] = '10999'
         if fault == 'wrong_key':
             item.update(key='DEMO-43', url=f'{SITE_BASE}/browse/DEMO-43')
+        if output.name in state.get('omit_browse_url_in', []):
+            item.pop('url')
+        if fault == 'malformed_browse_url':
+            item['url'] = f'not-a-url/browse/{issue["key"]}'
+        if fault == 'null_browse_url':
+            item['url'] = None
+        if fault == 'changed_browse_url':
+            item['url'] = f'https://other.example.invalid/browse/{issue["key"]}'
         document = {'apiVersion': 'v2', 'command': 'jira.workitem.get',
-                    'request': {'issueIdOrKey': issue['key'], 'site': site, 'fields': ['summary'], 'remoteLinks': True},
+                    'request': {'issueIdOrKey': issue['key'], 'site': 'other-site' if fault == 'wrong_site' else site,
+                                'fields': ['summary'], 'remoteLinks': True},
                     'data': [item], 'meta': meta('jira.workitem', **({'partial': True} if fault == 'partial' else {}))}
         if fault == 'warnings':
             document['warnings'] = ['remote links read reported a warning']
@@ -144,6 +153,16 @@ def main():
             return finish(1, error('unfamiliar_fault', 'Unexpected upstream response', None, kind='unknown'))
         if fault == 'mismatched_ack':
             return finish(0, unlink_ok(issue_ref, '10001'))
+        if fault == 'mismatched_ack_issue':
+            return finish(0, unlink_ok('10999', link_id))
+        if fault == 'mismatched_ack_site':
+            return finish(0, unlink_ok(issue_ref, link_id, site='other-site'))
+        if fault == 'mismatched_ack_warnings':
+            return finish(0, {**unlink_ok(issue_ref, link_id), 'warnings': ['Synthetic delete warning']})
+        if fault == 'mismatched_ack_partial':
+            document = unlink_ok(issue_ref, link_id)
+            document['meta']['partial'] = True
+            return finish(0, document)
         if fault == 'ack_still_present':  # TWG acknowledged delete, yet the record remains in state
             return finish(0, unlink_ok(issue_ref, link_id))
         if fault == 'crash':  # nothing reached Jira and nothing was written

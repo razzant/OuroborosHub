@@ -17,6 +17,7 @@ HELPER = PAYLOAD / 'jira_weblinks.py'
 FAKE = Path(__file__).with_name('fake_twg.py')
 MR = 'https://git.example.invalid/demo/app/-/merge_requests/7'
 OTHER = 'https://docs.example.invalid/demo/design'
+CLOUD_ID = '12345678-9abc-4def-8123-456789abcdef'
 
 # Clean host environment baseline for tests: strips any TWG_ and PYTHON* vars from the runner's shell.
 BASE_ENV = {k: v for k, v in os.environ.items() if not k.upper().startswith(('TWG_', 'PYTHON'))}
@@ -109,7 +110,7 @@ def jira(tmp_path):
             return done.returncode
 
         def plan(self, url=MR, *, env=None):
-            args = ['plan', '--workdir', str(self.workdir), '--site', 'example', '--issue', 'demo-42',
+            args = ['plan', '--workdir', str(self.workdir), '--site', self.read()['site'], '--issue', 'demo-42',
                     '--profile', 'demo-reader']
             if url is not None:
                 args += ['--url', url]
@@ -301,6 +302,81 @@ def test_unusable_before_read_selects_nothing(jira, fault, error):
     assert jira.read()['deletes'] == [] and not (jira.workdir / 'selection.json').exists()
 
 
+def omit_browse_url(jira, site, *snapshots):
+    state = jira.read()
+    state['site'] = site
+    state['omit_browse_url_in'] = [f'{name}.json' for name in snapshots]
+    jira.write_state(state)
+
+
+@pytest.mark.parametrize('omitted', [('before',), ('after',), ('before', 'after')])
+def test_explicit_cloud_id_allows_omitted_display_browse_url(jira, omitted):
+    omit_browse_url(jira, CLOUD_ID, *omitted)
+    code, chosen = jira.prepared()
+    assert code == 0 and chosen['selected']['url'] == MR
+    assert jira.run_steps(chosen) == [0, 0]
+    for name in ('before', 'after'):
+        result = json.loads((jira.workdir / f'{name}.json').read_text(encoding='utf-8'))
+        assert ('url' not in result['data'][0]) == (name in omitted)
+    code, report = jira.verify()
+    assert code == 0 and report['outcome'] == 'removed'
+    assert report['issue'] == {'site': CLOUD_ID, 'id': '10042', 'key': 'DEMO-42',
+                               'url': None if 'before' in omitted else 'https://example.invalid/browse/DEMO-42'}
+    assert report['surviving_same_url_links'] == ['10001']
+    assert jira.read()['deletes'] == [['10042', '10002']]
+
+
+@pytest.mark.parametrize('site', ['example', CLOUD_ID[:-1] + 'g'])
+def test_named_or_non_uuid_site_still_requires_browse_url(jira, site):
+    omit_browse_url(jira, site, 'before')
+    code, out = jira.prepared()
+    assert code == 2 and out['error'] == 'context_mismatch'
+    assert jira.read()['deletes'] == [] and not (jira.workdir / 'selection.json').exists()
+
+
+@pytest.mark.parametrize('fault,error', [
+    ('malformed_browse_url', 'context_mismatch'), ('null_browse_url', 'context_mismatch'),
+    ('wrong_key', 'context_mismatch'), ('wrong_site', 'context_mismatch'),
+    ('omit_remote_links', 'remote_links_missing'), ('partial', 'incomplete_read'), ('warnings', 'incomplete_read'),
+])
+def test_cloud_id_omission_never_excuses_malformed_or_unbound_before_read(jira, fault, error):
+    omit_browse_url(jira, CLOUD_ID, 'before')
+    jira.fault('get', fault)
+    code, out = jira.prepared()
+    assert code == 2 and out['error'] == error
+    assert jira.read()['deletes'] == [] and not (jira.workdir / 'selection.json').exists()
+
+
+@pytest.mark.parametrize('fault,outcome,error', [
+    ('other_issue', 'identity_changed', None),
+    ('wrong_site', 'unverified', 'context_mismatch'),
+    ('omit_remote_links', 'unverified', 'remote_links_missing'),
+    ('malformed_browse_url', 'unverified', 'context_mismatch'),
+])
+def test_cloud_id_omission_never_excuses_wrong_or_incomplete_follow_up(jira, fault, outcome, error):
+    omit_browse_url(jira, CLOUD_ID, 'before', 'after')
+    code, chosen = jira.prepared()
+    assert code == 0
+    jira.fault('get', fault)
+    assert jira.run_steps(chosen) == [0, 0]
+    code, report = jira.verify()
+    assert code == 3 and report['outcome'] == outcome and report['write']['status'] == 'acknowledged'
+    if error:
+        assert report['read_after']['error'] == error
+    else:
+        assert report['after_issue']['id'] == '10999'
+
+
+def test_cloud_id_still_requires_equality_of_two_present_browse_urls(jira):
+    omit_browse_url(jira, CLOUD_ID)
+    code, chosen = jira.prepared()
+    assert code == 0
+    jira.fault('get', 'changed_browse_url')
+    assert jira.run_steps(chosen) == [0, 0]
+    code, report = jira.verify()
+    assert code == 3 and report['outcome'] == 'identity_changed'
+
+
 @pytest.mark.parametrize('fault,reason,expected_code,expected_status', [
     ('timeout_present', 'provider_error', 'timeout', None),
     ('http_408_present', 'provider_error', 'request_timeout', 408),
@@ -309,6 +385,10 @@ def test_unusable_before_read_selects_nothing(jira, fault, error):
     ('unfamiliar_present', 'provider_error', 'unfamiliar_fault', None),
     ('crash', 'missing_file', None, None),
     ('mismatched_ack', 'mismatched_acknowledgement', None, None),
+    ('mismatched_ack_issue', 'mismatched_acknowledgement', None, None),
+    ('mismatched_ack_site', 'mismatched_acknowledgement', None, None),
+    ('mismatched_ack_warnings', 'mismatched_acknowledgement', None, None),
+    ('mismatched_ack_partial', 'mismatched_acknowledgement', None, None),
     # A status never shows which request failed: a transport failure can carry an earlier read's status.
     pytest.param(twg_error('TWG_NETWORK_ERROR', 403, 'network'), 'provider_error', 'TWG_NETWORK_ERROR', 403,
                  id='network_error_with_403'),
@@ -480,7 +560,6 @@ def test_plan_refuses_unbound_or_unsafe_context(jira, change, error):
 
 
 @pytest.mark.parametrize('profile,selector', [
-    ('demo-reader', ['--profile', 'demo-reader']),
     ('default', ['--profile', 'default']),
     ('user', ['--profile', 'user']),  # an ordinary profile name; the mode is checked by exact `--mode agent`
     ('_personal', ['--profile', '_personal']),
