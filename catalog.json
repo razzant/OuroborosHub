@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/482dbb9394da5b3ddc1673571b481ec66f2c6219",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/6d8b00ab4cf3b8d65eb49ff0ca3ce1a2f728cb3f",
   "schema_version": 1,
   "skills": [
     {
@@ -531,8 +531,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "5d923bbe53cb1fbd15c55adf42eb296d181ce8d83a18c6df71e1735aa782d21f",
-          "size": 68459
+          "sha256": "f1f11552897fbfdbdba0d3477f74c22198a86e61babee08305eaeeb8cf9941a7",
+          "size": 71268
         },
         {
           "path": "accounts.py",
@@ -541,8 +541,8 @@
         },
         {
           "path": "conflicts.py",
-          "sha256": "342155f09fddb03247208e5ada60f2338ec8e8f1e58c252e02c1f8fbdd2be6ec",
-          "size": 20481
+          "sha256": "0c91fbb22af4ed2bc493ec720b575f922f355e77d8d703edc563c3729b7aa046",
+          "size": 21215
         },
         {
           "path": "credentials.py",
@@ -561,8 +561,8 @@
         },
         {
           "path": "links.py",
-          "sha256": "5d462e00701f61e87a726541c50373891acba3e8102bfa2d2b413e93e8d03bb4",
-          "size": 5516
+          "sha256": "bf506b58cd68919756b9928761fbcaa729e5946c8b069c120d8b6b691cde7b8d",
+          "size": 6305
         },
         {
           "path": "management.py",
@@ -571,13 +571,13 @@
         },
         {
           "path": "model.py",
-          "sha256": "932ded73f1096f9d6f72d31e72fe7d190c57aec2e76c4391b431757ed8a0cc14",
-          "size": 30529
+          "sha256": "73ed521e98e3cd58e4c1a3cdf2fcf536206deba99032ea7bd2434805f704faee",
+          "size": 32518
         },
         {
           "path": "ops.py",
-          "sha256": "471399d2ee23a623c38739d2d1625a70318de05f851b6a0ba0c54eb2125bedc2",
-          "size": 104940
+          "sha256": "dec9bcedadf7bb44c8fc328488c820c101a4cd695d780ec8ccabea8210c7d371",
+          "size": 137841
         },
         {
           "path": "plugin.py",
@@ -586,33 +586,33 @@
         },
         {
           "path": "providers.py",
-          "sha256": "efa27d7330672aa893cf64e0130aa41580e818e140c8ed7ce018b110d3441cec",
-          "size": 59707
+          "sha256": "58dbcc2f932bf70cbae992e08f235860ee9c59c315b60ee21fa83c9fd51a9020",
+          "size": 60923
         },
         {
           "path": "providers_google.py",
-          "sha256": "34fcf8b86cb6d59184dc10dbe7bc323fac1fb1dbbd15c0cc53d3b0abb682b47e",
-          "size": 50106
+          "sha256": "7eff40dadd86d330d01669a2cafd228a63736d3098ee0a7eac42bec6304ab6fd",
+          "size": 51190
         },
         {
           "path": "reminders.py",
-          "sha256": "9d94d7fd9f5de52f21afc29323fe2b5ae7d627c05f976b4ce0f2cfdcf340591b",
-          "size": 26593
+          "sha256": "3f457435bbbcbd810f232e2350a19aa8e3cf83bdcd187d76679fb250c49f4442",
+          "size": 26732
         },
         {
           "path": "routes.py",
-          "sha256": "dcada341a57292feecd0dcc13b4d03be287b6eb6ac86bbe318daa189c0b261cd",
-          "size": 20759
+          "sha256": "e8e2c3305b11ecf89d1ea6b1cd121098f6d7db726411c247df5c1b68cf50068f",
+          "size": 21337
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "a7a7a866f704b00a1722e72a3b15c3f95d08f6919cfc556f7603f30297019d76",
-          "size": 39804
+          "sha256": "a19ca7f00873507abed6d012f828e26cac423eb028efb67a70bb102c28b089ce",
+          "size": 67463
         },
         {
           "path": "store.py",
-          "sha256": "1a3cde617862718553668c88a01cd301acf000ad9402b3682dd58efb25a64844",
-          "size": 80668
+          "sha256": "848c0bb7b064b1b7b1adc90381c0187d8451d5a1037f54375b84204e2bb686fa",
+          "size": 94031
         },
         {
           "path": "tests/conftest.py",
@@ -810,6 +810,11 @@
           "size": 14289
         },
         {
+          "path": "tests/test_google_date_transitions.py",
+          "sha256": "7bf857685f4dc174db74a74b21a78918adc13b4dd5f61b0b1252cb116c26b9a0",
+          "size": 25741
+        },
+        {
           "path": "tests/test_google_host_continuity.py",
           "sha256": "bf9e4851c02f16418aa79ca2ae5849244ab10781fad5ca1b7cc60c8e7f04b06d",
           "size": 85600
@@ -818,6 +823,11 @@
           "path": "tests/test_google_vault.py",
           "sha256": "c4b9dec5578ecccf8fe1dc10eedd1852b621209fde3f966fbffef5b62c514eb6",
           "size": 6438
+        },
+        {
+          "path": "tests/test_held_google_instances.py",
+          "sha256": "f5a83e802f7f5557b2ced2c5d78b7839e6b20b98bdb5b992d49bd17db79c17f6",
+          "size": 71225
         },
         {
           "path": "tests/test_host_sign_in.py",
@@ -848,6 +858,11 @@
           "path": "tests/test_projection_clocks.py",
           "sha256": "542047e2d10ce637a7f6964c8acae243c03c0db9124013071abe389288ab1b1e",
           "size": 6486
+        },
+        {
+          "path": "tests/test_received_date_identity.py",
+          "sha256": "9db0ab74484eb350ca27813e75211e15e1683eeb03d7ada3dd111271d19c2e90",
+          "size": 16713
         },
         {
           "path": "tests/test_reconcile_retention.py",
@@ -916,8 +931,8 @@
         },
         {
           "path": "tools.py",
-          "sha256": "2f4f30660570317b010913943a061f7d47ddb9dcbaeff0fdb2a95d46404bb628",
-          "size": 60925
+          "sha256": "18d1463909ab6639fed474171cfcab326513fde102d9bd7ba6feb81414d08089",
+          "size": 62120
         },
         {
           "path": "widget.js",
@@ -933,7 +948,7 @@
       "name": "calendar",
       "slug": "calendar",
       "type": "extension",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "when_to_use": "Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед, тренировку на 16», «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «покажи мою занятость в рабочем календаре», «обычно я завтракаю в 6:30» (служебное событие-распорядок), «подключи Яндекс / Google»."
     },
     {
