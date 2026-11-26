@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/911a0dba851bc9d59f4cb15add24708b610d8138",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/009291a9ae6fa81b1c42c6dd6edb0925daa6d1dd",
   "schema_version": 1,
   "skills": [
     {
@@ -2320,6 +2320,22 @@
       "when_to_use": "User wants Ouroboros to work in a Freshdesk helpdesk: read, search or summarize tickets, look up customers or knowledge-base articles, reply to customers, write notes, change ticket fields, or be present in the helpdesk and hear new tickets and replies."
     },
     {
+      "description": "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. For GARANT subscribers with Garant Connect (API) access: no separate MCP price; Garant Connect is sold inside regional LegalTech service packages, and the servicing organization issues the token.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "397d5acca4ec2f55ef64b20a30d1a32d0558478eddc2bb2df9ab99cb9caa9483",
+          "size": 6191
+        }
+      ],
+      "name": "garant-mcp-guide",
+      "slug": "garant-mcp-guide",
+      "title": "GARANT MCP: Russian legal database",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person with GARANT API access wants Ouroboros to search or cite Russian legal documents and court practice in the GARANT system, or asks how to connect GARANT's MCP server. Needs a GARANT API token."
+    },
+    {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",
       "files": [
         {
@@ -3277,6 +3293,22 @@
       "slug": "roadmap_analyst",
       "type": "extension",
       "version": "2.2.0"
+    },
+    {
+      "description": "How to add RuSender's official MCP server to Ouroboros and sign in: create, schedule and send email campaigns, manage contacts, lists, segments, templates, senders and domains, send transactional email and read statistics. For senders of newsletters and transactional email; free plans cover 500 contacts for campaigns and 100 transactional sends a month.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "7eef8027702b043c6fb6e0219701f6107f854905f055ac29af98fb6cc0d321fd",
+          "size": 7929
+        }
+      ],
+      "name": "rusender-mcp-guide",
+      "slug": "rusender-mcp-guide",
+      "title": "RuSender MCP: email campaigns and transactional email",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person runs email newsletters or transactional email with RuSender, a Russian email service, and wants Ouroboros to manage campaigns, contacts or statistics or to send email, or asks how to connect RuSender's MCP server. Needs the person's RuSender account and sign-in."
     },
     {
       "description": "Инструкция по публичному MCP-серверу Самоката: подключение в одном из пяти поддерживаемых клиентов, минимальные права, работа с общей корзиной и оформление заказа только после явного подтверждения.",
