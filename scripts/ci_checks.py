@@ -165,6 +165,8 @@ SUITES = {
     'amberkeep': {'skills': ['amberkeep'],
                   'tests': ['tests/test_amberkeep_portable.py', 'tests/test_amberkeep_flow.py',
                             'tests/test_amberkeep_readers.py', 'tests/test_amberkeep_output.py']},
+    # Wiki client regressions and the offline Jira web-link flow against a stateful fake TWG CLI.
+    'confluence': {'skills': ['confluence'], 'tests': ['skills/confluence/tests'], 'dependencies': ['httpx']},
     'table-tools': {'skills': ['table_tools'], 'tests': ['skills/table_tools/tests'],
                     'dependencies': ['openpyxl']},
     # Ordinary letter delivery through the declared SDK and in-memory peers. Never collect the historical suites.

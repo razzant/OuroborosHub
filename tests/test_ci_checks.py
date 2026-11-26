@@ -109,7 +109,7 @@ class SelectionTests(unittest.TestCase):
             'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
             'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'}, 'whisper-voice': {'whisper-voice'},
             'amberkeep': {'amberkeep'}, 'a2a': {'a2a'},
-            'table_tools': {'table-tools'},
+            'table_tools': {'table-tools'}, 'confluence': {'confluence'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
