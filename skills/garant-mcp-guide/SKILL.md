@@ -1,7 +1,7 @@
 ---
 name: garant-mcp-guide
 title: "GARANT MCP: Russian legal database"
-description: "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. For GARANT subscribers with API access: the token and the price come from GARANT's servicing organization."
+description: "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. For GARANT subscribers with Garant Connect (API) access: no separate MCP price; Garant Connect is sold inside regional LegalTech service packages, and the servicing organization issues the token."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -14,11 +14,13 @@ model_experience:
 # GARANT MCP
 
 GARANT is a Russian legal reference system. Its MCP server is a second way into the
-GARANT API and is for GARANT subscribers with API access: the token and the price come
-from GARANT's servicing organization, and GARANT publishes no price. An assistant can
-search legislation and court practice, find the relevant parts of a document, export
-documents, check what changed, add links to the GARANT documents a text cites, and read
-the PRIME news feed. It uses the same access rights and limits as the API.
+Garant Connect API and is for GARANT subscribers with API access: there is no separate
+MCP price, Garant Connect is sold inside LegalTech service packages as part of the
+GARANT system (with regional pricing through GARANT partners), and GARANT's servicing
+organization issues the API token. An assistant can search legislation and court
+practice, find the relevant parts of a document, export documents, check what changed,
+add links to the GARANT documents a text cites, and read the PRIME news feed. It uses
+the same access rights and limits as the API.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from GARANT's server.
@@ -31,7 +33,12 @@ below; the tools then come from GARANT's server.
 - Transport: Streamable HTTP
 - Token: the GARANT API token, which GARANT's servicing organization sends by email on
   request. It goes in the header `Authorization` as `Bearer <token>`.
-- Price: by agreement with the servicing organization; GARANT publishes no price.
+- Price: no separate MCP price. On GARANT's LegalTech site (`lt.garant.ru`, published
+  by OOO "GARANT-SERVIS-UNIVERSITET"), the Garant Connect service is sold inside
+  LegalTech service packages as part of the GARANT system: 2,000 ₽ a month for 2
+  services, 4,600 ₽ for 5 services, or 6,800 ₽ for 10 services in Moscow and the Moscow
+  region (with a 3-day free trial); prices in other regions come from GARANT's regional
+  partners.
 - Language: Russian documents.
 
 ## Add it to Ouroboros
@@ -83,4 +90,8 @@ GARANT's limits for the Internet version apply through the server too:
 - [GARANT API documentation](https://www.garant.ru/mobileonline/api/documentation),
   sections on API access, limits and «MCP API (mcp.garant.ru)»: host, token, tools and
   limits. Checked 2026-11-26.
+- [Garant Connect](https://lt.garant.ru/prod/connect) and
+  [GARANT LegalTech packages](https://lt.garant.ru/) (published by OOO
+  "GARANT-SERVIS-UNIVERSITET"): Garant Connect service overview, MCP integration and
+  regional package pricing. Checked 2026-11-26.
 - Server answers and the tool list: Ouroboros's Test on 2026-11-26.

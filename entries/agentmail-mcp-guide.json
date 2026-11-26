@@ -3,7 +3,7 @@
     "messaging"
   ],
   "description": "How to add AgentMail's official MCP server to Ouroboros: give the agent its own email inboxes to send, receive, reply and forward mail, keep drafts, a calendar and files, and sign up to apps with an inbox. For anyone who wants the agent to have its own address; a free plan with 3 inboxes, sign-in or API key.",
-  "digest": "6d580a3a21d05dddbf5f3923923548dcbd3e3d3388b347992f04f303b4e5c3ab",
+  "digest": "b737794548b9507c812e7f1177df453ff8689a70cf14fb0964aaae873b25295b",
   "name": "agentmail-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

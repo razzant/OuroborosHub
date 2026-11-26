@@ -4,7 +4,7 @@
     "business"
   ],
   "description": "How to add PEK's official MCP server to Ouroboros: estimate the cost and transit time of a freight shipment in Russia, check a cargo's status by its number and find the nearest PEK branches. For anyone shipping with PEK; free per PEK, no account, read-only.",
-  "digest": "88818fee8df16b0bf30d9d430dfd1a698cf5cf6b5745ecebfa20414843b33785",
+  "digest": "f256aec316f5f422e47bc1fb841f7a19e44b87e74ae7a234e832ae6cb05502f5",
   "name": "pecom-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

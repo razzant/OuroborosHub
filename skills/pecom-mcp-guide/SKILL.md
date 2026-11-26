@@ -31,8 +31,9 @@ below; the tools then come from PEK's server.
 - Sign-in: none, and no PEK account is needed.
 - Price: free, according to PEK.
 - Coverage and language: PEK's network in Russia; the vendor page is in Russian.
-- Connection record: on 2026-11-26, 1 of 7 connection attempts from one network
-  succeeded; the others timed out.
+- Connection record: on 2026-11-26 from one network, 1 of 6 Ouroboros Test runs
+  succeeded and listed 3 tools; the other 5 Test runs and the separate HTTP checks
+  timed out.
 
 ## Add it to Ouroboros
 
@@ -67,4 +68,5 @@ The server listed three tools on 2026-11-26; PEK's page gives them other names:
 
 - [PEK MCP](https://pecom.ru/pecom-mcp/): address, transport, free read-only access,
   limits and the tool names on the page. Checked 2026-11-26.
-- Connection attempts and the tool list: Ouroboros's Test on 2026-11-26.
+- Connection attempts and the tool list: Ouroboros's Test (6 runs) and separate HTTP
+  checks on 2026-11-26.

@@ -61,9 +61,14 @@ The source of Todoist's server is open on GitHub. Its tools:
 
 - find tasks by text, date or completion, and find projects, sections, comments,
   labels, filters, folders, reminders, collaborators and activity;
-- add tasks, projects, sections, comments, labels, filters, folders and reminders;
-- complete, reopen, reschedule, reorder and move tasks and projects, update comments
-  and manage assignments;
+- add tasks, projects, sections, comments (by default `add-comments` notifies task or
+  thread participants in shared projects unless silenced with `["none"]`, and can notify
+  named users), labels, filters, folders and reminders;
+- complete, reopen, reschedule, reorder and move tasks and projects, archive, restore
+  (unarchive) and join workspace projects (`project-management`), update comments, manage
+  assignments, and read, set or clear the user's status shown next to their name in
+  Todoist and Comms (`set-user-status`, which replaces the whole status and can also
+  pause Comms notifications or Karma and streaks);
 - read workspace insights, project health and productivity statistics, and export or
   import project templates.
 
@@ -87,7 +92,7 @@ exact list appears on the server's page in Ouroboros after sign-in.
 - [Todoist API authorization](https://developer.todoist.com/api/v1/authorization.md):
   permission scopes and the consent screen. Checked 2026-11-26.
 - [Todoist pricing](https://www.todoist.com/pricing). Checked 2026-11-26.
-- [todoist/todoist-mcp](https://github.com/todoist/todoist-mcp): tool sources.
+- [todoist/todoist-mcp](https://github.com/todoist/todoist-mcp) (v17.4.1): tool sources.
   Checked 2026-11-26.
 - Sign-in discovery, client registration, the requested permission and the login page:
   Ouroboros's Test and Sign in on 2026-11-26.

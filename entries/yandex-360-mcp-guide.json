@@ -4,7 +4,7 @@
     "messaging"
   ],
   "description": "How to add Yandex 360's official MCP servers to Ouroboros with a token: Mail, Calendar, Disk and Telemost with a paid Yandex 360 subscription, organization management for Yandex 360 for Business, and Wiki, Forms and Tracker for organizations on Yandex 360 for Business or Yandex Cloud. No separate MCP fee is stated; preview.",
-  "digest": "b524be44b7638b072a5f1b24a5b4774998ddcbc3d30484c11fb264f5ad4eb4e6",
+  "digest": "84eabb7c2d56f40863cea0c797bc65476f2242c04967a9ef924a9a080f91e611",
   "name": "yandex-360-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

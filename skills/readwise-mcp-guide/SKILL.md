@@ -1,7 +1,7 @@
 ---
 name: readwise-mcp-guide
 title: "Readwise MCP: highlights, Reader and Books"
-description: "How to add Readwise's official MCP server to Ouroboros and sign in: search and read highlights and Reader documents, save, tag, move and annotate them, and manage a Readwise Books library and reading sessions. For Readwise subscribers: free for 30 days, then from US$7.99 a month billed yearly for one part or US$9.99 for both."
+description: "How to add Readwise's official MCP server to Ouroboros and sign in: search and read highlights and Reader documents, save, tag, move and annotate them, and manage a Readwise Books library and reading sessions. Highlights and Reader are free for 30 days, then from US$7.99 a month billed yearly for one or US$9.99 for both; Readwise Books is free without a subscription (in invite-only beta, with direct access for Readwise subscribers)."
 version: 0.1.0
 type: instruction
 permissions: []
@@ -15,9 +15,11 @@ model_experience:
 
 Readwise collects highlights from books and articles, Reader is its reading app, and
 Readwise Books keeps a reading library and sessions. One MCP server covers all three.
-It is for Readwise subscribers: Readwise is free for 30 days, then a paid plan. After
-the person signs in, an assistant can search and read highlights and Reader documents,
-save, tag, move and annotate them, and manage books and reading sessions.
+Highlights and Reader are free for 30 days, then require a paid Readwise plan; Readwise
+Books is free without a subscription (in invite-only beta for invited users, with direct
+access for Readwise subscribers). After the person signs in, an assistant can search and
+read highlights and Reader documents, save, tag, move and annotate them, and manage
+books and reading sessions.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from Readwise's server.
@@ -30,13 +32,15 @@ below; the tools then come from Readwise's server.
 - Transport: Streamable HTTP
 - Sign-in: the person's Readwise account, on Readwise's own page. Ouroboros registers
   itself with Readwise automatically; the sign-in asks for `openid read write`.
-- Plans: Readwise is free for the first 30 days. Full Readwise includes Reader and
-  Highlights together: US$9.99 a month billed yearly or US$12.99 monthly. Highlights
-  only and Reader only cost US$7.99 a month billed yearly or US$8.99 monthly; the
-  pricing page offers the MCP server on them for highlights or for the Reader library
-  respectively. Highlights Lite only (US$5.59 a month billed yearly, US$6.99 monthly)
-  does not list the MCP server. The pricing page does not say which plans include the
-  Books tools.
+- Plans: Highlights and Reader are free for the first 30 days, then require a paid plan.
+  Full Readwise includes Reader and Highlights together: US$9.99 a month billed yearly
+  or US$12.99 monthly. Highlights only and Reader only cost US$7.99 a month billed yearly
+  or US$8.99 monthly; the pricing page offers the MCP server on them for highlights or
+  for the Reader library respectively. Highlights Lite only (US$5.59 a month billed
+  yearly, US$6.99 monthly) does not list the MCP server. Readwise Books is free without
+  a Readwise subscription (you pay only for ebooks bought in its store); during its
+  invite-only beta, Readwise subscribers get direct access with their Readwise account
+  and others can join by waitlist or an invite from a current reader.
 
 ## Add it to Ouroboros
 
@@ -64,7 +68,7 @@ walked in a clean Ouroboros with another sign-in server. No account was used.
   update or delete highlights.
 - Reader documents (8): search, list and read documents and their details, create a
   document, move documents between the inbox, archive and shortlist, bulk edit document
-  metadata, and export documents.
+  metadata (up to 50 documents per call), and export documents.
 - Reader tags (3): list tags and add or remove a document's tags.
 - Reader highlights (5): a document's highlights, create a highlight, add or remove a
   highlight's tags, and set a highlight's note.
@@ -80,14 +84,20 @@ appears on the server's page in Ouroboros after sign-in.
 
 - The index updates as content is added, per Readwise.
 - The same server address can be used in several apps at once.
-- Readwise states no usage limits.
+- Bulk editing Reader document metadata handles up to 50 documents per call (and adding
+  Readwise Books entries handles up to 10 per call); Readwise publishes no overall
+  numeric quota.
 
 ## Sources
 
-- [Readwise MCP](https://readwise.io/mcp): address and the 35 tools. Checked 2026-11-26.
+- [Readwise MCP](https://readwise.io/mcp): address, the 35 tools and per-call batch
+  sizes. Checked 2026-11-26.
 - [Readwise MCP documentation](https://docs.readwise.io/tools/mcp): address, sign-in and
   clients. Checked 2026-11-26.
-- [Readwise pricing](https://readwise.io/pricing), yearly and monthly views. Checked
-  2026-11-26.
+- [Readwise pricing](https://readwise.io/pricing), yearly and monthly views: Highlights
+  and Reader plans. Checked 2026-11-26.
+- [Readwise Books](https://readwise.io/books) and
+  [WiseUp! Vol. 92](https://wiseup.readwise.io/wiseup-vol-92/): free Books access
+  during invite-only beta and direct access for subscribers. Checked 2026-11-26.
 - Sign-in discovery, client registration and the login page: Ouroboros's Test and
   Sign in on 2026-11-26.

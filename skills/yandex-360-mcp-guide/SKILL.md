@@ -107,7 +107,10 @@ Test before any token; no real token was used.
 - **Tracker** (73 tools): search and read issues, history and comments; create, update
   and move issues through their workflow; comments, worklogs, links, attachments,
   boards and sprints, projects, portfolios and goals, queue triggers and bulk changes.
-  Some tools delete permanently, and bulk changes cannot be undone.
+  With write access, `delete_entity` permanently deletes an entire project, portfolio or
+  goal; other permanent deletions cover sprints, comments, attachments, links, worklogs,
+  queue triggers, project or portfolio checklists and goal key results, and bulk changes
+  cannot be undone.
 
 ## Limits
 

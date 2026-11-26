@@ -40,8 +40,10 @@ below; the tools then come from CoinMarketCap's server.
 - Billed and free calls: per the server's tool descriptions, `find_skill` is not billed
   (no credits, no x402 payment), while running a skill with `execute_skill` is.
 - CoinMarketCap also offers a pay-per-call address, `https://mcp.coinmarketcap.com/x402/mcp`,
-  where each request costs 0.01 USDC through x402 and needs a funded crypto wallet and an
-  x402 client. Ouroboros does not pay x402 requests, so use sign-in or a key.
+  through x402, which needs a funded crypto wallet and an x402 client. CoinMarketCap
+  publishes 0.01 USDC as the current rate for paid requests (`find_skill` is free), notes
+  that pricing may vary by endpoint and change, and returns the exact amount in the HTTP
+  402 response. Ouroboros does not pay x402 requests, so use sign-in or a key.
 
 ## Add it to Ouroboros
 

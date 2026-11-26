@@ -77,7 +77,10 @@ The exact list appears on the server's page in Ouroboros after sign-in.
 - Without batch mode, many changes run one by one.
 - Connected apps can be reviewed and revoked in the SingularityApp account under
   [connected apps](https://me.singularity-app.com/oauth-tokens).
-- The vendor states no usage limits.
+- SingularityApp publishes no numeric quota; Section 18.7 of its Terms of Service allows
+  SingularityApp to apply technical limits or temporarily limit or suspend an MCP
+  integration, session or access token under unusually high request volume, automated
+  loops or other load affecting service security or stability.
 - The sign-in page offers English and Russian.
 
 ## Sources
@@ -85,5 +88,8 @@ The exact list appears on the server's page in Ouroboros after sign-in.
 - [SingularityApp MCP](https://singularity-app.com/wiki/mcp/): address, toolsets,
   sign-in and the Pro and Elite marks. Checked 2026-11-26.
 - [SingularityApp plans](https://singularity-app.com/price/). Checked 2026-11-26.
+- [SingularityApp Terms of Service](https://singularity-app.com/terms_of_service/),
+  Section 18.7: technical limits and temporary suspension under high load. Checked
+  2026-11-26.
 - Sign-in discovery, client registration and the sign-in page: Ouroboros's Test and
   Sign in on 2026-11-26.

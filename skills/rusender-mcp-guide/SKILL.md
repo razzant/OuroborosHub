@@ -61,19 +61,25 @@ walked in a clean Ouroboros with another sign-in server. No account was used.
 RuSender's tool page groups the tools as below. Its tables mark tools by effect where
 they give a type: reading, changing data, or sending and irreversible.
 
-- Campaigns: list, read, create and edit drafts, delete drafts, archive, and schedule or
-  start sending after moderation, with A/B tests, resending to non-openers and sending
-  in parts; recipients, opens, clicks and statistics by mail system.
+- Campaigns: list, read, create and edit drafts, delete drafts (`public_campaigns_delete`,
+  irreversible; also permanently deletes the draft's custom template if it has one; drafts
+  only), archive and unarchive, and schedule or start sending after moderation, with A/B
+  tests, resending to non-openers and sending in parts; recipients, opens, clicks and
+  statistics by mail system.
 - Folders for campaigns.
 - Contacts: search, read, update, delete (up to 1,000 per call), unsubscribe or
   resubscribe, statistics and send history.
 - Lists, segments and list variables: create, edit, delete, import up to 1,000 contacts
   per call, and move contacts between lists.
 - Transactional email: send one email at once with HTML, text or a saved template, and
-  read sending history and delivery details. Sending keys for verified domains.
+  read sending history and delivery details. Sending keys for verified domains: list,
+  read, create (active after moderation), rename or set as default, read statistics, and
+  permanently delete (which stops sending through that key).
 - Automation chains: start an already active chain for a contact.
-- Domains (DKIM, SPF and DMARC records and DNS checks), senders, templates, webhooks and
-  files.
+- Domains (DKIM, SPF and DMARC records and DNS checks), senders, templates, files, and
+  webhooks (list, read, create and update the receiving URL, event set and active status;
+  updating events replaces the previous list, and MCP can disable a webhook but does not
+  delete it).
 
 The exact list appears on the server's page in Ouroboros after sign-in.
 

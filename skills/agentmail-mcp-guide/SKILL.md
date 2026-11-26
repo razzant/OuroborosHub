@@ -79,7 +79,11 @@ The server listed 54 tools on 2026-11-26:
   403.
 - Agent Drive: upload, list, get and delete an inbox's files. Per the tool descriptions,
   Agent Drive is in AgentMail Labs, US only; an organization outside Labs gets 403.
-- Allow and block lists for senders and recipients.
+- Allow and block lists: list, read, add (`create_list_entry`) and remove
+  (`delete_list_entry`) email addresses or domains on an inbox's `send`, `receive` or
+  `reply` lists. Adding the first allow entry for a direction turns that allow list on,
+  excluding every other sender or recipient for that direction; only the inbox's own
+  non-read-only entries can be removed.
 - Account: attach a human to a new agent organization and verify it with an emailed
   code; AgentMail Labs (reading needs organization-level access, and joining needs an
   organization API key without a permissions restriction); listing and selecting
