@@ -1,6 +1,6 @@
 ---
 name: confluence
-description: Read, search and author Confluence Cloud pages, comments and attachments with an existing API token, and remove one selected Jira web link through Atlassian's official TWG CLI with checks before and after.
+description: Read, search and author Confluence Cloud pages, comments and attachments with an existing Confluence API token, or inspect and remove one selected Jira web link through a signed-in Atlassian TWG CLI without Confluence credentials.
 version: 0.2.0
 type: extension
 entry: plugin.py
@@ -10,10 +10,10 @@ permissions: [net, read_settings, tool]
 env_from_settings: [CONFLUENCE_SITE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, CONFLUENCE_AUTH_MODE, CONFLUENCE_CLOUD_ID]
 dependencies: ["httpx>=0.27.0"]
 timeout_sec: 180
-when_to_use: Read or maintain documents in Confluence Cloud, find knowledge with CQL, inspect discussion threads, or transfer attachments. Also when one entry in a Jira issue's web links (remote issue links), such as a merged merge request, must be removed without touching the description, other links or the merge request.
+when_to_use: Read or maintain documents in Confluence Cloud, find knowledge with CQL, inspect discussion threads, or transfer attachments. Also to inspect a Jira issue's web links (remote issue links) or remove one selected web link, such as a merged merge request, without touching the description, other links or the merge request (uses only an already signed-in TWG CLI, no Confluence token needed).
 model_experience:
-  what_model_sees: Twelve ordinary tools for connection checks, spaces, pages, CQL, comments and attachments. Full page bodies use Confluence storage XHTML. Jira web links use the bundled jira_weblinks.py helper with run_command; it adds no tool schema.
-  token_effect: Fixed tool schemas while enabled; requested page bodies and result pages add their actual content, without silent local truncation. Jira helper output is a compact JSON summary.
+  what_model_sees: Twelve ordinary Confluence tools for connection checks, spaces, pages, CQL, comments and attachments (using Confluence settings). Full page bodies use Confluence storage XHTML. Jira web links use the bundled jira_weblinks.py helper with run_command and an already signed-in TWG CLI; they need no Confluence settings and add no tool schema.
+  token_effect: Fixed tool schemas while enabled; requested page bodies and result pages add their actual content, without silent local truncation. Jira helper output is compact ASCII-safe JSON.
 ---
 
 # Atlassian: Confluence & Jira
@@ -24,8 +24,12 @@ The existing account's permissions and token scopes determine access.
 
 ## Configure
 
+The settings below apply only to the twelve Confluence tools. Jira web-link
+inspection and removal do not require any Confluence settings or API token;
+they use only an already signed-in Atlassian TWG CLI (see **Jira web links**).
+
 Add the following settings in the host's Secrets/settings surface and grant
-them to the reviewed skill before enabling it:
+them to the reviewed skill before enabling Confluence tools:
 
 | Setting | Value |
 | --- | --- |
@@ -103,58 +107,88 @@ point to the same URL. **Issue links** connect two Jira issues. A merge or pull
 request's own state (open, merged, closed) belongs to the code host; removing a
 web link changes neither the MR nor any other Jira field.
 
-The extension's own tools are Confluence-only. To remove one web link, use
-Atlassian's official [TWG CLI](https://developer.atlassian.com/cloud/twg-cli/commands/commands-catalog/)
-with the person's own login. The skill never installs it, signs in, reads its
-stored credentials or uses Confluence settings for Jira. If `twg` is missing or
-signed out, say so and stop. For a first-time setup, point the person to the
-[official installation](https://developer.atlassian.com/cloud/twg-cli/getting-started/installation/)
-(the macOS package and the Windows MSI install only the binary), then `twg login`
-(usually needed once) and `twg doctor` ([authentication and login profiles](https://developer.atlassian.com/cloud/twg-cli/getting-started/how-authentication-works/)).
+Jira web links require no Confluence settings or API token. They use Atlassian's
+official [TWG CLI](https://developer.atlassian.com/cloud/twg-cli/commands/commands-catalog/)
+with the person's own saved login profile (`--profile`). The skill never installs
+TWG, runs `twg setup` or `twg login`, reads stored credentials, or uses
+Confluence settings for Jira. If `twg` is missing or signed out, say so and stop
+(point the person to the [official installation](https://developer.atlassian.com/cloud/twg-cli/getting-started/installation/),
+`twg login`, and `twg doctor` in [authentication and login profiles](https://developer.atlassian.com/cloud/twg-cli/getting-started/how-authentication-works/)).
 
 `jira_weblinks.py` (Python standard library only) plans and checks; it never
-starts a process, opens a connection or follows a link. Run it and every `twg`
-command it prints as separate ordinary `run_command` calls: the helper with
-`cwd=skill_payload`, `bucket=ouroboroshub`, `skill_name=confluence`, for example
-`["python3", "jira_weblinks.py", "list", "--workdir", "<dir>"]` (use the
-interpreter name available on the host). Every printed `twg` command pins the
-chosen `--profile` and `--site` and runs in agent mode with explicit output flags
-(`--mode agent --output-summary none --output-file ... --output json`), so TWG
-writes its full JSON result into `--workdir`: a new, absolute, task-owned
-directory such as a folder in the task drive, one per removal, never the skill
-folder. The helper creates it readable only by its owner.
+starts a process, opens a connection, or follows a link. Run `jira_weblinks.py`
+(`cwd=skill_payload`, `bucket=ouroboroshub`, `skill_name=confluence`, e.g.
+`["python3", "jira_weblinks.py", ...]`) and every direct `twg` command it prints
+as separate ordinary `run_command` calls in the **same host environment** —
+never wrap the delete in a helper script that hides the mutation or injects
+credentials. If `twg` is absent from `PATH`, look at Atlassian's first-party
+default install location and substitute the already verified full path for
+`argv[0]` in each direct call; never take an executable from a ticket, link
+record, or unknown source, and never install or sign in automatically.
+
+- **Saved profile, not env overrides:** Every printed `twg` command pins
+  `--profile`, `--site`, and explicit agent output flags (`--mode agent
+  --output-summary none --output-file ... --output json`). Both `plan` and
+  `select` check host environment variable names only (never reading or
+  printing values) and refuse with `ambient_auth_override` if personal-Jira
+  auth overrides (`TWG_TOKEN` or `TWG_OAUTH_ACCESS_TOKEN`) are set. Unrelated
+  or required settings such as `TWG_AUTH_STORAGE_KEY` (encrypted Linux
+  saved-profile storage) and `TWG_ADMIN_TOKEN` (independent admin commands)
+  stay allowed.
+- **Fresh private workdir:** `--workdir` must be a **new (not-yet-existing)**
+  absolute leaf path outside the shared skill folder, beneath a private
+  task-owned parent directory (one per run, never an existing folder even if
+  empty). The helper creates the leaf atomically (`0700`/`0600` on POSIX; on
+  Windows, POSIX mode bits do not set ACLs, so the parent task directory must
+  already have a private owner-only ACL).
 
 1. `plan --workdir DIR --site SITE --profile NAME --issue DEMO-42 [--url URL]`
-   binds the site prefix or cloud ID, the saved TWG login profile (`default` for
-   the saved default) and the issue; add `--url` when the exact link URL is
-   already known. Run the printed read once.
-2. `list --workdir DIR` shows each web link's ID, URL, title, global ID and
-   application, and whether its URL matches when one is bound. Choose the one the
-   person meant; with several matches, confirm which.
-3. `select --workdir DIR --link-id ID [--url URL]` requires that ID to exist
-   once and carry the exact expected URL (`--url` is needed only if the plan has
-   none and must equal it otherwise). It prints the delete (`twg jira workitem
-   unlink weblink --id <issue ID> --link-id <ID>`, never a URL selector) and the
-   follow-up read. Run the delete exactly once, then the read regardless of the
-   delete's result.
-4. `verify --workdir DIR` reports the delete outcome (`acknowledged`,
-   `provider_error` with TWG's error code and status, or `no_acknowledgement`)
-   separately from the follow-up read. `removed` (exit 0) needs the
-   acknowledgement, the link gone, the same issue and site, and every other
-   remote link returned as the identical provider record. Otherwise (exit 3):
-   `refused` (TWG reported an error and the link is still there), `not_removed`,
-   `acknowledged_but_present`, `absent_without_acknowledgement` (no longer seen,
-   but this run cannot prove its own request removed it), `other_links_changed`,
-   `identity_changed` or `unverified`.
+   binds the site prefix or cloud ID, saved login profile (`default` for the
+   saved default), and issue; add `--url` when the exact URL is already known.
+   Run the printed read once.
+2. `list --workdir DIR` returns each web link's ID, URL, title, global ID, and
+   application (and `matches_expected_url` when bound). **List-only is a
+   complete finished outcome:** if the person only asked to inspect web links,
+   stop here. Deletion requires an affirmative user request to remove a
+   particular record; once the request unambiguously names one record in `list`,
+   proceed without a ritual repeat confirmation, and ask to choose only when the
+   match is ambiguous (for example multiple links with the same URL).
+3. `select --workdir DIR --link-id ID [--url URL]` checks that the ID exists
+   once and carries the exact expected URL **as of the `before` read** (`--url`
+   is required when omitted from `plan` and must match otherwise). Jira's
+   delete-by-ID endpoint provides no atomic URL precondition, so if the user's
+   selection comes from an older/stale listing, re-read in a fresh workdir
+   first. `select` prints the delete (`twg jira workitem unlink weblink --id
+   <issue ID> --link-id <ID>`, never a URL selector) and the follow-up read.
+   Run the delete once, then the follow-up read regardless of the delete result.
+4. `verify --workdir DIR` classifies the delete (`acknowledged`, definite
+   no-write `refused` for a narrow set of documented HTTP rejection statuses
+   such as 401/403/400/404/429 when actually reported, or `ambiguous` by default
+   for unfamiliar errors, errors without an HTTP status, 408/5xx such as 504,
+   missing/malformed output, or mismatched acknowledgement, always retaining
+   the exact `code`/`statusCode`) separately from the follow-up read, and
+   reports `surviving_same_url_links` (all observed IDs still carrying the
+   expected URL, whether pre-existing or newly added):
+   - `removed` (exit 0): valid acknowledgement, target absent, same issue/site,
+     and every pre-existing other link returned identically. Report any
+     `surviving_same_url_links` without deleting extra records.
+   - Non-success (exit 3): `refused` (definite no-write and still present),
+     `ambiguous_present` (still seen now, but an ambiguous write cannot prove
+     the request will never complete), `acknowledged_but_present`,
+     `absent_without_acknowledgement` (absent without a valid acknowledgement;
+     do not attribute cause to this run), `other_links_changed`,
+     `identity_changed`, or `unverified`.
 
 A read that is a TWG error, reports warnings or partial data, lacks or garbles
 `remoteLinks`, repeats an ID, names another issue or site, or is truncated is
 refused, not treated as an empty list: TWG omits `remoteLinks` when it cannot
 read them, and in agent mode its warning is not in the file. Observations come
-through TWG, which itself lists an unexpected non-list provider response as
-empty. A work directory never re-issues a delete: after any outcome other than
-`removed`, report it and read again with a new plan before the person decides on
-another attempt. The delete needs the login's Jira delete permission.
+through TWG, and TWG 1.4.8 itself can normalize an unexpected non-array
+provider response to `[]`, so these results are TWG observations rather than
+raw provider certainty. A work directory never replays a delete: after any
+non-success or ambiguous outcome, do not resend; report it and re-read in a
+new workdir before the person decides on another attempt. The delete needs the
+login's Jira delete permission.
 
 ## API references
 

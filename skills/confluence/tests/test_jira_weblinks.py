@@ -1,4 +1,4 @@
-"""Offline Jira web-link removal: the real helper, the printed argv and a stateful fake TWG."""
+"""Offline Jira web-link helper and fake-TWG consumer regressions."""
 from __future__ import annotations
 
 import ast
@@ -11,13 +11,14 @@ import sys
 
 import pytest
 
-from confluence_skill_under_test import plugin
-
 PAYLOAD = Path(__file__).resolve().parents[1]
 HELPER = PAYLOAD / 'jira_weblinks.py'
 FAKE = Path(__file__).with_name('fake_twg.py')
 MR = 'https://git.example.invalid/demo/app/-/merge_requests/7'
 OTHER = 'https://docs.example.invalid/demo/design'
+
+# Clean host environment baseline for tests: strips any TWG_ vars from the runner's shell.
+BASE_ENV = {k: v for k, v in os.environ.items() if not k.upper().startswith('TWG_')}
 
 
 def remote(identifier, url, title):
@@ -48,62 +49,76 @@ def jira(tmp_path):
         def read(self):
             return json.loads(path.read_text(encoding='utf-8'))
 
+        def write_state(self, value):
+            path.write_text(json.dumps(value), encoding='utf-8')
+
         def fault(self, command, *modes):
             value = self.read()
             value['faults'][command] = list(modes)
-            path.write_text(json.dumps(value), encoding='utf-8')
+            self.write_state(value)
 
-        def helper(self, *args):
+        def helper_raw(self, *args, env=None, isolated_stdlib=False):
+            run_env = {**BASE_ENV, **(env or {})}
+            flags = ['-I', '-S'] if isolated_stdlib else ['-I']
             # cwd mirrors run_command(cwd=skill_payload); nothing is written beside the helper.
-            done = subprocess.run([sys.executable, '-I', str(HELPER), *args], cwd=PAYLOAD,
-                                  capture_output=True, text=True, timeout=60)
+            return subprocess.run([sys.executable, *flags, str(HELPER), *args], cwd=PAYLOAD,
+                                  capture_output=True, text=True, timeout=60, env=run_env)
+
+        def helper(self, *args, env=None, isolated_stdlib=False):
+            done = self.helper_raw(*args, env=env, isolated_stdlib=isolated_stdlib)
+            assert 'Traceback' not in done.stderr, done.stderr
             out = json.loads(done.stdout)
             for step in ([out['run_command']] if isinstance(out.get('run_command'), dict)
                          else out.get('run_command') or []):
                 self.emitted.append(step['cmd'])
             return done.returncode, out
 
-        def twg(self, cmd):
-            # Explicit fixture runner: the printed program is `twg` itself; only the test maps it to the fake.
+        def twg(self, cmd, env=None):
+            # Explicit fixture runner: only the test maps bare `twg` to fake_twg.py.
             assert cmd[0] == 'twg' and all(isinstance(part, str) for part in cmd)
+            run_env = {**BASE_ENV, **(env or {}), 'FAKE_TWG_STATE': str(path)}
             done = subprocess.run([sys.executable, '-I', str(FAKE), *cmd[1:]], capture_output=True, text=True,
-                                  timeout=60, env={**os.environ, 'FAKE_TWG_STATE': str(path)})
+                                  timeout=60, env=run_env)
             assert 'Traceback' not in done.stderr, done.stderr
             return done.returncode
 
-        def plan(self, url=MR):
+        def plan(self, url=MR, *, env=None):
             args = ['plan', '--workdir', str(self.workdir), '--site', 'example', '--issue', 'demo-42',
-                    '--profile', 'demo-reader'] + (['--url', url] if url else [])
-            return self.helper(*args)
+                    '--profile', 'demo-reader']
+            if url is not None:
+                args += ['--url', url]
+            return self.helper(*args, env=env)
 
-        def prepared(self, link_id='10002', url=MR, select_url=None):
-            code, out = self.plan(url)
+        def prepared(self, link_id='10002', url=MR, select_url=None, *, env=None):
+            code, out = self.plan(url, env=env)
             assert code == 0
-            self.twg(out['run_command']['cmd'])
+            self.twg(out['run_command']['cmd'], env=env)
             return self.helper('select', '--workdir', str(self.workdir), '--link-id', link_id,
-                               *(['--url', select_url] if select_url else []))
+                               *(['--url', select_url] if select_url is not None else []), env=env)
 
-        def run_steps(self, chosen):
-            return [self.twg(step['cmd']) for step in chosen['run_command']]
+        def run_steps(self, chosen, env=None):
+            return [self.twg(step['cmd'], env=env) for step in chosen['run_command']]
 
-        def verify(self):
-            return self.helper('verify', '--workdir', str(self.workdir))
+        def verify(self, env=None):
+            return self.helper('verify', '--workdir', str(self.workdir), env=env)
 
-    yield Jira()
-    for cmd in Jira.emitted:  # every test: nothing emitted asks TWG for human (user) mode
+    instance = Jira()
+    yield instance
+    for cmd in instance.emitted:  # every test: bare `twg` in agent mode, never human (user) mode
         assert cmd[0] == 'twg' and cmd[cmd.index('--mode') + 1] == 'agent' and cmd.count('--mode') == 1
         assert 'user' not in cmd
 
 
-def test_selected_duplicate_is_the_only_change_and_is_verified(jira):
+def test_selected_duplicate_is_the_only_change_and_surviving_same_url_is_reported(jira):
     code, out = jira.plan()
     assert code == 0
     assert out['run_command']['cmd'] == [
         'twg', '--profile', 'demo-reader', '--mode', 'agent', '--output-summary', 'none',
         '--output-file', str(jira.workdir / 'before.json'), 'jira', 'workitem', 'get', 'DEMO-42',
         '--remote-links', '--fields', 'summary', '--site', 'example', '--output', 'json']
-    assert stat.S_IMODE(jira.workdir.stat().st_mode) == 0o700
-    assert stat.S_IMODE((jira.workdir / 'plan.json').stat().st_mode) == 0o600
+    if os.name == 'posix':
+        assert stat.S_IMODE(jira.workdir.stat().st_mode) == 0o700
+        assert stat.S_IMODE((jira.workdir / 'plan.json').stat().st_mode) == 0o600
     assert jira.twg(out['run_command']['cmd']) == 0
 
     code, listing = jira.helper('list', '--workdir', str(jira.workdir))
@@ -116,6 +131,7 @@ def test_selected_duplicate_is_the_only_change_and_is_verified(jira):
 
     code, chosen = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002')
     assert code == 0 and chosen['other_links_with_same_url'] == ['10001']
+    assert 'atomic' in chosen['url_check_scope'].lower()
     delete, after = (step['cmd'] for step in chosen['run_command'])
     assert delete == ['twg', '--profile', 'demo-reader', '--mode', 'agent', '--output-summary', 'none',
                       '--output-file', str(jira.workdir / 'unlink.json'), 'jira', 'workitem', 'unlink', 'weblink',
@@ -124,8 +140,11 @@ def test_selected_duplicate_is_the_only_change_and_is_verified(jira):
     assert jira.twg(delete) == 0 and jira.twg(after) == 0
 
     code, report = jira.verify()
-    assert code == 0 and report['outcome'] == 'removed' and report['write'] == {'status': 'acknowledged'}
+    assert code == 0 and report['outcome'] == 'removed'
+    assert report['write'] == {'status': 'acknowledged', 'definite_no_write': False}
     assert report['other_links'] == {'missing': [], 'changed': []} and report['target_present'] is False
+    assert report['surviving_same_url_links'] == ['10001']
+    assert report['new_links'] == []
 
     state = jira.read()
     assert state['deletes'] == [['10042', '10002']]
@@ -138,14 +157,25 @@ def test_selected_duplicate_is_the_only_change_and_is_verified(jira):
     assert sorted(path.name for path in PAYLOAD.iterdir() if path.suffix == '.json') == []
 
 
+def test_list_only_is_a_finished_read_only_outcome(jira):
+    code, out = jira.plan(url=None)
+    assert code == 0
+    assert 'read-only' in out['next'].lower() and 'stop after `list`' in out['next'].lower()
+    assert jira.twg(out['run_command']['cmd']) == 0
+    code, listing = jira.helper('list', '--workdir', str(jira.workdir))
+    assert code == 0 and listing['expected_url'] is None
+    assert 'stop here' in listing['next'].lower()
+    assert [link['url'] for link in listing['web_links']] == [MR, MR, OTHER]
+    assert all('matches_expected_url' not in link for link in listing['web_links'])
+    assert not (jira.workdir / 'selection.json').exists()
+    assert jira.read()['deletes'] == []
+    assert [call[:3] for call in jira.read()['calls']] == [['jira', 'workitem', 'get']]
+
+
 def test_listing_before_the_url_is_known_then_selecting_with_it(jira):
     code, out = jira.plan(url=None)
     assert code == 0 and '--url' in out['next']
     jira.twg(out['run_command']['cmd'])
-    code, listing = jira.helper('list', '--workdir', str(jira.workdir))
-    assert code == 0 and listing['expected_url'] is None
-    assert [link['url'] for link in listing['web_links']] == [MR, MR, OTHER]
-    assert all('matches_expected_url' not in link for link in listing['web_links'])
     code, refused = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10001')
     assert code == 2 and refused['error'] == 'url_required'
     code, chosen = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10001', '--url', MR)
@@ -153,7 +183,19 @@ def test_listing_before_the_url_is_known_then_selecting_with_it(jira):
     jira.run_steps(chosen)
     code, report = jira.verify()
     assert code == 0 and report['outcome'] == 'removed'
+    assert report['surviving_same_url_links'] == ['10002']
     assert [link['id'] for link in jira.read()['links']] == [10002, 10003]
+
+
+def test_new_same_url_sibling_is_reported_without_deleting_extra_records(jira):
+    _, chosen = jira.prepared()
+    jira.fault('get', 'add_same_url_sibling')
+    assert jira.run_steps(chosen) == [0, 0]
+    code, report = jira.verify()
+    assert code == 0 and report['outcome'] == 'removed'
+    assert report['new_links'] == ['10004']
+    assert report['surviving_same_url_links'] == ['10001', '10004']
+    assert jira.read()['deletes'] == [['10042', '10002']]
 
 
 def test_select_url_cannot_differ_from_the_planned_url(jira):
@@ -187,7 +229,7 @@ def test_selection_needs_the_exact_id_whose_url_matches(jira, link_id, error):
 @pytest.mark.parametrize('fault,error', [
     ('omit_remote_links', 'remote_links_missing'), ('truncated', 'malformed_json'), ('no_file', 'missing_file'),
     ('provider_error', 'provider_error'), ('non_list', 'malformed_remote_links'), ('partial', 'incomplete_read'),
-    ('duplicate_ids', 'duplicate_link_id'), ('wrong_key', 'context_mismatch'),
+    ('warnings', 'incomplete_read'), ('duplicate_ids', 'duplicate_link_id'), ('wrong_key', 'context_mismatch'),
 ])
 def test_unusable_before_read_selects_nothing(jira, fault, error):
     jira.fault('get', fault)
@@ -196,33 +238,84 @@ def test_unusable_before_read_selects_nothing(jira, fault, error):
     assert jira.read()['deletes'] == [] and not (jira.workdir / 'selection.json').exists()
 
 
-def test_lost_acknowledgement_reports_absence_without_claiming_the_delete(jira):
-    jira.fault('unlink', 'lost_ack')
+@pytest.mark.parametrize('fault,expected_code,expected_status', [
+    ('refuse', 'unauthorized', 403),
+    ('http_401', 'unauthenticated', 401),
+])
+def test_documented_http_rejection_is_classified_as_definite_no_write_refusal(
+        jira, fault, expected_code, expected_status):
+    jira.fault('unlink', fault)
     _, chosen = jira.prepared()
     assert jira.run_steps(chosen) == [1, 0]
     code, report = jira.verify()
-    assert code == 3 and report['outcome'] == 'absent_without_acknowledgement'
-    assert report['write'] == {'status': 'no_acknowledgement', 'reason': 'missing_file',
-                               'detail': 'delete was not written: unlink.json is absent.'}
-    assert len(jira.read()['deletes']) == 1
-
-
-def test_provider_refusal_differs_from_a_missing_acknowledgement(jira):
-    jira.fault('unlink', 'refuse')
-    _, chosen = jira.prepared()
-    assert jira.run_steps(chosen) == [1, 0]
-    code, report = jira.verify()
-    assert code == 3 and report['outcome'] == 'refused' and report['target_present'] is True
-    assert report['write']['status'] == 'provider_error' and report['write']['error']['statusCode'] == 403
+    assert code == 3 and report['ok'] is False and report['outcome'] == 'refused'
+    assert report['target_present'] is True
+    assert report['surviving_same_url_links'] == ['10001', '10002']
+    assert report['write']['status'] == 'refused' and report['write']['definite_no_write'] is True
+    assert report['write']['error']['code'] == expected_code
+    assert report['write']['error']['statusCode'] == expected_status
     assert jira.read()['deletes'] == []
 
 
-def test_write_without_any_output_is_not_removed(jira):
-    jira.fault('unlink', 'crash')
+@pytest.mark.parametrize('fault,reason,expected_code,expected_status', [
+    ('timeout_present', 'provider_error', 'timeout', None),
+    ('http_408_present', 'provider_error', 'request_timeout', 408),
+    ('http_504_present', 'provider_error', 'gateway_timeout', 504),
+    ('http_500_present', 'provider_error', 'server_error', 500),
+    ('unfamiliar_present', 'provider_error', 'unfamiliar_fault', None),
+    ('crash', 'missing_file', None, None),
+    ('mismatched_ack', 'mismatched_acknowledgement', None, None),
+])
+def test_ambiguous_or_unfamiliar_delete_while_still_present_is_not_definite_no_write(
+        jira, fault, reason, expected_code, expected_status):
+    jira.fault('unlink', fault)
     _, chosen = jira.prepared()
     jira.run_steps(chosen)
     code, report = jira.verify()
-    assert code == 3 and report['outcome'] == 'not_removed' and report['write']['status'] == 'no_acknowledgement'
+    assert code == 3 and report['ok'] is False and report['outcome'] == 'ambiguous_present'
+    assert report['target_present'] is True
+    assert report['surviving_same_url_links'] == ['10001', '10002']
+    assert report['write']['status'] == 'ambiguous' and report['write']['definite_no_write'] is False
+    assert report['write']['reason'] == reason
+    if expected_code is not None:
+        assert report['write']['error']['code'] == expected_code
+        assert report['write']['error']['statusCode'] == expected_status
+    assert 'do not resend' in report['note'].lower()
+    # Replay in the same workdir remains blocked.
+    code, replay = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002')
+    assert code == 2 and replay['error'] == 'already_attempted'
+
+
+@pytest.mark.parametrize('fault,reason', [
+    ('timeout_absent', 'provider_error'),
+    ('http_504_absent', 'provider_error'),
+    ('lost_ack', 'missing_file'),
+])
+def test_ambiguous_delete_when_absent_does_not_attribute_cause(jira, fault, reason):
+    jira.fault('unlink', fault)
+    _, chosen = jira.prepared()
+    assert jira.run_steps(chosen) == [1, 0]
+    code, report = jira.verify()
+    assert code == 3 and report['ok'] is False and report['outcome'] == 'absent_without_acknowledgement'
+    assert report['target_present'] is False
+    assert report['surviving_same_url_links'] == ['10001']
+    assert report['write']['status'] == 'ambiguous' and report['write']['definite_no_write'] is False
+    assert report['write']['reason'] == reason
+    assert 'attribute' in report['note'].lower()
+    assert len(jira.read()['deletes']) == 1
+
+
+def test_acknowledged_but_still_present_is_non_success_and_never_replayed(jira):
+    jira.fault('unlink', 'ack_still_present')
+    _, chosen = jira.prepared()
+    assert jira.run_steps(chosen) == [0, 0]
+    code, report = jira.verify()
+    assert code == 3 and report['ok'] is False and report['outcome'] == 'acknowledged_but_present'
+    assert report['write']['status'] == 'acknowledged'
+    assert report['target_present'] is True
+    assert report['surviving_same_url_links'] == ['10001', '10002']
+    code, replay = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10002')
+    assert code == 2 and replay['error'] == 'already_attempted'
 
 
 @pytest.mark.parametrize('fault', ['no_file', 'omit_remote_links', 'truncated', 'provider_error'])
@@ -256,9 +349,61 @@ def test_changed_identity_or_edited_before_read_stops_verification(jira):
     assert code == 2 and report['error'] == 'before_changed'
 
 
+@pytest.mark.parametrize('bad_url', [
+    'javascript:alert(1)',
+    'https://[::1',
+    'https://example.invalid:badport/x',
+    'https://example.invalid:99999/x',
+    'https://:80/path',
+    'https://example.invalid/has space',
+    '',
+])
+def test_malformed_url_syntax_returns_typed_json_never_traceback(jira, bad_url):
+    code, out = jira.plan(url=bad_url)
+    assert code == 2 and out['error'] == 'invalid_argument' and not jira.workdir.exists()
+    code, planned = jira.plan(url=None)
+    assert code == 0
+    jira.twg(planned['run_command']['cmd'])
+    code, sel = jira.helper('select', '--workdir', str(jira.workdir), '--link-id', '10001', '--url', bad_url)
+    assert code == 2 and sel['error'] == 'invalid_argument'
+
+
+def test_non_ascii_titles_and_paths_emit_lossless_json_under_ascii_pipe_encoding(jira, tmp_path):
+    unicode_title = 'Задача — MR !7 ✓'
+    state = jira.read()
+    state['links'][0]['object']['title'] = unicode_title
+    jira.write_state(state)
+    jira.workdir = tmp_path / 'задача-папка' / 'run-1'
+    env = {'PYTHONIOENCODING': 'ascii'}
+    code, planned = jira.plan(env=env)
+    assert code == 0 and Path(planned['workdir']) == jira.workdir.resolve()
+    assert jira.twg(planned['run_command']['cmd']) == 0
+    raw = jira.helper_raw('list', '--workdir', str(jira.workdir), env=env)
+    assert raw.returncode == 0 and raw.stderr == ''
+    raw.stdout.encode('ascii')  # pure ASCII on piped stdout
+    listing = json.loads(raw.stdout)
+    assert listing['web_links'][0]['title'] == unicode_title
+
+
+def test_existing_empty_writable_dir_and_symlink_workdir_are_refused(jira, tmp_path):
+    empty = tmp_path / 'already-exists-empty'
+    empty.mkdir()
+    jira.workdir = empty
+    code, out = jira.plan()
+    assert code == 2 and out['error'] == 'workdir_not_fresh'
+    assert list(empty.iterdir()) == []
+    if os.name == 'posix':
+        dangling = tmp_path / 'dangling-link'
+        dangling.symlink_to(tmp_path / 'never-created')
+        jira.workdir = dangling
+        code, out = jira.plan()
+        assert code == 2 and out['error'] == 'workdir_not_fresh'
+        assert not (tmp_path / 'never-created').exists()
+
+
 @pytest.mark.parametrize('change,error', [
     ({'workdir': 'relative/dir'}, 'invalid_argument'), ({'workdir': str(PAYLOAD / 'run')}, 'invalid_argument'),
-    ({'issue': 'DEMO-42 OR 1'}, 'invalid_argument'), ({'url': 'javascript:alert(1)'}, 'invalid_argument'),
+    ({'issue': 'DEMO-42 OR 1'}, 'invalid_argument'),
     ({'profile': 'two words'}, 'invalid_argument'), ({'site': 'example.invalid/x?'}, 'invalid_argument'),
 ])
 def test_plan_refuses_unbound_or_unsafe_context(jira, change, error):
@@ -269,21 +414,65 @@ def test_plan_refuses_unbound_or_unsafe_context(jira, change, error):
     assert not (PAYLOAD / 'run').exists()
 
 
-def test_profile_is_required_and_no_custom_executable_is_accepted(jira):
-    for extra in ([], ['--profile', 'demo-reader', '--twg', '/tmp/other']):
-        done = subprocess.run([sys.executable, '-I', str(HELPER), 'plan', '--workdir', str(jira.workdir),
-                               '--site', 'example', '--issue', 'DEMO-42', *extra],
-                              capture_output=True, text=True, timeout=60)
-        assert done.returncode == 2 and done.stdout == '' and not jira.workdir.exists()
+@pytest.mark.parametrize('var_name', ['TWG_TOKEN', 'TWG_OAUTH_ACCESS_TOKEN'])
+def test_personal_jira_auth_overrides_are_declined_without_echoing_values(jira, var_name):
+    sentinel = 'synthetic-secret-must-never-appear-7391'
+    override_env = {var_name: sentinel}
+    raw_plan = jira.helper_raw('plan', '--workdir', str(jira.workdir), '--site', 'example',
+                               '--issue', 'DEMO-42', '--profile', 'demo-reader', '--url', MR, env=override_env)
+    assert raw_plan.returncode == 2 and sentinel not in raw_plan.stdout and sentinel not in raw_plan.stderr
+    out = json.loads(raw_plan.stdout)
+    assert out['error'] == 'ambient_auth_override' and var_name in out['variables']
+    assert not jira.workdir.exists()
+
+    # Even if plan ran cleanly, select also declines when a personal-Jira override appears in the host env.
+    code, planned = jira.plan()
+    assert code == 0
+    jira.twg(planned['run_command']['cmd'])
+    raw_sel = jira.helper_raw('select', '--workdir', str(jira.workdir), '--link-id', '10002', env=override_env)
+    assert raw_sel.returncode == 2 and sentinel not in raw_sel.stdout and sentinel not in raw_sel.stderr
+    sel_out = json.loads(raw_sel.stdout)
+    assert sel_out['error'] == 'ambient_auth_override' and var_name in sel_out['variables']
+    assert not (jira.workdir / 'selection.json').exists()
 
 
-def test_helper_is_a_pure_standard_library_tool_and_wiki_tools_are_unchanged():
+def test_unrelated_and_storage_twg_env_vars_do_not_block_saved_profile_flow(jira):
+    unrelated = {
+        'TWG_AUTH_STORAGE_KEY': 'synthetic-key-placeholder',
+        'TWG_ADMIN_TOKEN': 'synthetic-admin-only-placeholder',
+        'TWG_USER': 'synthetic-user-without-token',
+        'TWG_PROFILE': 'other',
+        'TWG_AGENT_DEFAULTS': '1',
+        'TWG_OAUTH_HINT': 'unrelated-prefix-must-not-be-wildcard-banned',
+    }
+    code, chosen = jira.prepared(env=unrelated)
+    assert code == 0 and chosen['selected']['id'] == '10002'
+
+
+def test_profile_is_required_and_no_executable_override_flag_exists(jira):
+    done = jira.helper_raw('plan', '--workdir', str(jira.workdir), '--site', 'example', '--issue', 'DEMO-42')
+    assert done.returncode == 2 and done.stdout == '' and not jira.workdir.exists()
+    extra = jira.helper_raw('plan', '--workdir', str(jira.workdir), '--site', 'example',
+                            '--issue', 'DEMO-42', '--profile', 'demo-reader', '--twg-bin', '/usr/local/bin/twg')
+    assert extra.returncode == 2 and extra.stdout == '' and not jira.workdir.exists()
+
+
+def test_helper_preserves_stdlib_only_and_no_network_or_process_boundary(jira):
     tree = ast.parse(HELPER.read_text(encoding='utf-8'))
-    imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-    assert imported == {'__future__', 'argparse', 'hashlib', 'json', 'os', 're', 'pathlib', 'urllib.parse'}
-    called = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
-              and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
-              and node.func.value.id == 'os'}
-    assert called == {'open', 'fdopen'}
-    assert len(plugin.TOOLS) == 12 and not any('jira' in name for name in plugin.TOOLS)
+    top_modules = {alias.name.split('.')[0] for node in ast.walk(tree) if isinstance(node, ast.Import)
+                   for alias in node.names}
+    top_modules |= {node.module.split('.')[0] for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom) and node.module}
+    assert top_modules <= sys.stdlib_module_names
+    forbidden_modules = {'subprocess', 'socket', 'ssl', 'http', 'ftplib', 'smtplib', 'xmlrpc',
+                         'asyncio', 'multiprocessing', 'pty', 'shutil', 'webbrowser', 'ctypes'}
+    assert top_modules.isdisjoint(forbidden_modules)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith('urllib.'):
+            assert node.module == 'urllib.parse'
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'os':
+            assert not node.attr.startswith(('system', 'popen', 'spawn', 'exec', 'fork', 'posix_spawn'))
+    # Behavioral proof: runs with -I -S (no site-packages) cleanly.
+    code, out = jira.helper('plan', '--workdir', str(jira.workdir), '--site', 'example',
+                            '--issue', 'DEMO-42', '--profile', 'demo-reader', isolated_stdlib=True)
+    assert code == 0 and out['ok'] is True

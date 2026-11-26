@@ -3,16 +3,16 @@
     "documents",
     "planning"
   ],
-  "description": "Read, search and author Confluence Cloud pages, comments and attachments with an existing API token, and remove one selected Jira web link through Atlassian's official TWG CLI with checks before and after.",
-  "digest": "703acb6a80cce171a323801bcf0704eb4aecb247b53c3cbb8a822783554e8aeb",
+  "description": "Read, search and author Confluence Cloud pages, comments and attachments with an existing Confluence API token, or inspect and remove one selected Jira web link through a signed-in Atlassian TWG CLI without Confluence credentials.",
+  "digest": "5023523b2a4e6abd267092405e00f0ce30fc600cd718582c7548948570e3ca3b",
   "install_specs": [
     "httpx>=0.27.0"
   ],
-  "mark": "Confluence key",
+  "mark": "Confluence key / TWG",
   "name": "confluence",
-  "needs": "needs a Confluence API token; Jira web links need the official TWG CLI signed in",
+  "needs": "Confluence tools need an API token; Jira web links need only a signed-in TWG CLI",
   "owner": "razzant",
-  "pitch": "Edit Confluence pages; remove a Jira web link",
+  "pitch": "Edit Confluence pages; inspect or remove Jira web links",
   "schema_version": 2,
   "source": {
     "kind": "hosted",

@@ -29,9 +29,23 @@ def meta(resource, **extra):
             'resourceType': resource, **extra}
 
 
-def error(code, message, status):
-    return {'ok': False, 'error': {'code': code, 'kind': 'jira', 'message': message, 'statusCode': status,
-                                   'retry': {'retryable': False}}}
+def error(code, message, status=None, *, kind='jira', retryable=False):
+    body = {'code': code, 'kind': kind, 'message': message, 'retry': {'retryable': retryable}}
+    if status is not None:
+        body['statusCode'] = status
+    return {'ok': False, 'error': body}
+
+
+def unlink_ok(issue_ref, link_id, *, site=None):
+    request = {'linkId': link_id}
+    if site is not None:
+        request['site'] = site
+    return {'apiVersion': 'v2', 'command': 'jira.workitem.unlink.weblink',
+            'request': request,
+            'data': {'success': True, 'issue': {'idOrKey': issue_ref}, 'result': {'deleted': True},
+                     'weblink': {'url': None, 'title': None, 'globalId': None, 'relationship': None,
+                                 'applicationName': None, 'applicationType': None}},
+            'meta': meta('jira.workitem-weblink')}
 
 
 def main():
@@ -74,6 +88,14 @@ def main():
             for link in state['links']:
                 if link['id'] == state['other_id']:
                     link['object'] = {**link['object'], 'title': 'Renamed elsewhere'}
+        if fault == 'add_same_url_sibling':  # another actor added a new same-URL link concurrently
+            url = state['mr']['url']
+            state['links'].append({
+                'id': 10004, 'self': f'{SITE_BASE}/rest/api/3/issue/{issue["id"]}/remotelink/10004',
+                'globalId': f'system={url}#concurrent',
+                'application': {'type': 'com.example.git', 'name': 'Example Git'},
+                'relationship': 'links to', 'object': {'url': url, 'title': '!7 added concurrently'},
+            })
         item = {'expand': 'renderedFields', 'id': issue['id'], 'self': f'{SITE_BASE}/rest/api/3/issue/{issue["id"]}',
                 'key': issue['key'], 'summary': issue['summary'], 'url': f'{SITE_BASE}/browse/{issue["key"]}'}
         if fault == 'omit_remote_links':
@@ -91,6 +113,8 @@ def main():
         document = {'apiVersion': 'v2', 'command': 'jira.workitem.get',
                     'request': {'issueIdOrKey': issue['key'], 'site': site, 'fields': ['summary'], 'remoteLinks': True},
                     'data': [item], 'meta': meta('jira.workitem', **({'partial': True} if fault == 'partial' else {}))}
+        if fault == 'warnings':
+            document['warnings'] = ['remote links read reported a warning']
         text = json.dumps(document, indent=2)
         return finish(0, raw=text[:len(text) // 2] if fault == 'truncated' else text)
 
@@ -101,6 +125,22 @@ def main():
         fault = faults['unlink'].pop(0) if faults['unlink'] else None
         if fault == 'refuse':
             return finish(1, error('unauthorized', 'Jira REST API 403: delete:jira-platform:twg-cli missing', 403))
+        if fault == 'http_401':
+            return finish(1, error('unauthenticated', 'Jira REST API 401: authentication required', 401))
+        if fault == 'timeout_present':
+            return finish(1, error('timeout', 'Request timed out waiting for Jira', None, kind='network', retryable=True))
+        if fault == 'http_408_present':
+            return finish(1, error('request_timeout', 'Jira REST API 408: Request Timeout', 408, retryable=True))
+        if fault == 'http_504_present':
+            return finish(1, error('gateway_timeout', 'Jira REST API 504: Gateway Timeout', 504, retryable=True))
+        if fault == 'http_500_present':
+            return finish(1, error('server_error', 'Jira REST API 500: Internal Server Error', 500, retryable=True))
+        if fault == 'unfamiliar_present':
+            return finish(1, error('unfamiliar_fault', 'Unexpected upstream response', None, kind='unknown'))
+        if fault == 'mismatched_ack':
+            return finish(0, unlink_ok(issue_ref, '10001'))
+        if fault == 'ack_still_present':  # TWG acknowledged delete, yet the record remains in state
+            return finish(0, unlink_ok(issue_ref, link_id))
         if fault == 'crash':  # nothing reached Jira and nothing was written
             print('Error: interrupted', file=sys.stderr)
             return finish(1)
@@ -108,15 +148,14 @@ def main():
             return finish(1, error('not-found', 'Jira REST API 404', 404))
         state['links'] = [link for link in state['links'] if str(link['id']) != link_id]
         state['deletes'].append([issue_ref, link_id])
+        if fault == 'timeout_absent':  # Jira applied it, then the client timed out
+            return finish(1, error('timeout', 'Request timed out waiting for Jira', None, kind='network', retryable=True))
+        if fault == 'http_504_absent':  # Jira applied it, then the gateway returned 504
+            return finish(1, error('gateway_timeout', 'Jira REST API 504: Gateway Timeout', 504, retryable=True))
         if fault == 'lost_ack':  # Jira applied it, but the caller never received the answer
             print('Error: socket hang up', file=sys.stderr)
             return finish(1)
-        return finish(0, {'apiVersion': 'v2', 'command': 'jira.workitem.unlink.weblink',
-                          'request': {'linkId': link_id},
-                          'data': {'success': True, 'issue': {'idOrKey': issue_ref}, 'result': {'deleted': True},
-                                   'weblink': {'url': None, 'title': None, 'globalId': None, 'relationship': None,
-                                               'applicationName': None, 'applicationType': None}},
-                          'meta': meta('jira.workitem-weblink')})
+        return finish(0, unlink_ok(issue_ref, link_id))
     raise SystemExit(f'unsupported fake command: {argv}')
 
 

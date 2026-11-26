@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Remove one selected Jira web link through Atlassian's TWG CLI, then verify it.
+"""Inspect Jira web links or remove one selected link via Atlassian's TWG CLI.
 
 Pure standard-library helper: it never starts a process, opens a network
-connection or follows a link. It writes a plan into a fresh, owner-only,
-task-owned work directory, prints the exact `twg` argv for the agent to run with
-the host's ordinary run_command, and checks the JSON that TWG writes there
-through its agent full-result file (`--mode agent ... --output-file`).
+connection or follows a link. It creates a fresh leaf work directory outside
+the shared skill beneath a task-owned private parent (0700/0600 on POSIX; on
+Windows, use a parent that already carries a private owner-only ACL), prints
+the exact `twg` argv for the agent to run in the same host environment via
+ordinary `run_command`, and checks the JSON that TWG writes through
+`--mode agent ... --output-file`.
 
-    plan    bind site, login profile and issue (URL optional); print the read argv
+    plan    bind site, saved login profile and issue (URL optional); print the
+            read argv (stop after `list` for read-only inspection)
     list    compact view of the web links read before (or after) the change
-    select  bind one exact remote link ID to the expected URL; print the delete
-            argv and the follow-up read argv
-    verify  report the delete outcome and the follow-up read separately
+    select  bind one exact remote link ID to the expected URL as of `before`;
+            print the single delete argv and the follow-up read argv
+    verify  classify the delete outcome separately from the follow-up read
 
-Output is one JSON object on stdout. Exit status: 0 success, 2 refused input or
-unusable snapshot, 3 verification finished without a clean removal.
+Output is one ASCII-escaped JSON object on stdout (parseable and lossless
+regardless of piped terminal encoding). Exit status: 0 success, 2 refused
+input or unusable snapshot, 3 verification finished without a clean removal.
 """
 from __future__ import annotations
 
@@ -22,8 +26,8 @@ import argparse
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 
 PLAN, SELECTION = 'plan.json', 'selection.json'
@@ -33,6 +37,17 @@ LINK_ID = re.compile(r'[1-9][0-9]{0,18}')
 TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:@-]{0,199}')
 GET_COMMAND, UNLINK_COMMAND = 'jira.workitem.get', 'jira.workitem.unlink.weblink'
 
+# Personal-Jira TWG auth override variables that bypass a saved login profile.
+# Unrelated or required settings (such as TWG_AUTH_STORAGE_KEY for encrypted Linux
+# auth.db, TWG_ADMIN_TOKEN for independent admin commands, and TWG_PROFILE
+# overridden by --profile) stay allowed.
+AMBIENT_AUTH_OVERRIDES = frozenset({'TWG_TOKEN', 'TWG_OAUTH_ACCESS_TOKEN'})
+
+# Narrow set of documented HTTP rejection statuses where the delete was declined
+# without applying it (excluding 408 Request Timeout, 499, all 5xx, and errors
+# without an HTTP statusCode, which remain ambiguous by default).
+DEFINITE_NO_WRITE_HTTP = frozenset({400, 401, 403, 404, 405, 409, 410, 422, 429})
+
 
 class Refused(Exception):
     def __init__(self, code, message, **details):
@@ -41,11 +56,13 @@ class Refused(Exception):
 
 
 def emit(payload, status=0):
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
     return status
 
 
 def read_json(path, label):
+    if path.is_symlink():
+        raise Refused('invalid_file', f'{label} must be a regular file, not a symlink.')
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -57,9 +74,17 @@ def read_json(path, label):
 
 
 def write_new(path, value):
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
-        json.dump(value, stream, ensure_ascii=False, indent=2, sort_keys=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if os.name == 'posix':
+            os.fchmod(descriptor, 0o600)
+        stream = os.fdopen(descriptor, 'w', encoding='utf-8')
+    except Exception:
+        os.close(descriptor)
+        raise
+    with stream:
+        json.dump(value, stream, ensure_ascii=True, indent=2, sort_keys=True)
         stream.write('\n')
 
 
@@ -70,17 +95,71 @@ def checked(value, pattern, label):
 
 
 def checked_url(value):
-    parts = urlsplit(value or '')
-    if parts.scheme not in {'http', 'https'} or not parts.netloc or any(c.isspace() for c in value):
+    if not isinstance(value, str) or not value or any(c.isspace() or ord(c) < 0x20 for c in value):
+        raise Refused('invalid_argument', '--url must be one absolute http(s) URL, exactly as stored in the web link.')
+    try:
+        parts = urlsplit(value)
+        _ = parts.port
+    except ValueError:
+        raise Refused('invalid_argument', '--url must be one absolute http(s) URL, exactly as stored in the web link.') from None
+    if parts.scheme not in {'http', 'https'} or not parts.hostname:
         raise Refused('invalid_argument', '--url must be one absolute http(s) URL, exactly as stored in the web link.')
     return value
 
 
-def absolute(value):
-    path = Path(value)
-    if not path.is_absolute():
+def ambient_auth_overrides(env=None):
+    """Return names of personal-Jira TWG auth override variables present in env without reading values."""
+    mapping = os.environ if env is None else env
+    return sorted(key for key in mapping if key.upper() in AMBIENT_AUTH_OVERRIDES)
+
+
+def require_no_ambient_auth_overrides():
+    found = ambient_auth_overrides()
+    if found:
+        raise Refused(
+            'ambient_auth_override',
+            'Personal-Jira TWG auth override environment variables are set in this host environment; '
+            'unset them so TWG uses the named saved login profile directly.',
+            variables=found,
+        )
+
+
+def fresh_workdir(value):
+    if not isinstance(value, str) or not value or any(ord(c) < 0x20 for c in value):
+        raise Refused('invalid_argument', '--workdir must be an absolute path to a new task-owned directory.')
+    raw = Path(value)
+    if not raw.is_absolute() or raw.name in {'', '.', '..'} or '..' in raw.parts:
+        raise Refused('invalid_argument', '--workdir must be an absolute path to a new task-owned directory.')
+    if os.path.lexists(raw):
+        raise Refused(
+            'workdir_not_fresh',
+            '--workdir must be a new directory that does not already exist; use a fresh path for each run.',
+        )
+    if raw.parent.is_symlink():
+        raise Refused('invalid_argument', '--workdir parent must not be a symlink.')
+    if raw.parent.exists() and not raw.parent.is_dir():
+        raise Refused('invalid_argument', '--workdir parent must be a directory.')
+    workdir = raw.parent.resolve() / raw.name
+    if os.path.lexists(workdir):
+        raise Refused(
+            'workdir_not_fresh',
+            '--workdir must be a new directory that does not already exist; use a fresh path for each run.',
+        )
+    if workdir.is_relative_to(Path(__file__).resolve().parent):
+        raise Refused('invalid_argument', '--workdir must not be inside the shared skill folder.')
+    return workdir
+
+
+def existing_workdir(value):
+    if not isinstance(value, str) or not value or any(ord(c) < 0x20 for c in value):
         raise Refused('invalid_argument', '--workdir must be an absolute task-owned directory.')
-    return path.resolve()
+    raw = Path(value)
+    if not raw.is_absolute() or '..' in raw.parts or raw.is_symlink():
+        raise Refused('invalid_argument', '--workdir must be an absolute non-symlink task-owned directory.')
+    workdir = raw.resolve()
+    if workdir.is_relative_to(Path(__file__).resolve().parent):
+        raise Refused('invalid_argument', '--workdir must not be inside the shared skill folder.')
+    return workdir
 
 
 def argv(plan, *command, output):
@@ -96,7 +175,8 @@ def read_argv(plan, workdir, name):
 
 def load_plan(workdir):
     plan, _ = read_json(workdir / PLAN, 'plan')
-    if not isinstance(plan, dict) or plan.get('schema') != 2:
+    if not isinstance(plan, dict) or plan.get('schema') != 2 \
+            or not all(isinstance(plan.get(k), str) for k in ('profile', 'site', 'issue')):
         raise Refused('invalid_plan', 'plan.json was not written by this helper version.')
     return plan
 
@@ -164,61 +244,105 @@ def compact(view, expected_url):
                           for link in view['links']]}
 
 
+def _is_definite_no_write(error):
+    status_code = error.get('statusCode')
+    return type(status_code) is int and status_code in DEFINITE_NO_WRITE_HTTP
+
+
 def delete_outcome(workdir, selection):
-    """acknowledged, provider_error (TWG's {ok:false, error}) or no_acknowledgement."""
+    """Classify unlink.json: acknowledged, refused (definite no-write), or ambiguous."""
     try:
         doc, _ = read_json(workdir / FILES['unlink'], 'delete')
     except Refused as exc:
-        return {'status': 'no_acknowledgement', 'reason': exc.code, 'detail': str(exc)}
-    if isinstance(doc, dict) and doc.get('ok') is False and isinstance(doc.get('error'), dict):
+        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': exc.code, 'detail': str(exc)}
+    if not isinstance(doc, dict):
+        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'unrecognized_output',
+                'detail': 'The delete output is not a JSON object.'}
+    if doc.get('ok') is False and isinstance(doc.get('error'), dict):
         error = doc['error']
-        return {'status': 'provider_error', 'error': {key: error.get(key) for key in
-                                                      ('code', 'kind', 'statusCode', 'message', 'retry')}}
-    data = doc.get('data') if isinstance(doc, dict) else None
-    request = doc.get('request') if isinstance(doc, dict) else None
-    ok = (isinstance(data, dict) and isinstance(request, dict) and doc.get('apiVersion') == 'v2'
-          and doc.get('command') == UNLINK_COMMAND and data.get('success') is True
-          and isinstance(data.get('result'), dict) and data['result'].get('deleted') is True
-          and isinstance(data.get('issue'), dict) and data['issue'].get('idOrKey') == selection['issue']['id']
-          and str(request.get('linkId')) == selection['link']['id'])
-    if ok:
-        return {'status': 'acknowledged'}
-    return {'status': 'no_acknowledgement', 'reason': 'unrecognized_output',
-            'detail': 'The delete output is neither a success for this issue and link ID nor a TWG error.'}
+        payload = {key: error.get(key) for key in ('code', 'kind', 'statusCode', 'message', 'retry')}
+        if _is_definite_no_write(error):
+            return {'status': 'refused', 'definite_no_write': True, 'error': payload}
+        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'provider_error', 'error': payload,
+                'detail': 'TWG reported a non-definite error; whether the delete applied or will apply is uncertain.'}
+    data = doc.get('data')
+    request = doc.get('request')
+    meta = doc.get('meta') if isinstance(doc.get('meta'), dict) else {}
+    if (doc.get('ok') is not False and doc.get('apiVersion') == 'v2' and doc.get('command') == UNLINK_COMMAND
+            and isinstance(data, dict) and isinstance(request, dict)
+            and data.get('success') is True
+            and isinstance(data.get('result'), dict) and data['result'].get('deleted') is True):
+        req_site = request.get('site')
+        req_issue = request.get('id') if 'id' in request else request.get('issueIdOrKey')
+        issue_ok = isinstance(data.get('issue'), dict) and data['issue'].get('idOrKey') == selection['issue']['id']
+        req_issue_ok = req_issue is None or str(req_issue).upper() in {selection['issue']['id'], selection['issue']['key'].upper()}
+        link_ok = str(request.get('linkId')) == selection['link']['id']
+        site_ok = req_site is None or req_site == selection['issue']['site']
+        clean_ok = not doc.get('warnings') and not meta.get('partial')
+        if issue_ok and req_issue_ok and link_ok and site_ok and clean_ok:
+            return {'status': 'acknowledged', 'definite_no_write': False}
+        return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'mismatched_acknowledgement',
+                'detail': 'The delete acknowledgement does not cleanly match the selected issue, site, and link ID.'}
+    return {'status': 'ambiguous', 'definite_no_write': False, 'reason': 'unrecognized_output',
+            'detail': 'The delete output is neither a valid acknowledgement for this link nor a definite refusal.'}
 
 
 def cmd_plan(args):
-    workdir = absolute(args.workdir)
-    if workdir.is_relative_to(Path(__file__).resolve().parent):
-        raise Refused('invalid_argument', '--workdir must not be inside the shared skill folder.')
-    if workdir.exists() and (not workdir.is_dir() or any(workdir.iterdir())):
-        raise Refused('workdir_not_fresh', '--workdir must be new or empty; use one per removal.')
-    plan = {'schema': 2, 'profile': checked(args.profile, TOKEN, '--profile'), 'site': checked(args.site, TOKEN, '--site'),
-            'issue': checked(args.issue.upper(), ISSUE, '--issue'),
-            'expected_url': checked_url(args.url) if args.url is not None else None}
-    workdir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    workdir.chmod(0o700)
+    workdir = fresh_workdir(args.workdir)
+    require_no_ambient_auth_overrides()
+    plan = {
+        'schema': 2,
+        'profile': checked(args.profile, TOKEN, '--profile'),
+        'site': checked(args.site, TOKEN, '--site'),
+        'issue': checked(args.issue.upper(), ISSUE, '--issue'),
+        'expected_url': checked_url(args.url) if args.url is not None else None,
+    }
+    if not workdir.parent.exists():
+        workdir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        workdir.mkdir(mode=0o700, parents=False, exist_ok=False)
+    except FileExistsError:
+        raise Refused(
+            'workdir_not_fresh',
+            '--workdir must be a new directory that does not already exist; use a fresh path for each run.',
+        ) from None
+    if os.name == 'posix':
+        os.chmod(workdir, 0o700)
     write_new(workdir / PLAN, plan)
-    return emit({'ok': True, 'step': 'read_before', 'workdir': str(workdir),
-                 'run_command': {'cmd': read_argv(plan, workdir, 'before')},
-                 'next': 'Run this read once, then `list`, then `select --link-id <ID>`'
-                         + ('.' if plan['expected_url'] else ' with `--url <exact URL>`.')})
+    select_hint = '`select --link-id <ID>`' if plan['expected_url'] else '`select --link-id <ID> --url <exact URL>`'
+    return emit({
+        'ok': True,
+        'step': 'read_before',
+        'workdir': str(workdir),
+        'run_command': {'cmd': read_argv(plan, workdir, 'before')},
+        'next': f'Run this read once in the same host environment, then `list`. '
+                f'Stop after `list` for a read-only check; only run {select_hint} when the user '
+                f'affirmatively requested removing that specific record.',
+    })
 
 
 def cmd_list(args):
-    workdir = absolute(args.workdir)
+    workdir = existing_workdir(args.workdir)
     plan = load_plan(workdir)
-    return emit({'ok': True, 'snapshot': args.which,
+    if args.which == 'before':
+        select_hint = '`select --link-id <ID>`' if plan['expected_url'] else '`select --link-id <ID> --url <exact URL>`'
+        next_hint = (f'Read-only listing complete; stop here if only inspecting web links. '
+                     f'To remove one record the user affirmatively requested, run {select_hint} '
+                     f'(re-read in a fresh workdir first if this listing is stale).')
+    else:
+        next_hint = 'Follow-up listing complete; run `verify` for the full comparison.'
+    return emit({'ok': True, 'snapshot': args.which, 'next': next_hint,
                  **compact(snapshot(workdir, plan, args.which), plan['expected_url'])})
 
 
 def cmd_select(args):
-    workdir = absolute(args.workdir)
+    workdir = existing_workdir(args.workdir)
     plan = load_plan(workdir)
     used = [name for name in (SELECTION, FILES['unlink'], FILES['after']) if (workdir / name).exists()]
     if used:
         raise Refused('already_attempted', 'This work directory already has a selection or a later step; '
                       'a delete is never replayed. Verify it, or start a new plan after a fresh read.', files=used)
+    require_no_ambient_auth_overrides()
     link_id = checked(args.link_id, LINK_ID, '--link-id')
     expected = checked_url(args.url) if args.url is not None else plan['expected_url']
     if expected is None:
@@ -238,15 +362,20 @@ def cmd_select(args):
                                     'others': {i: raw for i, raw in view['raw'].items() if i != link_id}})
     delete = argv(plan, 'jira', 'workitem', 'unlink', 'weblink', '--id', view['issue']['id'], '--link-id', link_id,
                   output=workdir / FILES['unlink'])
-    return emit({'ok': True, 'step': 'delete_once_then_read_after', 'selected': target,
-                 'other_links_with_same_url': [link['id'] for link in view['links']
-                                               if link['url'] == expected and link['id'] != link_id],
-                 'run_command': [{'cmd': delete}, {'cmd': read_argv(plan, workdir, 'after')}],
-                 'next': 'Run the delete exactly once, then the read whatever the delete printed, then `verify`.'})
+    return emit({
+        'ok': True,
+        'step': 'delete_once_then_read_after',
+        'selected': target,
+        'other_links_with_same_url': [link['id'] for link in view['links']
+                                      if link['url'] == expected and link['id'] != link_id],
+        'url_check_scope': 'Verified against before.json as of that read; Jira delete by --link-id has no atomic URL precondition.',
+        'run_command': [{'cmd': delete}, {'cmd': read_argv(plan, workdir, 'after')}],
+        'next': 'Run the delete once in the same host environment, then the follow-up read regardless of the delete result, then `verify`.',
+    })
 
 
 def cmd_verify(args):
-    workdir = absolute(args.workdir)
+    workdir = existing_workdir(args.workdir)
     plan = load_plan(workdir)
     selection, _ = read_json(workdir / SELECTION, 'selection')
     before = snapshot(workdir, plan, 'before')
@@ -266,15 +395,38 @@ def cmd_verify(args):
     # Every other remote link must come back as the identical provider record, field for field.
     unchanged = {'missing': sorted((i for i in others if i not in after['raw']), key=int),
                  'changed': sorted((i for i in others if i in after['raw'] and after['raw'][i] != others[i]), key=int)}
-    report.update(target_present=selection['link']['id'] in after['raw'], other_links=unchanged,
-                  new_links=sorted(set(after['raw']) - set(others) - {selection['link']['id']}, key=int))
+    target_present = selection['link']['id'] in after['raw']
+    new_links = sorted(set(after['raw']) - set(others) - {selection['link']['id']}, key=int)
+    surviving_same_url = sorted(
+        (link['id'] for link in after['links'] if link['url'] == selection['expected_url']),
+        key=int,
+    )
+    report.update(
+        target_present=target_present,
+        other_links=unchanged,
+        new_links=new_links,
+        surviving_same_url_links=surviving_same_url,
+    )
     if unchanged['missing'] or unchanged['changed']:
         outcome = 'other_links_changed'
-    elif report['target_present']:
-        outcome = {'acknowledged': 'acknowledged_but_present', 'provider_error': 'refused'}.get(
-            write['status'], 'not_removed')
+    elif target_present:
+        if write['status'] == 'acknowledged':
+            outcome = 'acknowledged_but_present'
+        elif write['status'] == 'refused':
+            outcome = 'refused'
+        else:
+            outcome = 'ambiguous_present'
+            report['note'] = ('The link is still present in this read, but the delete outcome is ambiguous; '
+                              'this cannot prove the write will never complete. Do not resend.')
+    elif write['status'] == 'acknowledged':
+        outcome = 'removed'
+        if surviving_same_url:
+            report['note'] = ('The selected link was removed, but other surviving link IDs still carry this URL; '
+                              'do not delete extra records unless the user asks for them.')
     else:
-        outcome = 'removed' if write['status'] == 'acknowledged' else 'absent_without_acknowledgement'
+        outcome = 'absent_without_acknowledgement'
+        report['note'] = ('The link is absent in this read, but this run has no valid acknowledgement '
+                          'and cannot attribute its absence to this request.')
     return emit({**report, 'ok': outcome == 'removed', 'outcome': outcome}, 0 if outcome == 'removed' else 3)
 
 
@@ -283,7 +435,7 @@ def parser():
                                    formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = root.add_subparsers(dest='command', required=True)
     plan = commands.add_parser('plan', help='bind the context and print the first read')
-    plan.add_argument('--workdir', required=True)
+    plan.add_argument('--workdir', required=True, help='new absolute leaf path under a private task-owned parent')
     plan.add_argument('--site', required=True, help='TWG site prefix or cloud ID, e.g. example')
     plan.add_argument('--profile', required=True, help='saved TWG login profile; `default` for the saved default')
     plan.add_argument('--issue', required=True, help='issue key, e.g. DEMO-42')
