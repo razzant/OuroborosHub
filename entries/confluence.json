@@ -1,24 +1,25 @@
 {
   "category": [
-    "documents"
+    "documents",
+    "planning"
   ],
-  "description": "Read, search and author Confluence Cloud pages, comments and attachments using an existing personal or scoped API token.",
-  "digest": "890d0acfb25d40d481684863ce8d1e75cacd4a54908c7aabe2d2f08ec2653a22",
+  "description": "Read, search and author Confluence Cloud pages, comments and attachments with an existing Confluence API token, or inspect and remove one selected Jira web link through a signed-in Atlassian TWG CLI without Confluence credentials.",
+  "digest": "a3c3094c03b155902efe288acdb3dc05d15558324e6d6eea4ab656134e3ddee8",
   "install_specs": [
     "httpx>=0.27.0"
   ],
-  "mark": "Confluence key",
+  "mark": "Confluence key / TWG",
   "name": "confluence",
-  "needs": "needs a Confluence Cloud site and an API token",
+  "needs": "Confluence tools need an API token; Jira web links need only a signed-in TWG CLI",
   "owner": "razzant",
-  "pitch": "Search, read and edit pages",
+  "pitch": "Edit Confluence pages; inspect or remove Jira web links",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/confluence"
   },
-  "title": "Confluence",
+  "title": "Atlassian: Confluence & Jira",
   "type": "extension",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "withdrawn": null
 }
