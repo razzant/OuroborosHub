@@ -32,14 +32,17 @@ reported reset is applied, once.
 from __future__ import annotations
 
 import bisect
+import math
 from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 try:  # the host loads the skill as a package: siblings are relative imports
+    from . import quota_forecast as qf
     from . import quota_joint as qj
     from . import quota_scope
     from . import quota_summary as qs
 except ImportError:  # imported directly from the skill directory (tests)
+    import quota_forecast as qf  # type: ignore[no-redef]
     import quota_joint as qj  # type: ignore[no-redef]
     import quota_scope  # type: ignore[no-redef]
     import quota_summary as qs  # type: ignore[no-redef]
@@ -695,6 +698,8 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     accounts = [a for a in _accounts(state, keys, groups, unit_key, now) if a.subject in current]
     rows: List[Tuple[List[qj.Win], str]] = []
     holds: Counter = Counter()
+    pooled_members: List[qs.Member] = []
+    pooled_blocks: List[Optional[float]] = []
     for acct in accounts:
         bound = [key for key in keys if key == chart.key or acct.members.get(key) is not None]
         w = acct.wins(bound, recent=True)
@@ -702,6 +707,7 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                else "scope_not" if not scope_applies
                else "scope_unknown" if acct.subject in unknown_owners
                else "window_unknown" if any(x.remaining is None for x in w) else "")
+        blk: Optional[float] = None
         if why:
             # The account's future cannot be judged against that window: it
             # is held at its own share of this window (no pace, nothing
@@ -709,7 +715,23 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
             own = w[0]
             w = [qj.Win(own.key, own.remaining, own.reset, None, own.k, own.unit)]
             holds[why] += 1
-        rows.append((w, _own_pace(acct.members.get(chart.key))))
+            blk = math.inf
+        else:
+            # Respect any other binding window of this account that is already
+            # exhausted now: the account cannot burn until that window resets
+            # (or stays held if that window reports no reset).
+            for sibling in w[1:]:
+                if sibling.remaining is not None and sibling.remaining <= qs.RATIO_EPS:
+                    if sibling.reset is None:
+                        blk = math.inf
+                        break
+                    if sibling.reset > now:
+                        blk = sibling.reset if blk is None else max(blk, sibling.reset)
+        own_member = acct.members.get(chart.key)
+        if own_member is not None and own_member.status == "measured":
+            pooled_members.append(own_member)
+            pooled_blocks.append(blk)
+        rows.append((w, _own_pace(own_member)))
     futures: Dict[str, Any] = {}
     for name, pace in (("no_new_use", False), ("recent_pace", True)):
         trajs = [(qj.simulate(w, now, end, pace), w, own) for w, own in rows]
@@ -718,6 +740,24 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
             return None
         classes = [_pace_class(t, w, own) for t, w, own in trajs] if pace else None
         futures[name] = _scenario([(t, w) for t, w, _own in trajs], 0, False, now, end, horizon, classes)
+    if pooled_members:
+        futures["no_new_use"]["verdict"] = qf.build_no_new_use_verdict(pooled_members, now, end)
+        held_reason = ("scope_unknown" if own_unknown
+                       else "scope_not" if not scope_applies
+                       else (holds.most_common(1)[0][0] if holds else "other_limit_spent"))
+        other_labels: List[str] = []
+        for k in keys:
+            if k == chart.key:
+                continue
+            if any(acct.members.get(k) is not None for acct in accounts):
+                lbl = groups[k].label
+                if lbl and lbl not in other_labels:
+                    other_labels.append(lbl)
+        typical_info = qf.estimate_typical_pace(chart, state)
+        futures["typical"] = qf.build_typical_scenario(
+            pooled_members, now, end, horizon, typical_info,
+            blocked_until=pooled_blocks, held_reason=held_reason,
+            other_binding_labels=other_labels)
     return {"key": chart.key, "scenarios": futures, "table": future_table(futures, now),
             "held_to_other_windows": sum(holds.values()),
             "holds": dict(sorted(holds.items())),

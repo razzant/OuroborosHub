@@ -42,6 +42,7 @@ NODE_HISTORY = r"""
   family.accounts[2].quota.reset_credits = {state:'unreadable',count:null,observed_at:observed,
     source:'synthetic-source',label:'reset credits unavailable <script>',reason:'unreadable_label'};
   let env = await boot(view);
+  byFocus(env.root,'scenario:no_new_use').listeners.click[0]({stopPropagation(){}});
   const svgNodes = (cls) => walk(env.root).filter(n => n.tagName==='PATH' && n.getAttribute('class')===cls);
   assert.equal(walk(env.root).filter(n => n.getAttribute('class')==='chart-svg').length,1);
   assert.equal(svgNodes('line-carried').length,1);

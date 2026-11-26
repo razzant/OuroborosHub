@@ -93,27 +93,28 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     const env = await boot((url) => answer(url));
     const block = classes(env.root, 'tl-block')[0];
     assert.ok(block, 'a timeline block under the charted row');
-    // The graph is the plate's continuation: the row of controls (span, future, Combined, model), the plot, the short
-    // legend, then Details — in that order. It has no head of its own and, in the window mode, no headline: both would
-    // say what the plate above already says.
-    const order = ['tl-controls', 'chart-plot', 'calm-legend', 'chart-table'].map((c) => indexOf(block, c));
+    // The graph is the plate's continuation: the row of controls (span, future, Combined, model), the verdict strip,
+    // the plot, the short legend, then Details — in that order. It has no head of its own and, in the window mode, no
+    // headline: both would say what the plate above already says.
+    const order = ['tl-controls', 'tl-verdict', 'chart-plot', 'calm-legend', 'chart-table'].map((c) => indexOf(block, c));
     assert.ok(order.every((i) => i >= 0), 'every part is there: ' + order);
-    assert.deepEqual(order.slice().sort((a, b) => a - b), order, 'calm order, nothing long before the graph');
+    assert.deepEqual(order.slice().sort((a, b) => a - b), order, 'calm order, verdict right above the plot');
     assert.equal(indexOf(block, 'tl-head'), -1, 'no head (and no line under it) in the graph');
     assert.equal(indexOf(block, 'tl-hero'), -1, 'the window mode draws no headline: the plate has those figures');
-    // Everything the calm view folds away lives under Details: the schedule, the long legend, the joint paragraph.
+    // Everything the calm view folds away lives under Details: the long legend, the joint paragraph;
+    // with only 6h history, unknown Typical draws NO future curve, NO checkpoints, and NO schedule.
     const details = classes(block, 'chart-table')[0];
-    for (const cls of ['schedule', 'chart-legend']) {
-      const nodes = classes(block, cls);
-      assert.ok(nodes.length, cls + ' is kept');
-      assert.ok(nodes.every((n) => walk(details).includes(n)), cls + ' only under Details');
-    }
+    assert.ok(classes(block, 'chart-legend').length && classes(block, 'chart-legend').every((n) => walk(details).includes(n)), 'chart-legend only under Details');
+    assert.equal(classes(block, 'schedule').length, 0, 'unknown Typical shows no fake schedule');
+    assert.equal(classes(block, 'checkpoints').length, 0, 'unknown Typical shows no fake checkpoints');
+    assert.ok(!walk(block).some((n) => n.tagName === 'PATH' && String(n.getAttribute('class') || '').includes('line-scenario')),
+      'unknown Typical draws no future line');
     assert.ok(classes(block, 'tl-joint').every((n) => walk(details).includes(n)), 'combined figures only under Details');
     // The short legend names only what is drawn, in few words.
     const legend = text(classes(block, 'calm-legend')[0]);
     assert.ok(legend.length <= 140, legend);
     assert.match(legend, /recorded/);
-    assert.match(legend, /no new use: a condition, not a forecast/);
+    assert.match(legend, /typical: not enough 48h history yet — not drawn/);
     // One curve: nothing in the block is hatched.
     assert.ok(!walk(block).some((n) => n.tagName === 'PATTERN'));
     // One plate beside the rail of rings (not a stack of rows): one strip, of the picked limit; the rings are a group of pressed buttons.
@@ -129,8 +130,16 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     assert.ok(!walk(block).some((n) => n.getAttribute('role') === 'tablist' || n.getAttribute('role') === 'tab'), 'no tablist, not even of one');
     const row = classes(block, 'tl-controls')[0];
     const inRow = walk(row).filter((n) => n.tagName === 'BUTTON').map((n) => n.getAttribute('data-focus'));
-    assert.deepEqual(inRow, ['horizon:24h', 'horizon:7d', 'scenario:no_new_use', 'scenario:recent_pace', 'graph:joint', 'tl-model'],
-      'the row: the span, the future, Combined, and the model choice last');
+    assert.deepEqual(inRow, ['horizon:24h', 'horizon:7d', 'scenario:typical', 'scenario:no_new_use', 'graph:joint', 'tl-model'],
+      'the row: the span, the future (Typical / No new use), Combined, and the model choice last');
+    // Switching to No new use draws the refill-only line, legend, and folded schedule under Details.
+    click(env, 'scenario:no_new_use');
+    await sleep();
+    const blockAfter = classes(env.root, 'tl-block')[0];
+    const detailsAfter = classes(blockAfter, 'chart-table')[0];
+    assert.match(text(classes(blockAfter, 'calm-legend')[0]), /no new use · refill only/);
+    assert.ok(classes(blockAfter, 'schedule').length && classes(blockAfter, 'schedule').every((n) => walk(detailsAfter).includes(n)),
+      'schedule stands under Details for No new use');
     env.disposeHooks[0]();
   } else if (mode === 'switch') {
     const env = await boot((url) => answer(url));
@@ -330,84 +339,94 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     assert.deepEqual(groups.map((s) => s.getAttribute('aria-label')), ['Span', 'Future']);
     groups.forEach((s, i) => assert.ok(s.childNodes[0] === labels[i], 'the caption comes first in its segment'));
     assert.deepEqual(walk(row).filter((n) => n.tagName === 'BUTTON').map((n) => n.getAttribute('data-focus')),
-      ['horizon:24h', 'horizon:7d', 'scenario:no_new_use', 'scenario:recent_pace', 'graph:joint', 'tl-model']);
+      ['horizon:24h', 'horizon:7d', 'scenario:typical', 'scenario:no_new_use', 'graph:joint', 'tl-model']);
     env.disposeHooks[0]();
   } else if (mode === 'idle') {
-    // A pace nobody has measured draws what No new use draws: Recent pace is muted, says why, and still works.
-    const PHRASE = 'No account has a measured pace yet, so this line is the same as No new use';
+    // When Typical cannot estimate a pooled 48h burn (insufficient history, held, unavailable, or Combined),
+    // it draws NO future line or checkpoints, marks its button idle with why, and still works.
+    const en = I18N_ANSWER.en;
+    const PHRASE = en['chart.typical_idle_title'];
     const clone = (v) => JSON.parse(JSON.stringify(v));
-    // where: the scenarios the plot draws, the window's or Combined's (Combined has none in the fixture: it gets a copy).
-    const withPace = (view, where, atPace) => {
+    const withTypical = (view, status, rate = null) => {
       const v = clone(view);
-      const an = v.reserve.chart.analytics;
-      if (where === 'joint' && !an.joint.scenarios) an.joint.scenarios = clone(an.window.scenarios);
-      const scenarios = (where === 'window' ? an.window : an.joint).scenarios;
-      scenarios.recent_pace.at_pace = atPace;
-      if (where === 'window') v.reserve.chart.scenarios = clone(scenarios);
+      const targets = [v.reserve.chart.scenarios, v.reserve.chart.analytics.window.scenarios];
+      for (const scs of targets) {
+        const live = status === 'ok' || status === 'zero';
+        scs.typical.status = status;
+        scs.typical.rate_per_hour = rate;
+        scs.typical.at_pace = status === 'ok' ? scs.typical.accounts : 0;
+        scs.typical.valid_hours = status === 'insufficient' ? 4.0 : 24.0;
+        scs.typical.line = live ? scs.no_new_use.line : [];
+        scs.typical.checkpoints = live ? scs.no_new_use.checkpoints : [];
+        scs.typical.schedule = live ? scs.no_new_use.schedule : [];
+        if (scs.typical.verdict) {
+          scs.typical.verdict.status = status;
+          scs.typical.verdict.rate_per_hour = rate;
+          scs.typical.verdict.valid_hours = scs.typical.valid_hours;
+          scs.typical.verdict.state = status === 'ok' ? 'lasts' : status === 'zero' ? 'zero_pace' : status;
+        }
+      }
       return v;
     };
-    const pace = (env) => byFocus(env.root, 'scenario:recent_pace');
+    const typ = (env) => byFocus(env.root, 'scenario:typical');
     const idle = (node) => String(node.className).split(/\s+/).includes('idle');
     const legend = (env) => text(classes(env.root, 'calm-legend')[0]);
+    const hasLine = (env) => walk(env.root).some((n) => n.tagName === 'PATH' && String(n.getAttribute('class') || '').includes('line-scenario'));
 
-    let env = await boot(() => withPace(fx.default, 'window', 0));
-    let b = pace(env);
+    let env = await boot(() => withTypical(fx.default, 'insufficient', null));
+    let b = typ(env);
+    assert.equal(b.getAttribute('aria-pressed'), 'true', 'Typical is the default');
     assert.ok(idle(b) && String(b.className).split(/\s+/).includes('seg-opt'), b.className);
     assert.equal(b.getAttribute('data-idle'), 'true');
     assert.equal(b.title, PHRASE);
-    assert.equal(b.getAttribute('aria-label'), 'Recent pace — ' + PHRASE, 'the same phrase, appended to the name');
-    assert.equal(text(b), 'Recent pace', 'not hidden and not renamed');
+    assert.equal(b.getAttribute('aria-label'), 'Typical — ' + PHRASE, 'the same phrase, appended to the name');
+    assert.equal(text(b), 'Typical', 'not hidden and not renamed');
+    assert.ok(!hasLine(env), 'insufficient Typical draws NO future line');
     const calm = byFocus(env.root, 'scenario:no_new_use');
     assert.ok(!idle(calm) && calm.getAttribute('data-idle') === null && calm.getAttribute('aria-label') === null);
-    assert.equal(calm.title, 'Every account read now keeps its share and refills once at its next reported reset');
-    assert.match(legend(env), /no new use: a condition, not a forecast/);
-    // The button works: it picks the line, and the legend says that line is the same as no new use.
-    click(env, 'scenario:recent_pace');
-    await sleep();
-    b = pace(env);
-    assert.equal(b.getAttribute('aria-pressed'), 'true');
-    assert.ok(idle(b), 'chosen it is still the idle one');
-    assert.match(legend(env), /recent pace: no measured pace yet — same as no new use/);
-    assert.doesNotMatch(legend(env), /a condition, not a forecast/);
+    assert.equal(calm.title, en['chart.future_title_no_new_use']);
+    assert.match(legend(env), /typical: not enough 48h history yet — not drawn/);
     assert.ok(legend(env).length <= 140, legend(env));
+    // Switching to No new use draws refills only without changing Typical's idle cue.
+    click(env, 'scenario:no_new_use');
+    await sleep();
+    b = typ(env);
+    assert.equal(byFocus(env.root, 'scenario:no_new_use').getAttribute('aria-pressed'), 'true');
+    assert.ok(idle(b), 'unselected it is still the idle one');
+    assert.ok(hasLine(env), 'No new use draws its refill-only line');
+    assert.match(legend(env), /no new use · refill only/);
     assert.ok(walk(env.root).some((n) => n.getAttribute('class') === 'chart-svg'), 'the plot stays');
     env.disposeHooks[0]();
 
-    // A measured pace: nothing muted, the old title and legend.
-    env = await boot(() => withPace(fx.default, 'window', 2));
-    b = pace(env);
+    // A qualified 48h pooled typical pace: nothing muted, blue typical legend with rate.
+    env = await boot(() => withTypical(fx.default, 'ok', 0.125));
+    b = typ(env);
     assert.ok(!idle(b) && b.getAttribute('data-idle') === null && b.getAttribute('aria-label') === null);
-    assert.equal(b.title, 'The accounts with a measured recent pace keep it; the others are held');
-    click(env, 'scenario:recent_pace');
-    await sleep();
-    assert.match(legend(env), /recent pace: a condition, not a forecast/);
-    assert.doesNotMatch(legend(env), /no measured pace yet/);
-    env.disposeHooks[0]();
-
-    // Combined reads the scenarios it draws, not the mode: a measured window beside an idle Combined, and the other way round.
-    env = await boot(() => withPace(withPace(fx.default, 'window', 2), 'joint', 0));
-    assert.ok(!idle(pace(env)), 'the window draws a measured pace');
+    assert.equal(b.title, en['chart.future_title_typical']);
+    assert.ok(hasLine(env), 'live Typical draws its curve');
+    assert.match(legend(env), /48h typical · 0\.125 win\/h/);
+    assert.doesNotMatch(legend(env), /not drawn/);
+    // Combined has no pooled 48h typical forecast: switching to Combined marks Typical idle, draws no line, and explains why.
     click(env, 'graph:joint');
     await sleep();
-    assert.ok(idle(pace(env)), 'Combined draws none');
-    assert.equal(pace(env).getAttribute('data-idle'), 'true');
-    click(env, 'scenario:recent_pace');
-    await sleep();
-    assert.match(legend(env), /recent pace: no measured pace yet/);
+    assert.ok(idle(typ(env)), 'Combined draws no unverified pooled 48h forecast');
+    assert.equal(typ(env).getAttribute('data-idle'), 'true');
+    assert.equal(typ(env).title, en['chart.typical_joint_title']);
+    assert.ok(!hasLine(env), 'Combined with Typical selected draws NO future line');
+    assert.match(legend(env), /typical: unavailable for Combined — not drawn/);
+    assert.match(text(classes(env.root, 'tl-verdict')[0]), /No pooled 48h typical forecast for Combined/);
+    // Back on the single window, Typical is active again.
     click(env, 'graph:joint');
     await sleep();
-    assert.ok(!idle(pace(env)), 'back on the window, the pace is measured again');
-    env.disposeHooks[0]();
-    env = await boot(() => withPace(withPace(fx.default, 'window', 0), 'joint', 3));
-    assert.ok(idle(pace(env)), 'the window draws none');
-    click(env, 'graph:joint');
-    await sleep();
-    assert.ok(!idle(pace(env)), 'Combined draws a measured pace');
-    assert.equal(pace(env).getAttribute('data-idle'), null);
+    assert.ok(!idle(typ(env)), 'back on the window, Typical is live again');
+    assert.ok(hasLine(env), 'back on the window, Typical draws its curve again');
+    assert.match(legend(env), /48h typical · 0\.125 win\/h/);
     env.disposeHooks[0]();
   } else if (mode === 'how') {
     // Details, facts first: the method is one fold more, "How it is counted", and keeps its own state through a redraw.
     const env = await boot((url) => answer(url));
+    click(env, 'scenario:no_new_use');
+    await sleep();
     const outer = () => classes(env.root, 'chart-table')[0];
     const how = () => classes(env.root, 'chart-how')[0];
     assert.equal(classes(env.root, 'chart-how').length, 1, 'one fold for the method');

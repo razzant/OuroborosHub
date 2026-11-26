@@ -298,6 +298,9 @@ class HistoryView:
     # between two sightings of one source that did not see it is a recorded
     # hole in that source's watch, whichever writer stored the runs.
     sweeps: List[float] = field(default_factory=list)
+    # Parallel ok flags for ``sweeps`` when populated by HistoryStore.read();
+    # None keeps legacy callers (which pass good sweeps only) working as before.
+    sweep_ok: Optional[List[bool]] = None
     sweeps_from: Optional[float] = None
     collecting_since: Optional[float] = None
     oldest_at: Optional[float] = None
@@ -2061,6 +2064,7 @@ class SummaryState:
     groups: List[GroupCalc]
     view: Optional[HistoryView]
     now: float
+    typical_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 def rate_since(now: float) -> float:
@@ -2075,6 +2079,22 @@ def prepare(payload: Any, now: float,
     return norm, resolve_groups(norm, now)
 
 
+def _forecast_mod():
+    try:
+        from . import quota_forecast as qf
+    except ImportError:
+        import quota_forecast as qf  # type: ignore[no-redef]
+    return qf
+
+
+def chart_history_since(now: float, horizon: str = "24h") -> float:
+    """The oldest last sighting a chart read needs: at least the chart's own
+    horizon and the 48-hour typical-pace lookback plus one trailing rate hour."""
+    lookback = _forecast_mod().TYPICAL_LOOKBACK_SEC
+    span = max(HORIZONS.get(horizon, HORIZONS["24h"]), lookback + RATE_WINDOW_SEC)
+    return now - span - 2 * SIGHTING_GAP_SEC
+
+
 def history_requests(groups: Sequence[GroupCalc], salt: str, now: float,
                      chart: Optional[GroupCalc] = None,
                      horizon: str = "24h",
@@ -2083,9 +2103,10 @@ def history_requests(groups: Sequence[GroupCalc], salt: str, now: float,
 
     Every measured account needs the last hour for its pace; every account
     the charted limit may apply to — whatever its reading now, and with
-    ``norm`` each roster account that reports none of it — needs the whole
-    horizon behind ``now``, so the record drawn does not change with what
-    is fresh at this moment.
+    ``norm`` each roster account that reports none of it — needs at least
+    the chart's horizon and the 48-hour typical-pace lookback behind ``now``,
+    so the record drawn and the typical pace do not change with what is fresh
+    at this moment or with the 24 h / 7 d span choice.
     """
     if not salt:
         return {}
@@ -2094,7 +2115,7 @@ def history_requests(groups: Sequence[GroupCalc], salt: str, now: float,
         for member in calc.measured:
             wanted[(pseudo_id(salt, member.harness, member.subject_id), calc.key)] = rate_since(now)
     if chart is not None:
-        since = now - HORIZONS.get(horizon, HORIZONS["24h"]) - 2 * SIGHTING_GAP_SEC
+        since = chart_history_since(now, horizon)
         for member in chart.members:
             wanted[(pseudo_id(salt, member.harness, member.subject_id), chart.key)] = since
         for harness, subject_id in (_roster_missing(norm, chart) if norm is not None else []):
@@ -3011,14 +3032,22 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
             "no estimate line is drawn."
         )
 
-    # 0.8.0: the two futures the widget draws, both of the accounts read now
-    # — the row's figure, from its own value at now — and both to the
-    # horizon: no new use, and the qualified accounts at their recent pace
-    # with the others held. With no current reading there is no future.
+    # The futures drawn from the accounts read now — the row's figure, from its
+    # own value at now — to the horizon: the 48-hour typical pooled pace, no new
+    # use (refills only), and legacy recent_pace kept for API compatibility.
+    # With no current reading there is no future.
+    qf = _forecast_mod()
     scenarios = None
     if members:
-        scenarios = {"no_new_use": _scenario(members, [], now, end, horizon),
-                     "recent_pace": _scenario(members, known, now, end, horizon)}
+        typical_info = qf.estimate_typical_pace(calc, state)
+        no_new_use_sc = _scenario(members, [], now, end, horizon)
+        no_new_use_sc["verdict"] = qf.build_no_new_use_verdict(members, now, end)
+        typical_sc = qf.build_typical_scenario(members, now, end, horizon, typical_info)
+        scenarios = {
+            "typical": typical_sc,
+            "no_new_use": no_new_use_sc,
+            "recent_pace": _scenario(members, known, now, end, horizon),
+        }
 
     def at_time(line: Optional[List[List[float]]], moment: float) -> Optional[float]:
         if not line:
@@ -3052,16 +3081,24 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
                       "sighting": True,
                       "event": ("seen at this sweep only" if point[1] is not None
                                 else "sources disagree at this sweep")})
-    # The scenarios the widget draws (``scenario_no_new_use``,
-    # ``scenario_recent_pace``) are read off their own functions just after
-    # anything at that moment — after the last reset of an event, so a row
-    # says the same as the schedule. ``no_new_use`` and ``recent_pace`` stay
-    # the older lines, kept for compatibility.
-    totals = ({"scenario_no_new_use": _scenario_functions(members, [], now)[1],
-               "scenario_recent_pace": _scenario_functions(members, known, now)[1]} if members else {})
+    # The scenarios the widget draws (``scenario_typical``, ``scenario_no_new_use``,
+    # plus ``scenario_recent_pace`` for compatibility) are read off their own
+    # functions just after anything at that moment — after the last reset of an
+    # event, so a row says the same as the schedule. ``no_new_use`` and
+    # ``recent_pace`` stay the older lines, kept for compatibility.
+    totals: Dict[str, Any] = {}
+    if members and scenarios is not None:
+        typical_line = scenarios["typical"]["line"]
+        totals = {
+            "scenario_typical": (lambda moment, right, _line=typical_line: qf.eval_polyline(_line, moment, right))
+            if typical_line else None,
+            "scenario_no_new_use": _scenario_functions(members, [], now)[1],
+            "scenario_recent_pace": _scenario_functions(members, known, now)[1],
+        }
 
     def scenario_cells(moment: float) -> Dict[str, Optional[float]]:
-        return {name: round(total(moment, True), 2) for name, total in totals.items()}
+        return {name: (None if total is None else round(total(moment, True), 2))
+                for name, total in totals.items()}
 
     table.append(dict({"at": iso(now), "observed": round(current, 2) if members else None,
                        "no_new_use": round(current, 2) if members else None,
@@ -3167,12 +3204,15 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
             "Membership changes break the line and are not consumption. The current figure and "
             "future use only fresh readings; carry never enters measured pace.",
             history["membership_note"],
+            "Typical: continues the 48-hour observed pooled hourly burn rate "
+            "(total comparable burn of this limit over the preceding 48 hours "
+            "divided by valid measured time, requiring at least 12 valid hours "
+            "and pool coverage) across the current accounts, with each account "
+            "refilling to a full window once at its next reported reset. When history is "
+            "insufficient, unavailable or held, no Typical line is drawn. "
+            "A conditional scenario, not a dispatch guarantee.",
             "No new use: each account keeps its current reading and refills to "
             "a full window only at its own next reported reset.",
-            "Recent pace: every account read now, the ones whose pace "
-            "qualified continuing it (refilled once at their next reported reset, "
-            "then at the same pace), the others held at their share and refilled "
-            "at their reset. A condition, not an estimate of use nobody observed.",
             "The scenarios assume no additional unreported resets: only each "
             "account's next reported reset is applied, so a limit shorter than "
             "the horizon is not refilled again in them, and an account with no "

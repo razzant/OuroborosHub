@@ -1,7 +1,7 @@
 ---
 name: claudexor_quotas
 description: "Claudexor quota dashboard and read-only quota_summary: measured reserve, reported resets, watched pace and dated resources. Eligible hosts may show a brief advisory snapshot. No automatic provider refresh or routing changes."
-version: 0.13.2
+version: 0.14.0
 type: extension
 runtime: python3
 entry: plugin.py
@@ -34,7 +34,7 @@ ui_tab:
     page: costs
 ---
 
-# Claudexor Quotas (v0.13.2)
+# Claudexor Quotas (v0.14.0)
 
 The composer quota chip opens this widget. `GET chip` uses the same passive
 cached read as `quotas?reuse=1&chart=0`; it never requests provider refresh.
@@ -83,6 +83,45 @@ it (`api.get_state_dir()`):
 - `quota_collector.lock` — an empty lease file, never removed while the skill
   runs. Its OS lock serializes collector cycles across unload/reload; it holds
   no account or quota data. SQLite may also keep its standard WAL/SHM files.
+
+## What changed in 0.14.0
+
+- **48-hour pooled Typical forecast (default) and No new use only.** The
+  timeline's Future control offers exactly two choices: **Typical** (`typical`,
+  default) and **No new use** (`no_new_use`). Typical lives in its own module
+  (`quota_forecast.py`) and computes the selected limit pool's observed
+  48-hour burn rate: total comparable positive burn over the preceding 48 hours
+  divided by valid measured pool time (requiring at least 12 valid hours where
+  both the current pool and active historical cohort meet 80% coverage, i.e.
+  100% for 1–4 accounts and >=80% for 5+ accounts, with no 5-account minimum).
+  Comparable transitions require the same account, source, plan and reset cycle
+  (tolerating reset jitter within `RESET_TOLERANCE_SEC` without counting real
+  resets, plan changes, ratio drops, corrections, gaps, failed sweeps, frozen
+  single-observation caches or source disagreements as burn or idle time, and
+  deduplicating multi-source accounts). One pooled simulation drives the chart
+  line, the pre-first-reset verdict, Details checkpoints, reset schedule and
+  depletion instants so demand continues across remaining accounts when one
+  hits zero while each account refills at most once at its next reported reset.
+  Both `24 h` and `7 days` spans read the full 48-hour history window so the
+  typical rate and verdict do not depend on the selected span.
+- **Pre-first-reset verdict strip and honest unsupported states.** Directly
+  above the chart, a compact verdict strip names the selected limit, units
+  (`win`), time, and reserve before the first reported reset (conditional
+  estimate, never a dispatch guarantee), and surfaces open binding-window
+  caveats with Details closed whenever another governing limit (such as a
+  5-hour window) can still stop accounts earlier. When runnable (unblocked)
+  reserve hits zero while another spent limit temporarily holds the remaining
+  selected-window share, the strip reports the blocked blackout window and
+  marks the exact curve point rather than promising uninterrupted reserve. When
+  Typical is unknown (fewer than 12 valid hours, history unavailable, or held)
+  or when **Combined** (`joint`) is active, Typical draws **no** numeric future
+  line, checkpoints or schedule under Typical's name and explains why, while
+  **No new use** remains a working refill-only option. Combined preserves all
+  existing measured figures.
+- **Separation of surfaces.** The trailing-hour watched `recent_pace` in
+  `quota_summary`, `quota_context` snapshots, the collector, routing and the
+  Details panel remains untouched; legacy `scenarios.recent_pace` is kept in
+  the backend JSON for API compatibility.
 
 ## What changed in 0.13.2
 
@@ -1033,14 +1072,24 @@ fitted to the lines.
 - *the future* (`scenarios`) — of the accounts read now, the row's own
   figure (`current_windows`), restricted ones included (measured quota is not
   a dispatch verdict), drawn from now to the horizon:
-  - *no new use* (`no_new_use`, the default) — each account keeps its
-    current share and refills to one full window once, at its own next
-    reported reset;
-  - *recent pace* (`recent_pace`) — the accounts whose own pace qualified
-    continue their observed net change (staying at zero once they reach it),
-    refill once at their next reported reset and then continue it from full;
-    the other accounts are held as with no new use (`at_pace` of `accounts`,
-    `held`). A condition, not an estimate of use nobody observed.
+  - *typical* (`typical`, the default) — continues the selected limit pool's
+    48-hour observed pooled hourly burn rate (total comparable positive burn
+    over the preceding 48 hours divided by valid measured pool time, requiring
+    at least 12 valid hours and 80% pool coverage — 100% for 1–4 accounts)
+    across the currently measured accounts so pooled demand shifts onto
+    remaining accounts when one hits zero, refilling each account once at its
+    next reported reset. When fewer than 12 valid hours exist, history is
+    unavailable, or all accounts are held by scope or another unknown/unreset
+    binding limit, Typical draws no numeric future line, checkpoints or
+    schedule and explains why (a measured zero with sufficient pool coverage
+    and non-exhausted capacity is distinct and drawn as 0.000 win/h). Combined
+    (`joint`) emits no `typical` scenario and draws no Typical line; switching
+    to *no new use* draws refills only;
+  - *no new use* (`no_new_use`) — each account keeps its current share and
+    refills to one full window once, at its own next reported reset;
+  - *recent pace* (`recent_pace`, kept in the chart payload for API
+    compatibility and no longer offered as a separate button) — the legacy
+    per-account trailing-hour scenario.
 
   An account with no reported reset is never refilled (`no_reset`), and **no
   additional unreported resets** are assumed: only each account's next
@@ -1308,10 +1357,11 @@ exhausted window is never reported as the default login's.
   cycles allow, and no timeline. It is a cycle's allowance, not a window, and
   never a statement that a request can run.
 - **The timeline** under the selected row: its span (24 h, 7 days) and
-  future (No new use, Recent pace) controls; the chart; then the legend
-  with each line's accounts and the future's assumptions, the checkpoints,
-  the first two reported resets (the rest on request), and "Details, notes
-  and data" folded. See "The timeline" above.
+  future (Typical, No new use) controls; the verdict strip; the chart (with
+  depletion marker when Typical empties inside the span); then the calm legend,
+  and "Details, notes and data" folded (full legend, checkpoints, reported
+  resets, limit details including trailing-hour watched pace, caveats and
+  table). See "The timeline" above.
 - **One selected account**: a bar, a step or a row of the account list selects
   it; its card (above) stands beside the bars. "Account details" unfolds its
   check, login kind and quota age, its verdict, a line per limit (share left,

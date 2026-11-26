@@ -594,9 +594,11 @@ class HistoryStore:
                 # Read before the runs: a sweep committed in between can only
                 # make a run newer than this list, never older.
                 view.sweeps_from = min(float(since) for since in wanted.values())
-                view.sweeps = [float(at) for (at,) in conn.execute(
-                    "SELECT at FROM sweep WHERE at>=? ORDER BY at DESC LIMIT ?",
-                    (view.sweeps_from, MAX_READ_SWEEPS))][::-1]
+                sweep_rows = conn.execute(
+                    "SELECT at, ok FROM sweep WHERE at>=? ORDER BY at DESC LIMIT ?",
+                    (view.sweeps_from, MAX_READ_SWEEPS)).fetchall()[::-1]
+                view.sweeps = [float(at) for at, _ok in sweep_rows]
+                view.sweep_ok = [bool(ok) for _at, ok in sweep_rows]
                 if len(view.sweeps) >= MAX_READ_SWEEPS:
                     # The newest are kept; nothing is claimed before them.
                     view.sweeps_from = view.sweeps[0]

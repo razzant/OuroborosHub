@@ -1521,7 +1521,7 @@ def reserve_view(
             requests, now,
             latest=lambda salt: qs.latest_requests(norm, groups, salt),
             roster=lambda salt: qs.roster_requests(norm, salt),
-            chart_series=(chart_for.key, now - qs.HORIZONS.get(horizon, qs.HORIZONS["24h"]))
+            chart_series=(chart_for.key, qs.chart_history_since(now, horizon))
             if chart_for is not None else None,
         )
 
