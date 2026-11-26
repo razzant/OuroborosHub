@@ -1,0 +1,20 @@
+{
+  "category": [
+    "messaging",
+    "business"
+  ],
+  "description": "How to add VK WorkSpace's official MCP server to Ouroboros and sign in with a company account: an assistant works with the organization's VK WorkSpace data within the user's own access rights. Needs the paid Assistant option on the Extended or Individual plan.",
+  "digest": "f144f9af3014b2fb8298c9cbc4cda50abaf9ce045d363dce17c5e0c5add17855",
+  "name": "vk-workspace-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/vk-workspace-mcp-guide"
+  },
+  "title": "VK WorkSpace MCP: a company's workspace data",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person whose organization uses VK WorkSpace wants Ouroboros to search or use the company's workspace data, or asks how to connect VK WorkSpace's MCP server. Needs a company account and the Assistant option enabled by the organization's administrator.",
+  "withdrawn": null
+}

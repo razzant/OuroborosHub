@@ -1,0 +1,20 @@
+{
+  "category": [
+    "city",
+    "search"
+  ],
+  "description": "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and booking links, and monthly price forecasts for a destination. Free, no account, read-only.",
+  "digest": "975a7459972878b352ff961ab9f8b89aeb3306b91c4ef0bb2429326fa2a25153",
+  "name": "trivago-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/trivago-mcp-guide"
+  },
+  "title": "trivago MCP: hotel search and price trends",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants to find or compare hotels, check prices for dates or plan when to travel, and asks to use trivago or to connect its MCP server. Not for booking or payment: trivago returns links to the booking sites.",
+  "withdrawn": null
+}

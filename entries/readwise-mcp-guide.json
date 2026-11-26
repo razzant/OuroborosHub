@@ -1,0 +1,20 @@
+{
+  "category": [
+    "documents",
+    "search"
+  ],
+  "description": "How to add Readwise's official MCP server to Ouroboros and sign in: search and read your highlights and Reader documents, get the Daily Review, save documents, tag, move, annotate and edit highlights. A paid Readwise plan after a 30-day trial.",
+  "digest": "ac766cbbab25d1545179cc295f2758753b3b1e4aa71c1b67d296fa2f10efa30d",
+  "name": "readwise-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/readwise-mcp-guide"
+  },
+  "title": "Readwise MCP: highlights and Reader library",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants Ouroboros to search or use their Readwise highlights or Reader library, save something to Reader, or asks how to connect Readwise's MCP server. Needs the person's Readwise account and sign-in.",
+  "withdrawn": null
+}

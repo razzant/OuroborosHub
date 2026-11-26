@@ -1,0 +1,20 @@
+{
+  "category": [
+    "search",
+    "documents"
+  ],
+  "description": "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. Token from GARANT's servicing organization.",
+  "digest": "f7663d2ddd3e9634b01e95c930364164b178fffcd03f4c31df0c6d20087cdc2b",
+  "name": "garant-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/garant-mcp-guide"
+  },
+  "title": "GARANT MCP: Russian legal database",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person with GARANT API access wants Ouroboros to search or cite Russian legal documents and court practice in the GARANT system, or asks how to connect GARANT's MCP server. Needs a GARANT API token.",
+  "withdrawn": null
+}

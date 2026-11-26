@@ -1,0 +1,20 @@
+{
+  "category": [
+    "business",
+    "search"
+  ],
+  "description": "How to add CoinMarketCap's official MCP server to Ouroboros: crypto quotes, market and derivatives metrics, technical analysis, news, narratives, holder data and hosted analysis skills. Sign in or use a free API key; market data only.",
+  "digest": "7e9947fcb307ecb430e7a81d121b0b38cf67c965988be50a11113f69e15510dd",
+  "name": "coinmarketcap-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/coinmarketcap-mcp-guide"
+  },
+  "title": "CoinMarketCap MCP: crypto market data",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants current crypto prices, market overviews, technical indicators, news or on-chain holder data from CoinMarketCap, or asks to connect its MCP server. Not for trading: the server cannot place orders or move funds.",
+  "withdrawn": null
+}

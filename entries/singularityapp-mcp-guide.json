@@ -1,0 +1,19 @@
+{
+  "category": [
+    "planning"
+  ],
+  "description": "How to add SingularityApp's official MCP server to Ouroboros and sign in: read, create and edit tasks, checklists, projects, habits, tags and Kanban boards, with an optional batch mode. MCP is marked for the Pro and Elite plans.",
+  "digest": "755068d7aef9be8744b066bc063f911356ca324d33f40b843eaf4323c2e37ee3",
+  "name": "singularityapp-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/singularityapp-mcp-guide"
+  },
+  "title": "SingularityApp MCP: tasks, projects and habits",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants Ouroboros to read or manage their SingularityApp tasks, projects, habits or Kanban boards, or asks how to connect SingularityApp's MCP server. Needs the person's SingularityApp account and sign-in.",
+  "withdrawn": null
+}
