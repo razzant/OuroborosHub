@@ -101,8 +101,9 @@ address lists its own after sign-in or with a key:
   exceeded.
 - Direct tools report USD values over fixed time windows, per the server.
 - CoinMarketCap's licence on Basic through Professional allows commercial use for one
-  product with up to 100,000 users and forbids reselling the data as a standalone
-  service.
+  product with up to 100,000 users, forbids redistributing or reselling the data as a
+  standalone service, and requires the data to be part of a larger product designed for
+  end users using it for personal, non-commercial purposes.
 
 ## Sources
 

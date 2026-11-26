@@ -4,7 +4,7 @@
     "documents"
   ],
   "description": "How to add GARANT's official MCP server to Ouroboros with an API token: search Russian legislation and court practice in the GARANT system, read and export documents, track changes, add links to legal references in a text and read the PRIME news feed. For GARANT subscribers with Garant Connect (API) access: no separate MCP price; Garant Connect is sold inside regional LegalTech service packages, and the servicing organization issues the token.",
-  "digest": "dee6bd70a98b20359a5724306e561190c25a4d4fdf9c9deec64192bd0f5d6cba",
+  "digest": "78b80d701540978019d88c99797e87695cd56accdbb182c13d3a32bf391ddbc5",
   "name": "garant-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

@@ -31,10 +31,13 @@ below; the tools then come from RuSender's server.
   registers itself automatically. The sign-in asks for read and write access to
   contacts, campaigns, templates, senders, domains, webhooks, files, segments and
   sending keys, and for sending and reading email (`email.send`, `email.read`).
-- Plans, per RuSender's tariffs page: for campaigns, Free costs 0 ₽ for up to 500
-  contacts and 2,000 emails a month, and Premium and uCombo are priced by the number of
-  contacts. For transactional email through the API or SMTP, Free API+SMTP costs 0 ₽ for
-  100 sends a month, and Premium API+SMTP is priced by sends a month.
+- Plans, per RuSender's tariffs page (checked 2026-11-26): for campaigns, Free costs 0 ₽
+  for up to 500 contacts and 2,000 emails a month, while Premium and uCombo are priced
+  by the number of contacts (for example, at 1,000 contacts: 990 ₽ a month for Premium
+  or 1,390 ₽ a month for uCombo billed monthly, or 792 ₽ and 1,112 ₽ a month billed
+  yearly). For transactional email through the API or SMTP, Free API+SMTP costs 0 ₽ for
+  100 sends a month, and Premium API+SMTP is priced by sends a month (for example, 400 ₽
+  a month for 6,000 sends billed monthly, or 320 ₽ a month billed yearly).
 - Language: Russian service and documentation.
 
 ## Add it to Ouroboros
@@ -76,11 +79,15 @@ they give a type: reading, changing data, or sending and irreversible.
   by contrast, removing a contact from one list or from all lists keeps the contact
   record), unsubscribe or resubscribe, statistics and send history.
 - Lists, segments and list variables: lists can be read, created, edited and deleted,
-  with contact import (up to 1,000 contacts per call), adding, removing and moving
-  contacts between lists; segments can be read, created and have their conditions edited
-  (updating conditions replaces the previous list, and no delete tool is published); list
-  variables can be read, created, edited and permanently deleted (`public_variables_delete`
-  also deletes all of the variable's values).
+  with contact import either directly (`public_lists_contacts_import`, up to 1,000
+  contacts per call) or from a CSV, TSV, TXT or XLSX file via an upload session
+  (`public_contacts_file_imports_create` for a preview of the first rows, then
+  `public_contacts_file_imports_start` after confirming column mapping, and
+  `public_contacts_file_imports_get_by_id` for progress and results), plus adding,
+  removing and moving contacts between lists; segments can be read, created and have
+  their conditions edited (updating conditions replaces the previous list, and no delete
+  tool is published); list variables can be read, created, edited and permanently deleted
+  (`public_variables_delete` also deletes all of the variable's values).
 - Transactional email: send one email at once with HTML, text or a saved template, and
   read sending history and delivery details. Sending keys for verified domains: list,
   read, create (active after moderation), rename or set as default, read statistics, and

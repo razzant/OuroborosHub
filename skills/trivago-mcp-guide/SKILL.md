@@ -1,11 +1,11 @@
 ---
 name: trivago-mcp-guide
 title: "trivago MCP: hotel search and price trends"
-description: "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and booking links, and monthly price forecasts for a destination. For anyone planning a stay; free, no account, read-only."
+description: "How to add trivago's official MCP server to Ouroboros: hotel search across booking sites with prices and deal links on trivago, and monthly price forecasts for a destination. For anyone planning a stay; free, no account, read-only."
 version: 0.1.0
 type: instruction
 permissions: []
-when_to_use: "A person wants to find or compare hotels, check prices for dates or plan when to travel, and asks to use trivago or to connect its MCP server. Not for booking or payment: trivago returns links to the booking sites."
+when_to_use: "A person wants to find or compare hotels, check prices for dates or plan when to travel, and asks to use trivago or to connect its MCP server. Not for booking or payment: results return deal links on trivago, where the person continues to a partner booking site or books through trivago Book & Go."
 model_experience:
   what_model_sees: "A short guide: the server address, how to add it under Settings → Extensions → MCP servers, the tools the server listed on 2026-11-26 and its limits. The guide adds no tools, servers or credentials."
   token_effect: "Read only as an instruction. Tools come from the server the person adds; Ouroboros loads their call schemas when needed unless Schemas from task start is on."
@@ -16,8 +16,10 @@ model_experience:
 trivago runs a public MCP server for its hotel metasearch. It is for anyone planning a
 stay, and it is free and needs no account. An assistant can search hotels and other
 stays around a place or by name, compare the prices trivago collects from booking sites,
-and forecast nightly prices for a destination. Results link to the booking sites, where
-the person books and pays.
+and forecast nightly prices for a destination. Deal links open on trivago, where the
+person either continues to the partner's booking site or completes checkout through
+trivago Book & Go (with the named partner fulfilling the booking). The MCP server
+itself is read-only and does not book or take payment.
 
 This entry is a guide and adds no tools by itself. Add the server once as described
 below; the tools then come from trivago's server.
@@ -64,5 +66,8 @@ The server listed three read-only tools on 2026-11-26:
 
 - [trivago MCP](https://mcp.trivago.com/docs): address, free keyless use, tool
   descriptions and supported clients. Checked 2026-11-26.
-- Connection, tool list and the server's own instructions: Ouroboros's Test on
-  2026-11-26.
+- [What is trivago Book & Go?](https://support.trivago.com/hc/en-ca/articles/360018830938-What-is-trivago-Book-Go):
+  Book & Go checkout on trivago with partner fulfillment. Checked 2026-11-26.
+- Connection, tool list, the server's own instructions and a live radius search (deal
+  links on trivago, including Book & Go offers): Ouroboros's Test and live search check
+  on 2026-11-26.

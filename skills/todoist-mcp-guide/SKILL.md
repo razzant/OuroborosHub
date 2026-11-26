@@ -85,8 +85,10 @@ exact list appears on the server's page in Ouroboros after sign-in.
 - The Beginner plan keeps 7 days of activity history; Pro and Business keep all of it.
 - On accounts managed by an organization, its administrator may have to allow
   third-party connections first.
-- Access can be reviewed or revoked in Todoist under Settings → Integrations, or with
-  **Sign out** on the server's page in Ouroboros.
+- **Sign out** on the server's page in Ouroboros forgets Ouroboros's tokens and asks
+  Todoist to revoke them. If Ouroboros reports that the provider did not confirm
+  revocation, revoke access in Todoist under Settings → Integrations (where access can
+  also be reviewed at any time).
 
 ## Sources
 

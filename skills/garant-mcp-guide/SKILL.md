@@ -89,7 +89,9 @@ GARANT's limits for the Internet version apply through the server too:
   more than 100 returns HTTP 400).
 - Exports (including `garant_export_block_html`): 30 documents or parts a calendar month.
 - Document information: 300 requests a calendar month.
-- PRIME news: not older than one year.
+- PRIME news (`garant_prime_news`): not older than one year, and at most 10 days per
+  request (longer periods return HTTP 400 and must be split into windows of at most 10
+  days).
 - Text for adding links and request bodies: up to 20 MB.
 
 ## Sources

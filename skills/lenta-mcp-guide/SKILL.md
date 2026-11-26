@@ -51,12 +51,13 @@ six, without `storefront_user_profile`):
   per format. Per the server, hypermarkets have the larger range with delivery usually
   in 2 to 4 hours, supermarkets a smaller one with delivery in 15 to 60 minutes.
 - `storefront_products_search`: products by text query, 10 per page, for an address or
-  a store ID.
+  `storeId` (`aliasId` from `storefront_resolve_store`).
 - `storefront_product_details`: a product card with composition, nutrition, category,
-  barcode and weight data, for an address or a store ID.
-- `storefront_categories`: the storefront's category tree, for an address or a store ID.
-- `storefront_stores_list`: stores with addresses, opening hours and pickup; the city
-  and text filters are optional.
+  barcode and weight data, for an address or `storeId`.
+- `storefront_categories`: the storefront's category tree, for an address or `storeId`.
+- `storefront_stores_list`: stores with addresses, opening hours and pickup (its `id` is
+  the shopping-centre code, not the catalogue `storeId`); the city and text filters are
+  optional.
 - `storefront_cart_link_create`: a public link to a Lenta cart with 1 to 100 items for
   checkout on lenta.com.
 - `storefront_user_profile`: the profile of the owner of a Lenta mcp-token, given to the
@@ -66,12 +67,14 @@ six, without `storefront_user_profile`):
 
 ## Limits
 
-- Product search, product cards and categories need a delivery address or a store ID;
-  the server keeps no session between calls.
+- Product search, product cards and categories need a delivery address or `storeId` (the
+  `aliasId` returned by `storefront_resolve_store`; `id` from `storefront_stores_list`
+  is the shopping-centre code, not a catalogue `storeId`). The server keeps no session
+  between calls.
 - The cart link does not change anyone's existing cart. It opens a separate screen on
   lenta.com that offers to add the items and continue to checkout, where the person
   orders and pays.
-- Pet and alcohol stores are searched only when their store ID is passed.
+- Pet and alcohol stores are searched only when their `storeId` (`aliasId`) is passed.
 - Weighed goods are ordered in the store's quantity steps, not in grams.
 - Lenta's pages state no usage limits.
 

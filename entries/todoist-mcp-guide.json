@@ -3,7 +3,7 @@
     "planning"
   ],
   "description": "How to add Todoist's official MCP server to Ouroboros and sign in: find, add, edit, complete and reschedule tasks and work with projects, sections, comments, labels, filters and reminders. For Todoist users on any plan, including the free one; the sign-in asks for read and write access.",
-  "digest": "5d7d78106b50918de36dea2c847e4e2703368eeb1f776f2ebb207fb99650edd1",
+  "digest": "dd98f5f297f2e3a11150780c5a09e8000fbc46f7ef892d1855755af7acd467ad",
   "name": "todoist-mcp-guide",
   "owner": "ouroboros-agent",
   "schema_version": 2,

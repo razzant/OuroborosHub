@@ -63,12 +63,17 @@ Search and details, read-only:
 
 Checkout:
 
-- `create_checkout_link` is the default hand-off. It returns a link to tutu.ru for the
-  chosen offer; the cart is created in the person's own browser. For a flight built from
-  separate tickets (`kind="deeplink_parts"`), the top-level `checkout_url` opens search
-  and the purchase links are in `checkout_parts[]`: the assistant must return every
-  ticket link in order and tell the person that each ticket has its own cart and
-  payment. A result with `kind="search_redirect"` is a search page, not a purchase link.
+- `create_checkout_link` is the default hand-off and only builds a URL on tutu.ru (never
+  a server-side cart). What the link opens depends on the product: a commuter-train link
+  opens the route schedule, and rail, bus and hotel links open seat or room selection by
+  default. A link creates a cart directly in the person's browser only for a flight
+  (`kind="deeplink"`, or each link in `checkout_parts[]` for `kind="deeplink_parts"`),
+  or for a rail, bus or hotel link built with a user-confirmed seat choice or room rate
+  (`kind="checkout_deeplink"`). For a flight built from separate tickets
+  (`kind="deeplink_parts"`), the top-level `checkout_url` opens search and the purchase
+  links are in `checkout_parts[]`: the assistant must return every ticket link in order
+  and tell the person that each ticket has its own cart and payment. A result with
+  `kind="search_redirect"` is a search page, not a purchase link.
 - `register_checkout_passengers` is the one tool with side effects. With passport data
   that the person provides, it registers the passengers, fills a cart and returns a
   payment link, `pay_url`. For a flight it creates an unpaid order; for a train it
