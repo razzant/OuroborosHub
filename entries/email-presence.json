@@ -6,7 +6,7 @@
     "Email"
   ],
   "description": "Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.",
-  "digest": "5ed2a831c9ac4353287db892bfa724f963bd5da3f3b2bcdc9cf274c9f26321f2",
+  "digest": "d7e2a787fd989d1bde5feaf5bc019026a24328322d79865b4c69614ae945348f",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
