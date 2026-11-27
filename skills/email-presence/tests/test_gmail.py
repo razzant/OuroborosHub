@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
-from lib.accounts import AccountError, AccountStore
+from lib.accounts import AccountError, AccountStore, bearer_mark
 from lib.gmail import GmailClient
 from lib.host_adapter import place_refusal_hold
 from lib.google_auth import begin, finish
@@ -98,15 +98,21 @@ def test_a_mail_only_grant_answers_settings_writes_itself_and_a_settings_grant_r
     sent = []
     def handler(request):
         sent.append((request.method, request.url.path))
+        if request.url.path == "/token":  # its saved bearer names no permissions: renewed once, for the saved ones
+            assert parse_qs(request.content.decode())["scope"] == [" ".join(account["scopes"])]
+            return httpx.Response(200, json={"access_token": "fixture-renewed", "expires_in": 3600,
+                                             "scope": " ".join(account["scopes"])})
         return httpx.Response(200, json={"displayLanguage": "en"})
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
         refused = GmailClient(accounts, account["id"], http=http).settings_write(
             resource="language", values={"displayLanguage": "en"})
-        assert refused["code"] == "settings_permission_missing" and not sent
-        accounts.save({**accounts.get(account["id"]),
-                       "scopes": account["scopes"] + ["https://www.googleapis.com/auth/gmail.settings.basic"]})
+        assert refused["code"] == "settings_permission_missing" and sent == [("POST", "/token")]
+        granted = account["scopes"] + ["https://www.googleapis.com/auth/gmail.settings.basic"]
+        accounts.save({**accounts.get(account["id"]), "scopes": granted,  # a consent that allowed settings
+                       "tokens": {**account["tokens"], "scope": " ".join(granted),
+                                  "scope_of": bearer_mark(account["tokens"]["access_token"])}})
         GmailClient(accounts, account["id"], http=http).settings_write(resource="language", values={"displayLanguage": "en"})
-    assert sent == [("PUT", "/gmail/v1/users/me/settings/language")]
+    assert sent == [("POST", "/token"), ("PUT", "/gmail/v1/users/me/settings/language")]
 
 
 def test_refresh_cannot_restore_disconnected_account(tmp_path):
@@ -153,6 +159,61 @@ def test_search_uses_metadata_pagination_and_read_peeks_native_identity(tmp_path
         assert seen[-1].url.params["format"] == "raw"
 
 
+@pytest.mark.parametrize("answer,serves", [({}, True), ({"scope": ""}, False), ({"scope": " "}, False)])
+def test_a_renewal_naming_no_permissions_is_refused_where_an_omitted_field_stays_unknown(tmp_path, answer, serves):
+    accounts = AccountStore(tmp_path)
+    account = gmail_account(accounts)
+    account["tokens"]["expires_at"] = 0
+    account = accounts.save(account)
+
+    def handler(request):
+        if request.url.path.endswith("/profile"):
+            return httpx.Response(200, json={"emailAddress": account["address"]})
+        assert request.url.path == "/token"
+        return httpx.Response(200, json={"access_token": "renewed", "expires_in": 3600, **answer})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        client = GmailClient(accounts, account["id"], http=http)
+        if serves:
+            assert client.test_connection()["scope_status"] == "known"
+            assert accounts.get(account["id"])["tokens"]["access_token"] == "renewed"
+        else:
+            with pytest.raises(AccountError, match="did not confirm the saved permissions"):
+                client.test_connection()
+            assert accounts.get(account["id"])["tokens"]["access_token"] == "private-access-material"
+
+
+def test_a_local_renewal_binds_its_store_write_to_the_connection_it_started_under(tmp_path, monkeypatch):
+    accounts = AccountStore(tmp_path)
+    account = gmail_account(accounts)
+    account["tokens"]["expires_at"] = 0
+    account = accounts.save(account)
+    real_connection, real_refresh = accounts.gmail_connection, accounts.refresh_tokens
+    seen = {}
+
+    def connection(account_id, *, expected_generation=""):
+        assert expected_generation == account["generation"]  # the row this renewal read under its own lock
+        return seen.setdefault("origin", real_connection(account_id))
+
+    def refresh(account_id, generation, tokens, **rest):
+        seen["passed"] = rest.get("connection")
+        return real_refresh(account_id, generation, tokens,
+                            **{key: value for key, value in rest.items() if key != "connection"})
+
+    monkeypatch.setattr(accounts, "gmail_connection", connection)
+    monkeypatch.setattr(accounts, "refresh_tokens", refresh)
+
+    def handler(request):
+        if request.url.path.endswith("/profile"):
+            return httpx.Response(200, json={"emailAddress": account["address"]})
+        return httpx.Response(200, json={"access_token": "renewed", "expires_in": 3600,
+                                         "scope": " ".join(account["scopes"])})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        GmailClient(accounts, account["id"], http=http).test_connection()
+    assert seen["passed"] == seen["origin"] == accounts.get(account["id"])["gmail_connection"]["id"]
+
+
 class BindingHost:
     def __init__(self):
         self.disconnected = False
@@ -172,7 +233,8 @@ def test_gmail_delivery_receipt_and_uncertain_send_are_not_replayed(tmp_path, ou
                "conversation_id": "", "thread_id": "", "place_id": "place-one"}
     store.enqueue_outbox(request_id=rid, to=["reader@example.invalid"], bcc=["blind@example.invalid"], body="hello", subject="test",
                          reporting={"version": 1, "account_id": account["id"], "sender": account["senders"][1],
-                                    "gmail_thread_id": "b1", "place_binding": binding})
+                                    "gmail_thread_id": "b1", "place_binding": binding,
+                                    "gmail_connection": {"id": accounts.gmail_connection(account["id"])}})
     sent = []
     def handler(request):
         assert request.method == "POST" and request.url.path.endswith("/messages/send")
@@ -212,7 +274,8 @@ def test_bound_send_remains_held_after_disconnect(tmp_path):
     store = EmailStore(accounts.mail_dir(account))
     binding = {"version": 1, "connector": "email-presence", "provider": "email", "account_id": account["id"],
                "conversation_id": "old-thread", "thread_id": "", "place_id": "removed-place"}
-    store.enqueue_outbox(request_id="held", to=["reader@example.invalid"], body="held", reporting={"place_binding": binding})
+    store.enqueue_outbox(request_id="held", to=["reader@example.invalid"], body="held",
+                         reporting={"place_binding": binding, "gmail_connection": {"id": accounts.gmail_connection(account["id"])}})
     host = BindingHost()
     host.disconnected = True
     with httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("Held mail reached Gmail send"))) as http:

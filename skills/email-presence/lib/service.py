@@ -16,6 +16,7 @@ from .accounts import AccountError, AccountStore, SETTING_KEYS, public_message_r
 from .client import MailClient
 from .delivery import tool_origin
 from .gmail import GmailClient
+from .gmail_host import GmailSignIn, read_view
 from .host_adapter import (MATCH_SCOPE, PLACE_MATCH, RECIPIENT_PLACES, LoopbackPresenceHostAdapter, capture_recipients,
                            place_refusal_hold)
 from .mime import (AmbiguousReplySource, _message_ids, canonical_message_id, checked_display_names, conversation_root, display_names_of, emitted_conversation,
@@ -112,7 +113,7 @@ class MailService:
 
     @property
     def accounts(self):
-        return AccountStore(self.state, self.api.get_settings(SETTING_KEYS))
+        return AccountStore(self.state, self.api.get_settings(SETTING_KEYS), sign_in=GmailSignIn.environment())
 
     @contextmanager
     def target(self, account_id=""):
@@ -192,13 +193,18 @@ class MailService:
     def queue_status(self, account):
         directory = self.accounts.mail_dir(account)
         if not (directory / "email_presence.sqlite3").exists():
-            return {"inbox": {}, "outbox": {}, "outbox_held": 0, "receipts": [], "delivery_reports_pending": 0}
+            return {"inbox": {}, "outbox": {}, "outbox_held": 0, "receipts": [], "waiting": [], "delivery_reports_pending": 0}
         store = EmailStore(directory)
         return {**store.status(), "poll_health": store.get("poll_health")}
 
     def list_accounts(self):
-        return {"accounts": [{**AccountStore.public(row), "queue": self.queue_status(row)} for row in self.accounts.list()],
-                "setup": "Open the Email accounts widget to connect Google, Exchange (EWS), IMAP or Proton Bridge. A Place is optional for ordinary tools."}
+        mode, rows = read_view(self.accounts)
+        setup = "Use Email accounts for Exchange (EWS), IMAP, or Proton Bridge. A Place is optional for ordinary tools."
+        gmail = {"legacy": "Google mail is also added in Email accounts.",
+                 "host": "For Google mail, use the email-presence card in Extensions › Skills.",
+                 "unavailable": "Google sign-in could not be checked; retry when the host is available."}
+        return {"accounts": [{**AccountStore.public(row), "queue": self.queue_status(row)} for row in rows],
+                "setup": setup + " " + gmail[mode], "google_auth_mode": mode}
 
     def search(self, *, account_id="", folder=None, criteria=None, query="", limit=50, page_token=""):
         with self.target(account_id) as (account, _store, client):
@@ -281,7 +287,12 @@ class MailService:
             return self._account_result(account, client.mark_read(**kwargs, prepare_targets=self._write_target_preparer(
                 public, account['id'], clear_unused=tuple(self._UNUSED))))
 
-    def mailbox(self, *, account_id="", message_ref="", folder_names=None, **kwargs):
+    def mailbox(self, *, account_id="", message_ref="", folder_names=None, request_id="", **kwargs):
+        if kwargs.get("action") in ("discard_queued", "send_queued"):
+            return self.queued(account_id=account_id, request_id=request_id, message_ref=message_ref,
+                               folder_names=folder_names, **kwargs)
+        if request_id:
+            raise ValueError("request_id on email_mailbox applies only to discard_queued and send_queued")
         with self.target(account_id) as (account, _store, client):
             public = {k: v for k, v in kwargs.items() if v is not None}
             public.update(account_id=account_id, message_ref=message_ref)
@@ -446,7 +457,18 @@ class MailService:
 
     def send(self, ctx=None, *, account_id="", sender="", to="", body="", subject="", reply_to_message_id="", references=None,
              cc=None, bcc=None, reply_all=False, html_body="", body_type="plain", attachments=None, request_id="", reply_folder="",
-             conversation_id="", thread_id="", reply_all_fingerprint="", display_names=None, emitted_conversation_id=""):
+             conversation_id="", thread_id="", reply_all_fingerprint="", display_names=None, emitted_conversation_id="",
+             draft_id=""):
+        if draft_id:
+            given = {"sender": sender, "reply_to_message_id": reply_to_message_id, "references": references,
+                     "reply_all": reply_all, "body_type": body_type if body_type != "plain" else "",
+                     "attachments": attachments, "reply_folder": reply_folder,
+                     "reply_all_fingerprint": reply_all_fingerprint, "display_names": display_names,
+                     "emitted_conversation_id": emitted_conversation_id}
+            return self._send_draft(ctx, account_id=account_id, draft_id=draft_id, to=to, cc=cc, bcc=bcc,
+                                    request_id=request_id, conversation_id=conversation_id, thread_id=thread_id,
+                                    content={"subject": subject, "body": body, "html_body": html_body},
+                                    given=[name for name, value in given.items() if value])
         with self.target(account_id) as (account, store, client):
             if account.get("sending", "on") == "off":
                 return {"ok": False, "account_id": account["id"], "code": "sending_off", "error": SENDING_OFF}
@@ -454,6 +476,11 @@ class MailService:
             recipients, visible_cc, visible_bcc = addresses(to), addresses(cc), addresses(bcc)
             rid = str(request_id or uuid.uuid4().hex)
             queued = store.queued_message(rid)
+            # A new mail records the access it began with: named here, before its source is read (it goes out under the
+            # mailbox's current sign-in, rule A).
+            # A request_id already queued replays its accepted row and names none.
+            begin = getattr(client, "change_link", None) if queued is None and account["provider"] == "gmail" else None
+            link = begin() if begin else None
             if queued is not None and references is None:
                 references = list(queued.references)
             original, references, thread, repair = self._reply_context(
@@ -485,8 +512,9 @@ class MailService:
             elif envelope_groups(*supplied) == envelope_groups(queued.to, queued.cc, queued.bcc):
                 # A replay names the queued mailboxes, perhaps spelled as in its first, prepared call.
                 recipients, visible_cc, visible_bcc = queued.to, queued.cc, queued.bcc
-            if not recipients or (not str(body).strip() and not str(html_body).strip()):
-                raise ValueError("to (or reply_all source) and body are required")
+            if not (recipients or visible_cc or visible_bcc) or (not str(body).strip() and not str(html_body).strip()):
+                # A mail may have only Cc or Bcc recipients (one moved from another mailbox keeps them apart).
+                raise ValueError("a recipient (to, cc or bcc, or a reply_all source) and body are required")
             bare = envelope_groups(recipients, visible_cc, visible_bcc)
             prepared, canonical = recipient_arguments(to, cc, bcc, bare)
             if queued is not None:
@@ -530,6 +558,8 @@ class MailService:
                 reporting["reply_all_fingerprint"] = reply_all_fingerprint
             if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = original["provider_thread_id"]
+            if link:
+                reporting["gmail_connection"] = link  # the access this mail began under, named again as it goes out
             hold, modes = "", {}
             if binding.get("supported"):
                 # Each new binding keeps the mode it was bound with; delivery checks it with the same mode.
@@ -571,9 +601,189 @@ class MailService:
                     "deduplicated": not inserted, "receipt": receipt,
                     "message": "Queued is not sent. email_receipt reports the provider outcome; held/uncertain items are not blindly resent."}
 
+    def _send_draft(self, ctx, *, account_id, draft_id, to, cc, bcc, request_id, conversation_id, thread_id, content,
+                    given):
+        """email_send with draft_id: send one existing Gmail draft as it is now (users.drafts.send) through the queue, so
+        Sending off, Place holds, its receipt and the never-twice rule apply to it as to any mail. The Host checks the
+        draft's actual To, Cc and Bcc, and its conversation when it replies, and Safety reads its subject and text, from
+        this very call: needs_arguments names them first. Delivery sends it only while it is still the draft that was
+        checked. Its attachments are not named in the call."""
+        with self.target(account_id) as (account, store, client):
+            if account["provider"] != "gmail":
+                raise ValueError("draft_id applies only to Gmail; send this account's drafts from its mail client")
+            if given:
+                raise ValueError("draft_id sends that draft as it is; omit " + ", ".join(given))
+            content = {name: str(value or "") for name, value in content.items()}
+            if account.get("sending", "on") == "off":
+                return {"ok": False, "account_id": account["id"], "code": "sending_off", "error": SENDING_OFF}
+            rid = str(request_id or uuid.uuid4().hex)
+            queued = store.queued_message(rid)
+            if queued is not None:
+                if (queued.reporting.get("gmail_draft") or {}).get("id") != draft_id:
+                    return {"ok": False, "account_id": account["id"], "code": "request_id_conflict", "request_id": rid,
+                            "error": "This request_id already names a different email; use a new request_id"}
+                receipt = store.receipt(rid)
+                return {"ok": True, "account_id": account["id"], "request_id": rid, "state": receipt["state"],
+                        "accepted_by_provider": receipt["state"] == "completed", "deduplicated": True, "receipt": receipt}
+            link = client.change_link()  # named before the draft is read, presented again where it is sent
+            letter = client.draft_letter(draft_id)
+            if letter["sender"].casefold() not in {sender.casefold() for sender in account["senders"]}:
+                raise AccountError("The draft's From is not a sender listed for this account in email_accounts; "
+                                   "nothing was queued")
+            groups = envelope_groups(letter["recipients"], letter["cc"], letter["bcc"])
+            if not any(groups):
+                raise ValueError("The draft names no recipient; nothing was queued")
+            prepared, canonical = recipient_arguments(to, cc, bcc, groups)
+            replying = bool(letter["in_reply_to"] or letter["references"])
+            root = (conversation_root(references=letter["references"], in_reply_to=letter["in_reply_to"],
+                                      message_id=letter["message_id"]) or store.message_id_for(rid))
+            fields = {"conversation_id": root, "thread_id": root} if replying else {}
+            # What it says, as Safety reads a mail: its subject and text (and its HTML when it has one).
+            words = {"subject": letter["subject"], "body": letter["body"],
+                     **({"html_body": letter["body_html"]} if letter.get("body_html") else {})}
+            retry = {"account_id": account["id"], "draft_id": draft_id, "request_id": rid, "to": prepared["to"],
+                     "cc": prepared["cc"], "bcc": prepared["bcc"], **fields, **words}
+            stray = any(value and value != root for value in (conversation_id, thread_id))
+            missing = replying and (conversation_id != root or thread_id != root)
+            unread = any(content[name] != words.get(name, "") for name in content)
+            if not account_id or not canonical or stray or missing or unread:
+                return {"ok": False, "status": "needs_arguments", "account_id": account["id"],
+                        "code": ("canonical_account_required" if not account_id else
+                                 "canonical_recipients_required" if not canonical else
+                                 "canonical_conversation_required" if stray or missing else "canonical_content_required"),
+                        "message": "Retry with the draft's actual recipients, conversation and words below; nothing "
+                                   "was queued.",
+                        "retry_arguments": retry}
+            if replying and (problem := wire_thread_problem(letter["in_reply_to"], letter["references"])):
+                raise ValueError(problem + '; nothing was queued')
+            # The draft as it is read now, kept whole: rule A puts it back from this source if its send's outcome is
+            # unknown and the draft is gone, and its receipt gives its HTML and files to send from another mailbox.
+            source, files = store.stage_draft(rid, letter)
+            reporting = {"version": -1, "account_id": account["id"], "sender": letter["sender"], "origin": tool_origin(ctx),
+                         "gmail_draft": {"id": draft_id, "digest": letter["digest"], "source": source},
+                         "reply_source_syntax": 1}
+            if letter["provider_thread_id"]:
+                reporting["gmail_thread_id"] = letter["provider_thread_id"]
+            if link:
+                reporting["gmail_connection"] = link
+            hold, modes = "", {}
+            binding = self.capture_binding(account, root)
+            if binding.get("supported"):
+                reporting["place_binding"], modes["place_binding"] = binding.get("binding"), MATCH_SCOPE
+                if not binding.get("allowed"):
+                    hold = place_refusal_hold(binding)
+            else:
+                reporting["binding_support"] = "unsupported"
+            reason, record = self.capture_recipients(account, [address for group in groups for address in group])
+            if record is not None:
+                reporting[RECIPIENT_PLACES], modes[RECIPIENT_PLACES] = record, record["match"]
+            hold = hold or reason
+            if modes:
+                reporting[PLACE_MATCH] = modes
+            try:
+                store.enqueue_outbox(request_id=rid, to=groups[0], cc=groups[1], bcc=groups[2], subject=letter["subject"],
+                                     body=letter["body"], html_body=letter.get("body_html") or "",
+                                     in_reply_to=letter["in_reply_to"], references=letter["references"],
+                                     attachments=files, reporting=reporting, hold_reason=hold,
+                                     message_id=letter["message_id"])
+            except RequestIdConflict as exc:
+                return {"ok": False, "account_id": account["id"], "code": "request_id_conflict", "error": str(exc), "request_id": rid}
+            receipt = store.receipt(rid)
+            return {"ok": True, "account_id": account["id"], "sender": letter["sender"], "request_id": rid,
+                    "state": receipt["state"], "accepted_by_provider": False, "deduplicated": False, "receipt": receipt,
+                    "message": "Queued is not sent: the draft goes out as it is now, and only while it is unchanged since "
+                               "this check. email_receipt reports the outcome."}
+
+    def queued(self, *, account_id="", action="", request_id="", **unused):
+        """email_mailbox discard_queued / send_queued: the owner's "delete" or "send" for one mail of this mailbox that has
+        not gone out, chosen by its request_id or by the ref Mail gave it (the owner's line and email_accounts' `waiting`
+        name it by that). Both work while the mailbox is signed out of Mail: "delete" takes it off this mailbox's queue,
+        in one write and only while it has not begun to go out, and returns the mail, which can then be sent from another
+        mailbox; "send" needs this mailbox signed in again. A mail whose sending began and whose outcome is unknown is
+        never offered for sending anywhere: it may already have gone out."""
+        if not account_id or not request_id:
+            raise ValueError(f"{action} takes the mail's account_id and request_id")
+        if any(value not in (None, "", [], {}, False) for value in unused.values()):
+            raise ValueError(f"{action} takes only account_id and request_id")
+        accounts = self.accounts
+        account = accounts.get(account_id)
+        directory = accounts.mail_dir(account)
+        if not (directory / "email_presence.sqlite3").exists():
+            return {"ok": False, "code": "not_found", "account_id": account["id"], "request_id": request_id,
+                    "error": "No mail with this request_id in this account"}
+        store = EmailStore(directory)
+        try:
+            # Its request_id, or the ref a line to the owner (and `waiting`) names it by: the mail's own request_id below.
+            request_id = store.request_id_of(request_id) or request_id
+            receipt = store.receipt(request_id)
+            if receipt is None:
+                return {"ok": False, "code": "not_found", "account_id": account["id"], "request_id": request_id,
+                        "error": "No mail with this request_id in this account"}
+            began = receipt["state"] in ("uncertain", "partial")
+            unknown = (f"Its sending began and its outcome is unknown: it may already have gone out from "
+                       f"{account['address']}, so Mail never sends it again")
+            if action == "discard_queued":
+                # Only what the deleting write itself did speaks: the mail may have begun to go out since it was read above.
+                receipt, done, found = store.discard_queued(request_id)
+                if done == "cancelled":
+                    message = ("It will not go out from this mailbox: it had not begun to. Its receipt stays, with the "
+                               "mail in `letter`, so it can be sent from another mailbox with email_send.")
+                elif done == "discarded":
+                    message = (unknown + ". It is no longer looked for in Sent or put in Drafts; its receipt stays. "
+                               "It is not to be sent from another mailbox.")
+                elif found in ("processing", "sending", "uncertain", "partial"):
+                    error = (f"It was not deleted: its sending began or is under way, so it may already have gone out "
+                             f"from {account['address']}. Mail never sends it again, and it is not to be sent from "
+                             "another mailbox; check its receipt.")
+                else:
+                    error = "Only a mail that has not gone out can be deleted from the queue; check its receipt."
+                return {"ok": bool(done), "account_id": account["id"], "request_id": request_id, "receipt": receipt,
+                        **({"message": message} if done else {"code": "not_discardable", "error": error})}
+            if began:
+                return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
+                        "receipt": receipt, "error": unknown + (
+                            ": once its mailbox is signed in, it is looked for in Sent and put in Drafts if it is not "
+                            "there. Check its receipt." if not receipt.get("unknown_outcome") else
+                            ". Check its receipt.")}
+            if receipt["state"] not in ("pending", "retry", "held", "processing"):
+                return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
+                        "receipt": receipt, "error": "Only a mail still queued or held can be sent this way; check its receipt."}
+            link = None
+            try:
+                if account["provider"] == "gmail":
+                    client = GmailClient(accounts, account["id"])
+                    try:
+                        link = client.sending_link()  # this mailbox's current confirmed sign-in, positively its own account
+                    finally:
+                        client.close()
+                elif not account["connected"]:
+                    raise AccountError("This account is disconnected; reconnect it in Email accounts")
+            except AccountError as exc:
+                return {"ok": False, "code": "mailbox_not_signed_in", "account_id": account["id"], "request_id": request_id,
+                        "error": f"{account['address']} is not signed in to Mail now ({exc}). The mail goes by itself once "
+                                 "it is. To send it from another mailbox instead, first discard_queued it here: that "
+                                 "takes it off this mailbox's queue, only while it has not begun to go out, and returns "
+                                 "the mail (also in email_receipt). Only when it answers that the mail will not go out "
+                                 "from this mailbox, send that mail from the other mailbox with email_send; when it "
+                                 "answers that the mail may already have gone out, it is never sent again."}
+            if not store.release_queued(request_id, link):
+                return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
+                        "receipt": store.receipt(request_id),
+                        "error": "Only a mail still queued or held can be sent this way; check its receipt."}
+            return {"ok": True, "account_id": account["id"], "request_id": request_id, "receipt": store.receipt(request_id),
+                    "message": "It goes out now under this mailbox's current sign-in; Sending off and Place holds still "
+                               "apply. email_receipt reports the outcome."}
+        finally:
+            store.close()
+
     def draft(self, *, account_id="", sender="", reply_all=False, reply_folder="", conversation_id="", thread_id="", folder_names=None,
               display_names=None, draft_conversation_id="", emitted_conversation_id="", **kwargs):
         with self.target(account_id) as (account, store, client):
+            kwargs.pop("link", None)  # the access a change began under comes from the mailbox's client, never from the caller
+            # A change is made under the access it began with: named here, before the reply source, the draft or its labels
+            # are read to prepare it, and presented again when the draft is saved (GmailClient.change_link).
+            begin = getattr(client, "change_link", None) if account["provider"] == "gmail" else None
+            link = begin() if begin else None
             chosen_sender = self._sender(account, sender)
             original, references, thread, repair = self._reply_context(
                 account, store, client, kwargs.get('reply_to_message_id'), kwargs.get('references'), reply_all, reply_folder)
@@ -656,7 +866,7 @@ class MailService:
             kwargs.update(to=(to[0] if to else "") if isinstance(prepared["to"], str) else to, cc=cc, bcc=bcc)
             if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 kwargs["thread_id"] = original["provider_thread_id"]
-            result = save(**kwargs)
+            result = save(**kwargs, **({"link": link} if link else {}))
             return self._account_result(account, {**result, "sender": chosen_sender})
 
     def receipt(self, request_id, *, account_id=""):
@@ -664,7 +874,11 @@ class MailService:
         directory = self.accounts.mail_dir(account)
         if not (directory / "email_presence.sqlite3").exists():
             return None
-        result = EmailStore(directory).receipt(request_id)
+        store = EmailStore(directory)
+        try:  # its request_id, or the ref a line to the owner (and `waiting`) names it by
+            result = store.receipt(store.request_id_of(request_id) or request_id, with_letter=True)
+        finally:
+            store.close()
         if result:
             result["account_id"] = account["id"]
         return result
@@ -730,9 +944,11 @@ def register_tools(api, service):
                           schema={"type": "object", "properties": {**(account if select else {}), **properties}, "required": list(required)}, timeout_sec=120)
     tool("email_accounts", service.list_accounts, "List configured mailbox identities, sender addresses and granted scopes; no passwords or tokens are returned.", {}, select=False)
     # email_accounts has no selection argument: it is the discovery surface.
-    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read. Reply All first returns the actual recipients; submit the returned arguments before sending. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
+    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read. Reply All first returns the actual recipients; submit the returned arguments before sending. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes. A mail whose sending began and whose outcome is unknown is never sent twice: Mail finds it sent in its own mailbox or puts it in that mailbox's Gmail Drafts and tells the owner once. Gmail draft_id instead sends that existing draft as it is now (its receipt or email_search folder DRAFT names it): submit the draft's actual recipients, subject and body from retry_arguments.",
          {**compose, "request_id": string, "reply_all_fingerprint": {"type": "string", "description":
-              "Opaque replay value from Reply All retry_arguments. Pass it back unchanged when submitting the explicit recipients."}}, ("body",))
+              "Opaque replay value from Reply All retry_arguments. Pass it back unchanged when submitting the explicit recipients."},
+          "draft_id": {"type": "string", "description": "Gmail only: send this existing draft as it is now; its actual "
+                       "to, cc, bcc, conversation, subject and body come back in retry_arguments to submit unchanged."}})
     tool("email_search", service.search, "Search old/new mail without marking it read. Gmail and Exchange accept a provider-native query; IMAP uses raw criteria tokens. Pass each page's next_page_token back as page_token with the same account, folder and query or criteria until it comes back empty. Returned message_ref is account-bound. An empty or failed search is not proof that a message never arrived.",
          {"folder": string,
           "criteria": {"type": "array", "items": string, "description": 'IMAP only: raw SEARCH tokens; several keys must all match, for example ["SINCE", "1-Jun-2026", "FROM", "billing@example.com"]. Quote an ASCII operand that contains spaces: ["SUBJECT", "\\"New sign-in\\""]. A non-ASCII operand is sent as UTF-8 with or without quotes.'},
@@ -744,15 +960,16 @@ def register_tools(api, service):
          {**message, "remove_labels": array, "folder_names": array, "message_conversation_id": message_conversation,
           "message_thread_id": message_thread, "label_names": array})
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id or by the ref the owner's line and email_accounts' waiting name it by: discard_queued drops it (also while the mailbox is signed out) and returns the mail, send_queued sends it now under the mailbox's current sign-in. To send it from another mailbox, discard_queued it here first and, only when it answers that the mail will not go out from here, email_send the returned mail there; one that may already have gone out is never sent again.",
          {**message, "action": string, "destination": string, "folder_names": array, "flags": array, "remove_flags": {"type": "boolean"},
+          "request_id": {"type": "string", "description": "discard_queued and send_queued only: the queued mail's request_id, or the ref (m-...) a line to the owner names it by."},
           "add_labels": array, "remove_labels": array, "label_names": array, "label_id": string, "draft_id": string, "properties": {"type": "object"},
           "draft_conversation_id": draft_conversation, "message_conversation_id": message_conversation,
           "message_thread_id": message_thread})
     tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity, Reply All recipients or the effective folder need preparation. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",
          {**compose, "folder": string, "folder_names": {"type": "array", "items": string, "description": "Names of the actual draft destination from retry_arguments, and for a Gmail draft_id the label IDs and names the existing draft bears. Do not invent folder aliases."},
           "draft_id": string, "draft_conversation_id": draft_conversation}, ("to", "subject"))
-    tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
+    tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt, by its request_id or by the ref (m-...) a line to the owner names the mail by. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})
     settings = {"resource": string, "identifier": string}
     tool("email_settings_read", service.settings_read, "Read Gmail filters, send-as, vacation, language, IMAP/POP or forwarding settings. Other providers return website_required.", settings)

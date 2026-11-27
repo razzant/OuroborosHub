@@ -74,7 +74,8 @@ def gmail_for(tmp_path, *, label_rows=None, reads=None, message_labels=None, dra
     Message 7b has its own Message-ID unless ``message_headers`` says otherwise; a message without a usable identity
     is read again as format=raw, exactly as Gmail serves it."""
     client = GmailClient.__new__(GmailClient)
-    client.account = {'id': 'gmail:fixture', 'provider': 'gmail'}  # a real client carries its account; scopes unknown
+    client.account = {'id': 'gmail:fixture', 'provider': 'gmail',
+                      'scopes': ['https://mail.google.com/']}  # a stand-in states its bearer's own permissions
     writes = []
     drafts = drafts if drafts is not None else {'draft-one': (['DRAFT'], {'Message-ID': DRAFT_ID})}
     headers_7b = message_headers if message_headers is not None else {'Message-ID': FIXTURE_ID}
@@ -433,13 +434,16 @@ def test_imap_mailbox_reports_the_folder_in_its_authentic_reference_before_store
 def sole_gmail(tmp_path,monkeypatch):
     import httpx
     import time
-    from lib.accounts import AccountStore
+    from lib.accounts import AccountStore, bearer_mark
     directory = tmp_path / 'skill'
     account = 'google:fixture'
     registry = AccountStore(directory)
+    # A saved local grant as a sign-in stores it: its client and refresh token beside the bearer's own permissions.
     registry.save({'id':account, 'provider':'gmail', 'address':'owner@example.invalid',
         'sender':'owner@example.invalid', 'senders':['owner@example.invalid'], 'scopes':['https://mail.google.com/'],
-        'tokens':{'access_token':'fixture-only','expires_at':time.time()+3600}})
+        'oauth':{'client_id':'fixture-client'},
+        'tokens':{'access_token':'fixture-only','refresh_token':'fixture-refresh','expires_at':time.time()+3600,
+                  'scope':'https://mail.google.com/','scope_of':bearer_mark('fixture-only')}})
     writes = []
     def exchange(request):
         assert request.url.host == 'gmail.googleapis.com'

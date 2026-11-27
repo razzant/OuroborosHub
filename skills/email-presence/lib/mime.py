@@ -780,7 +780,9 @@ def build_message(
     """Build a MIME message; Bcc is an SMTP envelope only and never a header."""
     message = EmailMessage()
     message["From"] = sender
-    message["To"] = ", ".join(str(item) for item in recipients if str(item).strip())
+    to = ", ".join(str(item) for item in recipients if str(item).strip())
+    if to:  # a mail with only Cc or Bcc recipients has no To header, rather than an empty one
+        message["To"] = to
     if cc:
         message["Cc"] = ", ".join(str(item) for item in cc if str(item).strip())
     if include_bcc_header and bcc:

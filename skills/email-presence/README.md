@@ -1,8 +1,9 @@
 # Email Presence
 
-Version 0.10.11 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
-and IMAP/SMTP mailboxes, including Yandex and Proton Mail Bridge. Each account has its own credentials, inbox,
-outbox and receipts; sender addresses are separate from mailbox identity.
+Version 0.11.0 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
+and IMAP/SMTP mailboxes, including Yandex and Proton Mail Bridge. Each account
+has its own connection, inbox, outbox and receipts. On hosts with service
+sign-in, Gmail uses the email-presence card (the catalog lists it as Email inbox) for its separate Google consent.
 Previously issued Exchange links still work. Mail asks Exchange whether an item
 or folder belongs to the selected mailbox before using its native ID. A shared
 login can therefore operate on multiple mailboxes without making their links
@@ -15,7 +16,13 @@ adds automatic intake; its Silent/Paused controls still apply to that account.
 Existing EMAIL_* configurations keep their original identity and mail history.
 Known thread replies preserve RFC threading, and transient Host failures retry
 stored paid output without generating it again. Unknown provider acceptance is
-never automatically resent. Sender authentication remains explicitly unverified.
+never automatically resent: for Gmail, Mail looks for the mail in its own mailbox
+and otherwise keeps it there as one draft, and tells the owner once in the chat,
+naming the mail by a short reference Mail gives it (never its request_id). Queued
+Gmail mail, including mail queued before this version, goes out under its mailbox's
+current sign-in, and waits while that mailbox is signed out of Mail; a line about it
+is posted only while it is still true.
+Sender authentication remains explicitly unverified.
 
 Searches return pages: pass `next_page_token` back as `page_token` with the same
 account, folder and query or criteria until it comes back empty. IMAP criteria are

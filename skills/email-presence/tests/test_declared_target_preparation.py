@@ -39,7 +39,7 @@ def harness(provider='gmail'):
     requests=[];account={'id':provider+':fixture','provider':provider,'address':'owner@example.invalid'}
     if provider=='gmail':
         client=GmailClient.__new__(GmailClient)
-        client.account=account  # a real client always carries its account (scope metadata unknown here)
+        client.account={**account,'scopes':['https://mail.google.com/']}  # a stand-in states its bearer's own permissions
         def capture(method,path,**kwargs):
             if method=='GET' and path=='/labels':
                 return {'labels':[{'id':'Label_1','name':'Filed'}]}

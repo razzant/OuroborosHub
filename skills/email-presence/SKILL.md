@@ -1,14 +1,37 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.11
+version: 0.11.0
 type: extension
 entry: plugin.py
 plugin_api: "2.5"
 runtime: python3
-permissions: [net, read_settings, route, tool, widget, companion_process, presence]
+permissions: [net, read_settings, route, tool, widget, companion_process, presence, notify_owner]
 env_from_settings: [EMAIL_IMAP_HOST, EMAIL_IMAP_PORT, EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_SMTP_USER, EMAIL_SMTP_PASSWORD, EMAIL_DEFAULT_FOLDER, EMAIL_AUTH_MODE, EMAIL_OAUTH_ACCESS_TOKEN, EMAIL_OAUTH_REFRESH_TOKEN, EMAIL_OAUTH_CLIENT_ID, EMAIL_OAUTH_CLIENT_SECRET, EMAIL_IMAP_SECURITY, EMAIL_SMTP_SECURITY, EMAIL_TLS_CA, EMAIL_TLS_FINGERPRINT, GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET]
 dependencies: [httpx, starlette, requests, requests-ntlm, defusedxml]
+sign_in:
+  - id: google
+    label: Google
+    issuer: https://accounts.google.com
+    scopes: [openid, email, "https://www.googleapis.com/auth/gmail.modify"]
+    scope_labels:
+      openid: Confirm the Google account
+      email: Identify its email address
+      "https://www.googleapis.com/auth/gmail.modify": Read, send, draft and organize Gmail
+    scope_spellings: {email: ["https://www.googleapis.com/auth/userinfo.email"]}
+    optional_scopes:
+      - {scope: "https://www.googleapis.com/auth/gmail.settings.basic", label: "Manage Gmail settings: filters, forwarding, vacation replies and senders", default: true}
+      - {scope: "https://mail.google.com/", label: "Full Gmail access, including permanent deletion that skips Trash and Gmail settings", default: false}
+    authorize_params: {access_type: offline, prompt: consent}
+    accounts: many
+    optional: true
+    notes:
+      client: >-
+        Choose a client for this mailbox before opening Google. Use your own Desktop client for a local return, or an approved Web client with its exact registered return address. A Google Cloud project in Testing can end offline access after seven days.
+      refused: >-
+        If your organization approved only mail access, clear Manage Gmail settings and leave Full Gmail access off. For admin_policy_enforced or org_internal, check which client and permissions your Workspace administrator approved.
+      refresh_rejected: >-
+        Sign in again on this card with the client for this mailbox. If that Google Cloud project is in Testing, provider access can expire after seven days.
 when_to_use: User wants to read, compose, organize or configure mailboxes, or receive and reply to incoming mail through a Place.
 timeout_sec: 120
 companion_processes:
@@ -28,7 +51,7 @@ tools:
       - {conversation: to, effect: write, match: exact_casefold}
       - {conversation: cc, effect: write, match: exact_casefold}
       - {conversation: bcc, effect: write, match: exact_casefold}
-    description: Queue a proactive email or threaded reply for durable delivery.
+    description: Queue a proactive email, a threaded reply or an existing Gmail draft for durable delivery.
   - name: email_search
     effect: read
     target: []
@@ -49,7 +72,7 @@ tools:
     touches:
       - {conversation: message_conversation_id, thread: message_thread_id, effect: write}
       - {conversation: draft_conversation_id, thread: message_thread_id, effect: write}
-    description: List/create folders, copy/move messages and update flags.
+    description: List/create folders, copy/move messages, update flags, and send or drop a queued mail that has not gone out.
   - name: email_draft
     effect: write
     target: [account_id,to,cc,bcc]
@@ -176,25 +199,81 @@ remain unchanged and delivery additionally checks their emitted scope.
    with fresh credentials. Testing it explicitly makes a fresh connection;
    a refused operation such as sending as a particular address does not disable
    the whole mailbox.
-2. For Gmail, configure and grant the installation's GOOGLE_OAUTH_CLIENT_ID and
-   GOOGLE_OAUTH_CLIENT_SECRET where required. The existing EMAIL_OAUTH_CLIENT_*
-   keys are accepted as fallback. The widget prepares a PKCE sign-in link; Google
-   returns through the host's /onboarding/static/provider-return.html page and
-   posts the code/state to this skill's oauth/complete route. A remote installation
-   needs its reachable public address and a Web client with that exact redirect;
-   a local Desktop client uses loopback. An older host without the return page
-   needs an update. Calendar has a separate consent and credential owner.
-3. Gmail requests openid/email and gmail.modify, plus gmail.settings.basic for filters,
-   forwarding, vacation replies and sender addresses, unless the owner clears that choice
-   at sign-in. A Workspace administrator may approve only mail access, and Google then
-   refuses a larger request as a whole (admin_policy_enforced). Without it, reading,
-   drafting, sending and organizing work, and settings writes answer
-   `settings_permission_missing`. Full mail scope, including deletion that
-   skips Trash, is optional and named at consent.
-   Granted scopes are shown as known or unknown; provider refusals are not
-   reported as successes. Local disconnect removes this skill's credentials and
-   preserves history. Google project-wide revocation is different and may affect
-   Calendar or other clients in the same project.
+2. For Gmail, use **Extensions › Skills › email-presence › Sign-ins** on a host
+   that manages sign-in. Choose the issuing client for this mailbox before opening
+   Google; Mail's consent is separate from Calendar's. An existing Gmail account
+   moves with the client it used, not today's default client, and with the return
+   address its saved sign-in recorded. One saved without a return address moves only
+   to a host announcing `sign_in_handover_version` 2 (as `return_hint: "unknown"`);
+   until then it keeps serving, unreserved. Refresh Email accounts after saving a
+   sign-in on the card to see the mailbox and its granted permissions. On older hosts
+   the widget still starts the original PKCE flow with granted `GOOGLE_OAUTH_CLIENT_*`
+   (or `EMAIL_OAUTH_CLIENT_*`) settings; an older host must still serve the provider
+   return page. There a new sign-in also serves a mailbox that moved to a newer host,
+   under its account ID. A return already opened by the widget can finish after an
+   update. Mail saves that consent and reports when the host has not yet confirmed
+   it. A temporarily unavailable configured host is not an older host and does not
+   reopen the widget sign-in.
+3. Mail requests openid, email and gmail.modify. Gmail settings are optional and
+   selected by default. Full Gmail access (`https://mail.google.com/`) is optional
+   and off by default; Mail uses it for permanent deletion that skips Trash and
+   accepts it for Gmail settings writes in place of the settings permission, as
+   the choice says before sign-in. Without either, mail operations still work and
+   Gmail settings writes answer `settings_permission_missing`. The displayed
+   scopes describe the actual grant, not the requested choices: a renewal Google
+   answers without an optional permission keeps ordinary mail, and only what needs
+   that permission stops. A bearer Google named no permissions for shows them as
+   unknown and gets no optional operation until a renewal, asking for the saved
+   limit, records them beside that very token. A transfer carries a bearer with exactly the permissions
+   Google named for it, so a narrower one stays narrower; without that record it
+   offers the saved limit and the host renews the grant once within it. A host announcing `sign_in_handover_version` 2 files it
+   only under the identity Google confirms (`require_verified`). Disconnect a Gmail
+   account the host serves on the card, and one its own saved sign-in still serves
+   in Email accounts; both keep its history and receipts. A change (send, label,
+   draft, settings) is made under the access named when it began: a sign-in of the
+   mailbox that changes in between stops it before anything is sent or changed. A
+   send whose access cannot be named at that moment, for example while the host is
+   unreachable, queues nothing and returns an error.
+   Queued Gmail mail that has not gone out goes, as before 0.11, under whichever
+   confirmed sign-in of its mailbox's own Google account serves it when it leaves:
+   the host's current connection and consent or the mailbox's saved sign-in, whatever
+   it was queued with, mail queued by an earlier version included. The same mailbox
+   is its verified Google subject, never a matching address. While no confirmed
+   sign-in of that account serves it (signed out, or its sign-in to be renewed on the
+   card), it waits unsent, and the owner is told once which mail waits and why; it
+   goes by itself once the mailbox is signed in again, unless Sending is off or a
+   Place held it, which the line then says instead. A saved sign-in that Mail is
+   moving to the host is not a sign-out and posts no line. A sign-in host that cannot
+   be reached for a queued mail's bearer leaves that mail waiting too, spending no
+   attempt, until it answers. A mail whose sending began and whose outcome is unknown
+   is never sent a second time: its own mailbox is searched for it by Message-ID;
+   found in that mailbox's Sent, it is recorded sent (a copy that came in, in Inbox
+   or Spam, proves nothing; the search asks for sent copies, Trash included, and
+   reads every page of its answer); otherwise one draft of it (its envelope with
+   Bcc, body, attachments and thread; a mail sent from a draft is put back as that
+   draft was queued) is kept in that mailbox's Drafts, once the Places of its
+   Drafts, and for a reply those of its conversation (asked with its thread), allow
+   writing there as they do for email_draft, and the owner is told once to check it
+   and send it. While a Place or this skill's access keeps Mail from writing there,
+   the mail waits and the owner is told so once. Nothing is drafted in another
+   mailbox. These notices go through the host's `notify_owner` (one System row in
+   Main, mirrored to the owner's Telegram) and name the mail by its subject and a
+   short reference Mail gave it in its mailbox (`ref`, like `m-3fa91c07`), never by
+   the caller's request_id, which may carry an address and may read like another's;
+   until the host confirms one (no grant yet, an older host, the host away) it is
+   shown in the mailbox's status and the mail's receipt and posted later, only while
+   it is still true: a waiting line ends unposted once its mail went, was deleted or
+   settled, or its mailbox is signed in again, and each line is read again, with its
+   mailbox's sign-in, just before it is posted. The owner's "send" or "delete" in chat
+   is for the mind to apply: `email_send` with `draft_id` sends such a draft as it is
+   then, `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
+   discard_queued sends now or drops a mail that has not gone out; `email_accounts`
+   lists every mail that waits (`waiting`) by request_id, ref and subject. Those tools
+   and `email_receipt` take the ref in `request_id` as they take the request_id
+   itself; a new request_id that is another mail's ref in that mailbox is refused.
+   Provider revocation is a separate action and can affect
+   other uses of that Google client. An unconfirmed transfer does not fall back to
+   its old token: refresh the account view or sign in again on the card.
 4. Test the configured connection. Then optionally connect its canonical account
    id as an Email Place. New Places start Silent and activation remains the
    owner's existing choice. Sending off holds every send, including direct
@@ -207,8 +286,57 @@ remain unchanged and delivery additionally checks their emitted scope.
 
 Existing EMAIL_* configurations keep their original account id and state directory;
 no mail or receipt is moved. New account stores live under hashed account directories.
-The private accounts.sqlite3 registry (mode0600) contains configuration and tokens;
-it is not an encrypted backup. The skill's normal source package contains no credentials.
+The private accounts.sqlite3 registry (mode 0600) contains mailbox configuration
+and legacy credentials; it is not an encrypted backup. Until a transfer is reserved,
+the mailbox keeps its saved sign-in within its recorded permissions, including when
+it cannot move automatically. The complete host list must name no sign-in for its
+subject, and no recorded withdrawal may apply. Each change reads that list again.
+A grant that never recorded its permissions, nor those Google named for its current
+bearer, keeps reading only; Mail cannot use that fact to change or queue mail, or to
+offer a transfer. Recorded permissions without
+Gmail access are refused. For transferred Gmail
+accounts, the host alone refreshes the grant. The transition keeps the original
+credentials dormant in their private fields until a confirmed withdrawal. They
+are used again in two cases only: the mailbox's own first offer demonstrably
+exchanged nothing (its connection was never made, the host answered per item
+`exchange: none`, it filed that word in the receipt for that generation, or it
+returned `429` with `handover_started: false` before reading the request), or
+a host shown to be older (it answers /identity without
+sign_in_version) is asked while they were not withdrawn, still work and keep their
+permissions. That receipt closes only the attempt: it confirms no earlier mail, new
+owner, break or permission. Such a transfer is offered again after pauses that grow from 30
+seconds to an hour; a recover answer never makes them usable. A lost or unclear
+answer, including an outage after the request left, activates nothing. A transfer whose answer is lost is not
+submitted again unless the host's receipt says so: on a host announcing `sign_in_handover_version` 2 Mail first
+reads the host's own receipt of it, without credentials; otherwise it asks with
+`recover`, which exchanges nothing, for the outcome it kept, at once and then after pauses that grow from 30 seconds to
+15 minutes (pauses are kept in memory, so a restart asks about an unresolved offer again at once).
+A recorded `refresh_rejected` ends checks of that offer; the old grant does not resume.
+When the receipt says `resubmit` (only an outage stopped it before any exchange, while an earlier
+Disconnect or Revoke is known), Mail sends that mailbox's own reserved offer and
+registration again as an ordinary transfer after those pauses, unless the withdrawal
+record may concern it or cannot be read; the host files it only for the account Google
+names, and the dormant credentials serve no mail meanwhile. The host
+writes sign_in_withdrawn.json in this skill's state directory before it confirms a
+Disconnect or Revoke; this version keeps a copy that record may concern out of
+use and judges a local sign-in by withdrawals recorded after it. Earlier versions
+do not read this file. A Disconnect observed in the list or in a transfer result
+ends the earlier grant. A separate local sign-in keeps its own connection on an older host.
+If the newer host still lists a card sign-in, that row can serve Mail without replacing the
+saved manual sign-in. Missing scope on the selected local sign-in can permit reading only;
+it does not select earlier credentials. An unreadable withdrawal record or an unresolved
+transfer does not prove the local sign-in can serve. A local refresh can keep a replacement
+refresh token only in the sign-in that requested it. One local renewal runs at a time under that account's own lock,
+which a transfer reservation of it also takes, so neither overwrites the other's
+replacement; a stopped holder keeps the lock until its process ends. A
+bearer Gmail refuses is not presented again: the host is told at once (`rejected`),
+also after a refused change, and a read, never a change, is repeated once. A bound
+change asks for 30 seconds of remaining bearer lifetime (`min_valid`). If the host
+cannot supply that lifetime, Mail has not submitted the change; the consent stays
+intact. A transferred grant is never copied back
+from the host. Losing the host's
+grant does not erase the account ID or its inbox, cursor, or outbox. The source
+package contains no credentials.
 Exchange keeps the latest sync state per intake folder in that same account store.
 The native-event index prevents duplicate capture when an unfinished sync is replayed. With
 160-byte folder handles and 144-byte event keys its measured SQLite cost is
@@ -396,9 +524,39 @@ remain readable by explicit account_id.
   account_id/request_id returns its original receipt; changed sender/content
   conflicts. The same request_id in another explicitly selected account is a
   different operation.
-- Queued is not sent. Results/receipts expose pending, held, completed, failed
-  or uncertain state, actual account/sender and native provider receipt when
-  available. An ambiguous SMTP/API acceptance is never blindly replayed.
+- Queued is not sent. Results/receipts expose pending, held, completed, failed,
+  cancelled or uncertain state, actual account/sender and native provider receipt
+  when available. An ambiguous SMTP/API acceptance is never blindly replayed; for
+  Gmail the receipt also names what was found (`unknown_outcome`: sent, drafted,
+  unresolved or discarded), the draft kept for it (`draft_id`) and the owner's
+  notices. email_receipt also returns, while a mail has not gone out and once it was
+  dropped (`cancelled`), the mail as queued (To, Cc and Bcc kept apart, its HTML and
+  files), so it can be sent from another mailbox with email_send at the owner's word;
+  a mail may have only Cc or Bcc recipients. A Place's or account's hold is asked
+  about again and lifts when they allow.
+- email_send with a Gmail `draft_id` sends that existing draft as it is now: the
+  Host checks its actual To, Cc and Bcc (and its conversation when it replies) and
+  Safety reads its subject and text (and HTML), which `retry_arguments` names first;
+  its attachments are not named in the call. It is queued like any mail and goes out
+  only while the draft is unchanged since that check (users.drafts.send): it is read
+  again before its sending begins, under the sign-in it is sent with. A read Gmail
+  does not answer, or answers busy or failing (429, 5xx), leaves it waiting without
+  spending an attempt, asked again after Gmail's Retry-After (or a pause when it names
+  none); a draft gone or changed since that check is refused. Mail keeps the
+  draft's source and files as they were queued, with the mailbox's other staged mail:
+  its receipt gives them, and rule A puts the draft back from them.
+- email_mailbox `discard_queued` with a request_id (or the mail's ref) drops, in one
+  write, a mail of that account that has not begun to go out (also one a stopped
+  worker had taken), also while the mailbox is signed out; its receipt stays with the
+  mail, so replaying that request_id never queues it again. To send a waiting mail
+  from another mailbox, drop it here first and then, only when that answers that it
+  will not go out from this mailbox, send the mail its result returns from the other
+  mailbox: it can then never go out from both. The answer is what the deleting write
+  itself found, never an earlier look: a mail whose sending began meanwhile (the
+  mailbox signed in again) is answered as possibly gone out. For a mail of unknown
+  outcome not yet checked it means no draft is made; such a mail may already have
+  gone out and is never offered for sending anywhere. `send_queued` sends a mail that
+  is still queued or held now, under the mailbox's current confirmed sign-in.
 - New Hosts advertise presence_place_binding_version=1. The tool captures the
   applicable target binding before enqueue; delivery checks that retained binding
   against current scope. A newly unbound send is distinct from a disconnected
@@ -559,8 +717,11 @@ Hosts advertising `presence_delivery_version=1` receive `/presence/delivery`
 observations from the existing outbox. SMTP success is recorded as `accepted`,
 meaning server acceptance, never recipient inbox delivery or reading. A partial
 recipient refusal retains the accepted subset and the actual refusal evidence;
-an ambiguous SMTP disconnect or a process lost while sending remains uncertain
-and is never automatically resent. Reports retain the transmitted text, subject,
+an ambiguous SMTP disconnect, a Gmail answer lost after its request left, or a
+process lost while sending remains uncertain and is never automatically resent; a
+Gmail request, or the request for its bearer to the sign-in host, that never
+connected sent nothing and is retried a few times, then fails; a Sending-off or
+Place hold keeps waiting as before. Reports retain the transmitted text, subject,
 recipients, Message-ID, reply headers and producer origin, including sends made
 after the model turn ends.
 

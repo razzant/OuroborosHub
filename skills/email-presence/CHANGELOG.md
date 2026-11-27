@@ -1,5 +1,141 @@
 # Changelog
 
+## 0.11.0
+
+- Hosts with service sign-in manage Gmail on the email-presence card, with a
+  separate consent per mailbox and its own selected OAuth client. Existing
+  Gmail accounts keep their local account IDs, preferences, mail and receipts.
+  Manage Gmail settings and permanent deletion remain optional permissions.
+- Older hosts keep the local sign-in path. After a transfer, a confirmed older
+  host can use a still-valid saved grant within its recorded permissions (a renewal
+  without an optional permission keeps ordinary mail), and a new local sign-in there
+  serves the moved mailbox under its account ID instead of pointing to a card that
+  host lacks; a rotated or withdrawn grant may require new consent. A mailbox its own
+  saved sign-in still serves is disconnected in Email accounts on any host.
+  Unavailable hosts and unconfirmed transfers never reactivate
+  the old grant. IMAP, SMTP, Exchange and Place addressing are unchanged.
+- A transfer whose answer never arrived is not submitted again unless the host's
+  receipt says `resubmit` (below). Mail first reads
+  the host's own receipt of it where the host announces `sign_in_handover_version` 2,
+  then asks with `recover` (it registers and exchanges nothing) for the outcome it kept under
+  the same account and generation, at once and then after pauses that grow from
+  30 seconds to 15 minutes (in memory, so a restart asks again at once). Only
+  the host's per-item word that nothing was exchanged lets the saved original
+  continue, as does a `429` with `handover_started: false` to its own first offer
+  or a connection failure before that offer was sent. The transfer is offered again
+  later; another reason, another status code or
+  a recover answer changes nothing. When only an outage stopped the transfer before
+  any exchange while an earlier Disconnect or Revoke is known, the receipt says
+  `resubmit`: unless the withdrawal record may concern that mailbox or cannot be
+  read, Mail sends its own reserved offer and registration again as an ordinary
+  transfer after those pauses, the host files it only for the account Google
+  names, and the saved original stays parked meanwhile. A client is registered only with the
+  return address its saved sign-in recorded; one without it moves, as
+  `return_hint: "unknown"`, only to a host announcing `sign_in_handover_version` 2
+  and keeps serving unreserved until then. No installation default client is
+  registered. A change (send, label,
+  settings, deletion) names its confirmed connection and requests a bearer valid
+  for 30 seconds. Failure to obtain that lifetime does not end the consent. A
+  Disconnect or Revoke ends the grant it concerns. A later independent sign-in on
+  an older host keeps its own connection, including when a receipt for an older
+  transfer arrives afterwards. Earlier skill versions do not read withdrawal records.
+- A refused bearer is never presented again (a read is repeated once, a change never),
+  and a refresh token Google replaces is kept: a local refresh and a transfer of one
+  sign-in never overlap (one lock per account, kept while its process lives), and a
+  renewal stores its bearer only into the connection it started under, so an unrelated
+  edit meanwhile keeps the rotation. A renewal answer naming no permissions is refused.
+  A transfer carries a bearer only with the permissions Google named for it, so a
+  narrower one stays narrower; a bearer without that record gets no optional
+  operation until a renewal records it. A new local sign-in starts another connection.
+  On a host announcing `sign_in_handover_version` 2 a transfer asks for a verified
+  identity, and a change keeps the consent of the host's current row. A change (send,
+  label, draft, settings) is made under the access named when it began; a sign-in that
+  changes in between stops it before anything is sent or changed. A send whose access
+  cannot be named at that moment queues nothing.
+- Queued Gmail mail that has not gone out goes, as before this version, under
+  whichever confirmed sign-in of its mailbox's own Google account (its verified
+  subject, never a matching address) serves it when it leaves: the host's current
+  connection and consent or the mailbox's saved sign-in, mail queued by an earlier
+  version or before a new sign-in included. While no confirmed sign-in serves the
+  mailbox it waits unsent and the owner is told once which mail waits; it goes by
+  itself once the mailbox is signed in again, unless Sending is off or a Place held
+  it, which the line then says instead. A saved sign-in Mail is moving to the host
+  is not a sign-out and posts no line. A sign-in host that cannot be reached for the
+  mail's bearer leaves it waiting too, held without spending an attempt, until it
+  answers.
+- A Gmail mail whose sending began and whose outcome is unknown is never sent a second
+  time. Once Gmail search can show it, its own mailbox is searched for it by Message-ID:
+  found in that mailbox's Sent, it is recorded sent (a copy that came in, in Inbox or
+  Spam, proves nothing; the search asks for sent copies, Trash included, and reads every
+  page of its answer); found as a draft, that draft is kept; otherwise one draft of it
+  (envelope with Bcc, body, attachments, thread, Message-ID) is saved in that mailbox's
+  Drafts. A mail sent from an existing draft is put back as that draft was queued: Mail
+  keeps the draft's source and files when it queues it. The draft is saved only once the
+  Places of that mailbox's Drafts, and for a reply those of its conversation (asked with
+  its thread), allow writing there, asked as email_draft asks; while a Place or this
+  skill's access holds them, the mail waits and the owner is told once.
+  Nothing is drafted in another mailbox. The owner is told once, in one line naming the
+  subject and a short reference Mail gave the mail in its mailbox (never the caller's
+  request_id, which may carry an address and may read like another's): "The email ...
+  (ref m-...) is in Drafts of ...: check it and send it". Gmail may give a sent message a
+  Message-ID of its own, so a search that finds nothing never proves it unsent: that is
+  why the line asks to check it.
+- Those lines go through the host's `notify_owner` permission (`POST /notify`, one System
+  row in the owner's chat, mirrored to Telegram); recipients, Bcc and body stay out of
+  them. Until the host confirms one (no grant yet, an older host without `notify_version`,
+  the host away) it stays pending, is shown in the mailbox's status, the widget and the
+  mail's receipt, and is posted later; a 503 from the host is posted again after a pause.
+  A line is posted only while it is still true: one saying a mail waits ends unposted, in
+  the same write, once the mail goes, is deleted or settled, or once its mailbox is
+  signed in again; each line is read again, with its mailbox's sign-in, just before it is
+  posted, so a change made while the host took the line before it is seen. A send whose
+  worker stopped during it is known to be of unknown outcome also while its mailbox is
+  signed out.
+- "Send" and "delete" in chat are the mind's: `email_send` with a Gmail `draft_id` sends
+  an existing draft as it is now (the Host checks its actual recipients and Safety reads
+  its subject and text, returned in `retry_arguments`; its attachments are not named in
+  the call; it goes out only while unchanged since that check);
+  `email_mailbox` delete_draft removes it; `email_mailbox` `discard_queued` drops, in one
+  write, a mail that has not begun to go out, also one a stopped worker had taken (its
+  receipt stays as `cancelled`, with the mail, so a replayed request_id never queues it
+  again) and `send_queued` sends one now under the mailbox's current sign-in. To send a
+  waiting mail from another mailbox, the mind drops it first and sends the returned mail
+  there only when the drop answers that it will not go out from here, so it never goes
+  from both; that answer is what the deleting write itself found, so a mail whose sending
+  began meanwhile is answered as possibly gone out, and a mail of unknown outcome is never
+  offered for that.
+  `email_receipt` names the unknown outcome found (`unknown_outcome`), the draft kept
+  (`draft_id`), the owner's notices and, while a mail has not gone out or once it was
+  dropped, the mail as queued: To, Cc and Bcc apart (a mail may have only Cc or Bcc
+  recipients), HTML and files, those of a draft sent by its id included. `email_accounts`
+  lists every mail that waits (`waiting`) by request_id, ref and subject; those tools and
+  `email_receipt` take the ref in `request_id` as they take the request_id itself, and a
+  new request_id that is another mail's ref in its mailbox is refused. A draft sent by its
+  id is read again before its sending begins, under the sign-in it is then sent with, so a
+  read that fails leaves it queued and a renewed bearer serves both; a read Gmail does not
+  answer, or answers busy or failing (429, 5xx), waits without spending an attempt, asked
+  again after Gmail's Retry-After, so a long outage never ends the mail.
+- An unreserved mailbox keeps its local sign-in within recorded Gmail permissions
+  even when automatic transfer is not possible. The host's complete list must name
+  no sign-in of its subject and no withdrawal may apply. A change reads the list
+  anew; ordinary reads in a search or poll can share its snapshot. A grant that
+  recorded neither its permissions nor those Google named for its current bearer keeps
+  reading only; no change, enqueue or transfer is inferred. The host's own receipt of one exact
+  generation with `refused` and `exchange: none` closes that attempt like the first
+  answer's word and gives the saved sign-in back, whatever its reason; it confirms
+  no earlier mail, new owner, break or permission, and a recover answer still never
+  does. Only a transfer's `imported` receipt gives its mail a consent.
+- A change Gmail refuses with 401 is never repeated, and the host hears at once of
+  that very bearer (`rejected`). A Gmail request that never connected sent nothing: it
+  is retried a few times, then fails, never uncertain; a request for its bearer to the
+  sign-in host that never connected leaves the mail waiting, as above. Sending-off and
+  Place holds keep waiting. A lost answer after the request left stays uncertain and is
+  looked for as above.
+- Full Gmail access is named so before sign-in, with what Mail uses it for (permanent
+  deletion that skips Trash, and Gmail settings); no permission changed. The card is
+  pointed to by its technical name, email-presence; Email inbox is the catalog's title
+  for it, which may not be what its installed card shows.
+
 ## 0.10.11
 
 - Requires PluginAPI 2.5. Tool rows declare `touches` groups instead of flat targets

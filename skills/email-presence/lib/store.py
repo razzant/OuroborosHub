@@ -7,12 +7,13 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from email.utils import parseaddr
 from pathlib import Path
 
@@ -21,10 +22,39 @@ from .mime import conversation_root, mailbox_addresses, prior_imap_capture, reci
 
 _MAX_ATTACHMENT_FILES = 10
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+# Rule A for an outgoing Gmail mail whose submission began and whose outcome is unknown: its mailbox is searched for it
+# no sooner than this after the answer was lost, since Gmail search can lag a moment behind a send (GmailClient
+# find_submitted); a search that fails is asked again after a pause doubling from a minute to an hour.
+RECONCILE_AFTER = 300
+_RECONCILE_LONGEST = 3600
+# One sentence the owner is told through the host (owner_notice), kept here until the host confirms it.
+_NOTICE = "owner_notice:"
+# One notice of each kind at most per queued mail: `waiting` while its mailbox is signed out, `held` while a Place keeps
+# rule A from writing its Drafts, `drafted` or `unresolved` once rule A settled it.
+_NOTICE_KINDS = ("waiting", "held", "drafted", "unresolved")
+_SUBJECT_IN_NOTICE = 150  # characters of a subject quoted in a notice
+_NOTICE_LONGEST = 400  # the host's limit for one notice (POST /notify)
+_QUEUED = ("pending", "retry", "processing")  # a mail that has not begun to go out
+_UNKNOWN = ("uncertain", "partial")  # a mail whose sending began and whose outcome is unknown
 
 
 def _delivery_state(state, error):
     return "held" if state == "retry" and str(error).startswith("Held:") else state
+
+
+def _unsettled(state, reporting_json):
+    """A mail of unknown outcome that rule A has not settled yet (no `reconciled` record)."""
+    return state in _UNKNOWN and "reconciled" not in json.loads(reporting_json or "{}")
+
+
+def _held_otherwise(error, hold_kind):
+    """Its last try was held by a Place or another check of Mail, which its mailbox's sign-in does not lift. A hold for
+    access (the sign-in itself) or for Sending off (read from the mailbox as it is now) is not counted here."""
+    return str(error).startswith("Held:") and hold_kind not in ("access", "sending_off")
+
+
+def _shown_whole(ref):
+    return isinstance(ref, str) and bool(ref) and ref.isprintable() and not any(ch.isspace() for ch in ref)
 
 
 def _physical_source(message):
@@ -42,6 +72,57 @@ def _physical_source(message):
 def _read_source_key(message_id, source):
     data = json.dumps([str(message_id or ""), source], separators=(",", ":"), ensure_ascii=True)
     return "read_source:" + hashlib.sha256(data.encode("ascii")).hexdigest()
+
+
+def _notice(template, subject, address, ref=""):
+    """One notice sentence naming a mail by its subject (on one line, shortened as needed) and by `ref`, the short
+    reference Mail gave it in its mailbox (EmailStore._issue_ref), which "send", "delete" and its receipt take, within the
+    host's limit. Never the caller's request_id: one may carry an address, a Bcc one included, and two may read alike. A
+    ref that cannot be shown whole is left out rather than cut; the mailbox's status lists the mail that waits."""
+    ref = f" (ref {ref})" if _shown_whole(ref) else ""
+    if ref and len(template.format(subject="", address=address, ref=ref)) + 20 > _NOTICE_LONGEST:
+        ref = ""
+    words = " ".join(str(subject or "").split()) or "(no subject)"
+    room = max(20, min(_SUBJECT_IN_NOTICE, _NOTICE_LONGEST - len(template.format(subject="", address=address, ref=ref))))
+    quoted = words if len(words) <= room else words[:room - 1].rstrip() + "…"
+    text = template.format(subject=quoted, address=address, ref=ref)
+    return text if len(text) <= _NOTICE_LONGEST else text[:_NOTICE_LONGEST - 1] + "…"
+
+
+def drafted_notice(subject, address, ref=""):
+    return _notice('The email "{subject}"{ref} is in Drafts of {address}: check it and send it.',
+                   subject, address, ref)
+
+
+def unresolved_notice(subject, address, ref=""):
+    return _notice('The email "{subject}"{ref} may already have gone out from {address}, and it could not be put in '
+                   'Drafts: check Sent.', subject, address, ref)
+
+
+def draft_held_notice(subject, address, ref=""):
+    return _notice('The email "{subject}"{ref} may already have gone out from {address}; it is put in Drafts there once '
+                   "Ouroboros allows writing it there (a Place, or this skill's access): check Sent, or ask to delete it.",
+                   subject, address, ref)
+
+
+def waiting_notice(subject, address, *, unknown=False, hold="", ref=""):
+    """`hold`: what holds the mail besides its mailbox's sign-in: "" (nothing: it goes by itself once signed in),
+    "sending_off" (Sending is off for that mailbox) or "held" (its last try was held by a Place or a check of Mail)."""
+    if unknown:
+        template = ('The email "{subject}"{ref} may already have gone out from {address}: once that mailbox is signed in '
+                    'to Mail again it is checked in Sent, never sent twice, and put in Drafts if it is not there.')
+    elif hold == "sending_off":
+        template = ('The email "{subject}"{ref} waits for {address} to be signed in to Mail again, and Sending is off '
+                    'for that mailbox: it goes out once both allow it; you can also ask to send it from another mailbox '
+                    'or to delete it.')
+    elif hold:
+        template = ('The email "{subject}"{ref} waits for {address} to be signed in to Mail again and was also held when '
+                    'last tried (its receipt says why): it goes out once that allows it; you can also ask to send it '
+                    'from another mailbox or to delete it.')
+    else:
+        template = ('The email "{subject}"{ref} waits for {address} to be signed in to Mail again and then goes by '
+                    'itself; you can also ask to send it from another mailbox or to delete it.')
+    return _notice(template, subject, address, ref)
 
 
 class RequestIdConflict(ValueError):
@@ -140,6 +221,7 @@ class OutboxItem:
     attachments: tuple[dict, ...] = ()
     html_body: str = ""
     body_type: str = "plain"
+    ref: str = ""  # the short reference Mail gave it in its mailbox (EmailStore._issue_ref)
 
     @property
     def envelope_recipients(self):
@@ -226,10 +308,15 @@ class EmailStore:
                                       ("refused_json", "TEXT NOT NULL DEFAULT '{}'"),
                                       ("reporting_json", "TEXT NOT NULL DEFAULT '{}'"),
                                       ("reports_json", "TEXT NOT NULL DEFAULT '[]'"),
-                                      ("report_due_at", "REAL NOT NULL DEFAULT 0")):
+                                      ("report_due_at", "REAL NOT NULL DEFAULT 0"),
+                                      # What held it last (hold_outbox), kept apart from the accepted row it describes.
+                                      ("hold_kind", "TEXT NOT NULL DEFAULT ''"),
+                                      # The short reference Mail gave it (_issue_ref): lines to the owner name it by this.
+                                      ("ref", "TEXT NOT NULL DEFAULT ''")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {declaration}")
             db.execute("CREATE INDEX IF NOT EXISTS outbox_report_due ON outbox(report_due_at)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS outbox_ref ON outbox(ref) WHERE ref<>''")
             if old and db.execute("SELECT name FROM sqlite_master WHERE name='prototype_inbox'").fetchone():
                 columns = [r[1] for r in db.execute("PRAGMA table_info(prototype_inbox)")]
                 names = ",".join(columns)
@@ -294,6 +381,13 @@ class EmailStore:
         with self._connect() as db:
             self._put(db, key, value)
 
+    def put_first(self, key, value):
+        """Keep ``value`` under ``key`` unless a record is already kept there, in one statement: the first record stays,
+        whichever process writes next. True when this call kept it."""
+        with self._connect() as db:
+            return db.execute("INSERT INTO runtime_state VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+                              (key, json.dumps(value), time.time())).rowcount == 1
+
     def _stage_files(self, attachments, *, bucket, identity, enforce_limits=True):
         """Copy attachment bytes into immutable skill-owned files.
 
@@ -339,11 +433,11 @@ class EmailStore:
             })
         return result
 
-    def _stage_raw_source(self, raw, *, identity):
+    def _stage_raw_source(self, raw, *, identity, bucket="inbound"):
         if not isinstance(raw, bytes):
             return None
         digest = hashlib.sha256(raw).hexdigest()
-        root = self.state_dir / "staged" / "inbound" / hashlib.sha256(str(identity).encode()).hexdigest()
+        root = self.state_dir / "staged" / bucket / hashlib.sha256(str(identity).encode()).hexdigest()
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"source-{digest[:16]}.eml"
         if not path.exists():
@@ -406,6 +500,18 @@ class EmailStore:
 
     def stage_outbound_attachments(self, request_id, attachments):
         return self._stage_files(attachments, bucket="outbound", identity=request_id)
+
+    def stage_draft(self, request_id, letter):
+        """An existing Gmail draft queued by its draft_id, as it was read then (GmailClient.draft_letter): its exact source,
+        which rule A puts back in that mailbox's Drafts if its send's outcome is unknown and the draft is gone, and its
+        files, so its receipt gives the whole mail to send from another mailbox. Both are immutable files kept with the
+        mailbox's other staged mail, as large as the draft (its files twice: in the source and on their own); they go
+        with the mailbox's state. Returns ``(source, files)``."""
+        files = [item for item in letter.get("attachments") or () if isinstance(item, dict)
+                 and isinstance(item.get("data"), bytes)]  # a carried message stays in the source only
+        staged = self._stage_files(files, bucket="outbound", identity=request_id, enforce_limits=False)
+        source = self._stage_raw_source(letter["_raw_source"], identity="draft:" + str(request_id), bucket="outbound")
+        return {key: source[key] for key in ("path", "sha256", "size")}, staged
 
     @staticmethod
     def _put(db, key, value):
@@ -501,12 +607,8 @@ class EmailStore:
                     or db.execute(f"SELECT 1 FROM {table} WHERE {claimable} LIMIT 1", (now, now)).fetchone()):
                 return None
             db.execute("BEGIN IMMEDIATE")
-            # SMTP DATA can have been accepted before a process disappears.
             if table == "outbox":
-                for row in db.execute("SELECT * FROM outbox WHERE state='sending' AND lease_until<=?", (now,)).fetchall():
-                    report = email_report(self._outbox_item(row), "uncertain", error="Process lost during provider acceptance")
-                    self._freeze_reports(db, row["id"], [report] if report else [])
-                db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during mail delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
+                self._settle_lost_sends(db, now)
             row = db.execute(f"SELECT * FROM {table} WHERE {claimable} ORDER BY {order} LIMIT 1", (now, now)).fetchone()
             if not row:
                 return None
@@ -514,6 +616,16 @@ class EmailStore:
             result = dict(row)
             result.update(lease_token=token, attempts=row["attempts"] + 1)
             return result
+
+    def _settle_lost_sends(self, db, now):
+        """SMTP DATA or a provider's send can have been accepted before a process disappears: a mail whose `sending` lease
+        ran out is of unknown outcome, never sent again. Run where its worker claims mail and, for a mailbox no worker
+        serves (signed out), where its notices are kept (note_waiting)."""
+        for row in db.execute("SELECT * FROM outbox WHERE state='sending' AND lease_until<=?", (now,)).fetchall():
+            report = email_report(self._outbox_item(row), "uncertain", error="Process lost during provider acceptance")
+            self._freeze_reports(db, row["id"], [report] if report else [])
+            self._retire(db, row["request_id"])
+        db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during mail delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
 
     def claim_inbox(self, lease_seconds=2100, submitted=None):
         """Lease claimable mail, keeping each thread's FIFO.
@@ -561,6 +673,8 @@ class EmailStore:
                 if reporting is not None:
                     db.execute("UPDATE outbox SET reporting_json=? WHERE id=?", (json.dumps(reporting), row_id))
                 self._freeze_reports(db, row_id, reports)
+                if state != "retry":  # it went, failed or began to go: a line saying that it waits no longer holds
+                    self._retire(db, db.execute("SELECT request_id FROM outbox WHERE id=?", (row_id,)).fetchone()[0])
         return True
 
     def complete_inbox(self, row_id, token):
@@ -584,13 +698,16 @@ class EmailStore:
         return self._outbox_item(row) if row is not None else None
 
     def enqueue_outbox(self, *, request_id, recipients=(), subject="", body="", in_reply_to="", references=(), reporting=None,
-                       to=None, cc=(), bcc=(), attachments=(), html_body="", body_type="plain", hold_reason=""):
+                       to=None, cc=(), bcc=(), attachments=(), html_body="", body_type="plain", hold_reason="",
+                       message_id=""):
+        """Queue one outgoing mail under `request_id`; `message_id` is the Message-ID it goes out with when that is not
+        Mail's own (a mail sent from an existing draft keeps the draft's)."""
         now = time.time()
         visible_to, visible_cc, visible_bcc = recipient_groups(recipients if to is None else to, cc, bcc)
         envelope = visible_to + visible_cc + visible_bcc
         if not envelope:
             raise ValueError("Mail delivery needs at least one valid envelope recipient")
-        message_id = self.message_id_for(request_id)
+        message_id = message_id or self.message_id_for(request_id)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT * FROM outbox WHERE request_id=?", (request_id,)).fetchone()
@@ -606,14 +723,49 @@ class EmailStore:
                 if previous.get("sender") and previous["sender"] != (reporting or {}).get("sender"):
                     raise RequestIdConflict("This request_id already names a different sender")
                 return False
-            cur = db.execute("""INSERT OR IGNORE INTO outbox(request_id,recipients_json,subject,body,in_reply_to,references_json,provider_message_id,created_at,updated_at,reporting_json,to_json,cc_json,bcc_json,attachments_json,html_body,body_type)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (request_id, json.dumps(envelope), subject, body,
+            if self._by_ref(db, request_id) is not None:  # a mail is named by one key only, in this mailbox
+                raise RequestIdConflict("This request_id is the reference Mail gave another email in this mailbox; "
+                                        "use a new request_id for a new send")
+            cur = db.execute("""INSERT OR IGNORE INTO outbox(request_id,recipients_json,subject,body,in_reply_to,references_json,provider_message_id,created_at,updated_at,reporting_json,to_json,cc_json,bcc_json,attachments_json,html_body,body_type,ref)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (request_id, json.dumps(envelope), subject, body,
                                                in_reply_to, json.dumps(list(references)), message_id, now, now, json.dumps(reporting or {}),
-                                               json.dumps(visible_to), json.dumps(visible_cc), json.dumps(visible_bcc), json.dumps(list(attachments), ensure_ascii=False), str(html_body or ""), str(body_type or "plain")))
+                                               json.dumps(visible_to), json.dumps(visible_cc), json.dumps(visible_bcc), json.dumps(list(attachments), ensure_ascii=False), str(html_body or ""), str(body_type or "plain"),
+                                               self._issue_ref(db)))
             if cur.rowcount and hold_reason:
                 db.execute("UPDATE outbox SET state='retry',last_error=?,available_at=? WHERE id=?",
                            ("Held: " + str(hold_reason).removeprefix("Held: "), now + 5, cur.lastrowid))
             return bool(cur.rowcount)
+
+    @staticmethod
+    def _by_ref(db, ref):
+        return db.execute("SELECT request_id FROM outbox WHERE ref=? AND ref<>''", (str(ref),)).fetchone()
+
+    @classmethod
+    def _issue_ref(cls, db):
+        """A short reference for a mail of this mailbox, which lines to the owner name it by: opaque (it says nothing about
+        the mail), never another mail's ref or request_id here. Issued under the caller's write lock."""
+        while True:
+            ref = "m-" + secrets.token_hex(4)
+            if cls._by_ref(db, ref) is None and not db.execute("SELECT 1 FROM outbox WHERE request_id=?",
+                                                               (ref,)).fetchone():
+                return ref
+
+    @classmethod
+    def _ref_of(cls, db, row):
+        """The ref of an outbox row, issued now (under the caller's write lock) for a row queued before refs existed."""
+        if row["ref"]:
+            return row["ref"]
+        ref = cls._issue_ref(db)
+        db.execute("UPDATE outbox SET ref=? WHERE id=?", (ref, row["id"]))
+        return ref
+
+    def request_id_of(self, key):
+        """The request_id of the mail `key` names in this mailbox: its own request_id (as before), else the ref Mail gave
+        it, which the lines to the owner and `waiting` name. None when it names no mail here."""
+        with self._connect() as db:
+            row = db.execute("SELECT request_id FROM outbox WHERE request_id=?", (str(key),)).fetchone()
+            row = row or self._by_ref(db, key)
+        return row[0] if row else None
 
     def message_id_for(self, request_id):
         return "<" + hashlib.sha256((str(self.path.resolve()) + ":" + str(request_id)).encode()).hexdigest() + "@ouroboros.local>"
@@ -629,13 +781,20 @@ class EmailStore:
         return self._outbox_item(r)
 
     @staticmethod
-    def _outbox_item(r):
+    def _groups(r):
+        """To, Cc and Bcc as queued. A row from before they were kept apart names every recipient in To; a mail with only
+        Cc or Bcc recipients keeps them there, never in To."""
+        groups = tuple(tuple(json.loads(r[name] or "[]")) for name in ("to_json", "cc_json", "bcc_json"))
+        return groups if any(groups) else (tuple(json.loads(r["recipients_json"])), (), ())
+
+    @classmethod
+    def _outbox_item(cls, r):
         return OutboxItem(r["id"], r["lease_token"], r["request_id"], tuple(json.loads(r["recipients_json"])),
                           r["subject"], r["body"], r["in_reply_to"], tuple(json.loads(r["references_json"])),
                           r["attempts"], r["provider_message_id"], json.loads(r["reporting_json"]),
-                          tuple(json.loads(r["to_json"] or "[]")) or tuple(json.loads(r["recipients_json"])),
-                          tuple(json.loads(r["cc_json"] or "[]")), tuple(json.loads(r["bcc_json"] or "[]")),
-                          tuple(json.loads(r["attachments_json"] or "[]")), r["html_body"], r["body_type"])
+                          *cls._groups(r),
+                          tuple(json.loads(r["attachments_json"] or "[]")), r["html_body"], r["body_type"],
+                          r["ref"] if "ref" in r.keys() else "")
 
     def set_reporting(self, item, reporting):
         with self._connect() as db:
@@ -688,14 +847,246 @@ class EmailStore:
     def retry_outbox(self, row_id, token, error, delay=5):
         self._update("outbox", row_id, token, "retry", error, delay)
 
-    def hold_outbox(self, item, reason):
+    def hold_outbox(self, item, reason, *, delay=5, kind="policy"):
+        """Hold a leased mail unsent; it is asked about again after `delay` seconds. `kind` records what holds it:
+        `access` (its mailbox's sign-in cannot serve it now), `sending_off`, or `policy` (a Place or a check of Mail),
+        so a line about its signed-out mailbox says whether the sign-in alone holds it (note_waiting). It is kept in its
+        own column: a hold never rewrites the accepted row (its envelope and reporting stay as they were queued)."""
         with self._connect() as db:
             db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,"
-                       "available_at=?,updated_at=?,attempts=MAX(0,attempts-1) WHERE id=? AND lease_token=?",
-                       (reason, time.time() + 5, time.time(), item.row_id, item.lease_token))
+                       "available_at=?,updated_at=?,attempts=MAX(0,attempts-1),hold_kind=? WHERE id=? AND lease_token=?",
+                       (str(reason), time.time() + delay, time.time(), str(kind), item.row_id, item.lease_token))
+
+    def wait_outbox(self, item, error, *, delay):
+        """Ask about a leased mail again after `delay` seconds without counting this try: something it needs before its
+        sending begins could not be read now (a provider that did not answer or asked to wait). Nothing was sent; it is
+        `retry`, not a hold, and its holds and lines stay as they were."""
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,available_at=?,"
+                       "updated_at=?,attempts=MAX(0,attempts-1) WHERE id=? AND lease_token=?",
+                       (str(error), time.time() + delay, time.time(), item.row_id, item.lease_token))
 
     def uncertain_outbox(self, row_id, token, error, *, reports=()):
-        self._update("outbox", row_id, token, "uncertain", error, reports=reports)
+        # Never sent again by a pass; its mailbox is searched for it once Gmail search can show it (claim_uncertain).
+        self._update("outbox", row_id, token, "uncertain", error, RECONCILE_AFTER, reports=reports)
+
+    def claim_uncertain(self, lease_seconds=300):
+        """Lease the next mail whose submission began and whose outcome is unknown (`uncertain`, or `partial` where some
+        recipients were accepted) and that rule A has not settled yet (no `reconciled` record), once its pause is over.
+        Its state stays as it is: no pass ever sends it again. None when there is nothing due (read only)."""
+        now = time.time()
+        due = ("state IN ('uncertain','partial') AND lease_until<=? AND available_at<=? "
+               "AND json_extract(reporting_json,'$.reconciled') IS NULL")
+        with self._connect() as db:
+            if not db.execute(f"SELECT 1 FROM outbox WHERE {due} LIMIT 1", (now, now)).fetchone():
+                return None
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(f"SELECT * FROM outbox WHERE {due} ORDER BY id LIMIT 1", (now, now)).fetchone()
+            if row is None:
+                return None
+            token = uuid.uuid4().hex
+            db.execute("UPDATE outbox SET lease_token=?,lease_until=? WHERE id=?", (token, now + lease_seconds, row["id"]))
+            ref = self._ref_of(db, row)  # rule A's line names it by this
+        return self._outbox_item({**dict(row), "lease_token": token, "ref": ref})
+
+    def settle_uncertain(self, item, outcome, *, receipt=None, draft=None, error="", notice=""):
+        """Record what rule A found or did for a leased unknown-outcome mail, once, with the owner's notice in the same
+        write: `sent` (found in the mailbox: completed, with its provider receipt), `drafted` (a draft of it is in the
+        mailbox), `unresolved` (neither found nor saved) or `discarded` (the owner dropped it). False when the lease
+        was lost meanwhile."""
+        reporting = {**item.reporting, "reconciled": {"outcome": outcome, "at": time.time(),
+                                                      **({"error": error} if error else {})}}
+        if draft:
+            reporting["draft"] = dict(draft)
+        if receipt:
+            reporting["provider_receipt"] = dict(receipt)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute(
+                "UPDATE outbox SET reporting_json=?,state=CASE WHEN ? THEN 'completed' ELSE state END,"
+                "lease_token='',lease_until=0,updated_at=? WHERE id=? AND lease_token=?",
+                (json.dumps(reporting), outcome == "sent", time.time(), item.row_id, item.lease_token)).rowcount
+            if not changed:
+                return False
+            if outcome == "sent":
+                self._freeze_reports(db, item.row_id, [email_report(replace(item, reporting=reporting), "accepted")])
+            self._retire(db, item.request_id)  # it is settled: a line that it waits no longer holds
+            if notice:
+                self._note(db, item.request_id, outcome, notice)
+        return True
+
+    def defer_uncertain(self, item, note, *, notice=""):
+        """Ask about a leased unknown-outcome mail again later: its mailbox could not be searched or written now. `notice`,
+        when a Place keeps rule A from writing that mailbox's Drafts, is the owner's line about it (kept once, `held`)."""
+        tries = int(item.reporting.get("reconcile_tries") or 0) + 1
+        reporting = {**item.reporting, "reconcile_tries": tries, "reconcile_note": str(note)}
+        with self._connect() as db:
+            changed = db.execute("UPDATE outbox SET reporting_json=?,lease_token='',lease_until=0,available_at=?,updated_at=? "
+                                 "WHERE id=? AND lease_token=?",
+                                 (json.dumps(reporting), time.time() + min(_RECONCILE_LONGEST, 60 * 2 ** min(tries - 1, 6)),
+                                  time.time(), item.row_id, item.lease_token)).rowcount
+            if changed and notice:
+                self._note(db, item.request_id, "held", notice)
+
+    def discard_queued(self, request_id):
+        """The owner's "delete" for a mail that has not gone out, in one write: one still queued or held, or taken by a
+        worker that stopped before its sending began (its lease ran out), is cancelled; its receipt stays, with the mail,
+        so replaying the same request_id never queues it again and the mail can still be sent from another mailbox. One
+        whose outcome is unknown and not yet settled is never drafted. A mail a worker is on this moment, sent, failed or
+        already settled is left as it is.
+
+        The result is its receipt, with the mail; what this very write did: `cancelled` (it had not begun to go out, so
+        it never goes from this mailbox and may be sent from another), `discarded` (its sending had begun and its outcome
+        is unknown: it may already have gone out, and it is no longer looked for) or "" (left as it is); and the state
+        this write found it in. Whatever was read about it before this write says none of that."""
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM outbox WHERE request_id=?", (str(request_id),)).fetchone()
+            if row is None:
+                return None, "", ""
+            item = self._outbox_item(row)
+            leased = bool(row["lease_token"]) and row["lease_until"] > now
+            if row["state"] in _QUEUED and not leased:
+                # A stopped worker's lease is cleared with it: that worker can no longer mark it sending (mark_sending).
+                db.execute("UPDATE outbox SET state='cancelled',last_error='Deleted by the owner before it was sent',"
+                           "lease_token='',lease_until=0,updated_at=? WHERE id=?", (now, row["id"]))
+                self._freeze_reports(db, row["id"], [email_report(item, "failed", error="Deleted by the owner")])
+                done = "cancelled"
+            elif _unsettled(row["state"], row["reporting_json"]) and not leased:
+                reporting = {**item.reporting, "reconciled": {"outcome": "discarded", "at": now}}
+                db.execute("UPDATE outbox SET reporting_json=?,updated_at=? WHERE id=?",
+                           (json.dumps(reporting), now, row["id"]))
+                done = "discarded"
+            else:
+                done = ""
+            if done:
+                self._retire(db, row["request_id"])
+        return self.receipt(request_id, with_letter=True), done, row["state"]
+
+    def release_queued(self, request_id, link=None):
+        """The owner's "send" for a mail still queued or held (or taken by a worker that stopped before its sending began):
+        it is due now, under `link` when given (the access its mailbox's current confirmed sign-in gives it). Its holds are
+        judged again as it goes; False when it is not such a mail (a worker is on it this moment, sent, failed, cancelled
+        or of unknown outcome)."""
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM outbox WHERE request_id=?", (str(request_id),)).fetchone()
+            if row is None or row["state"] not in _QUEUED or (row["lease_token"] and row["lease_until"] > now):
+                return False
+            reporting = json.loads(row["reporting_json"])
+            if link:
+                reporting["gmail_connection"] = dict(link)
+            db.execute("UPDATE outbox SET reporting_json=?,available_at=?,updated_at=? WHERE id=?",
+                       (json.dumps(reporting), now, now, row["id"]))
+        return True
+
+    @staticmethod
+    def _note(db, request_id, kind, text):
+        """Keep one notice for the owner about one queued mail: the first kept for that mail and kind stays."""
+        now = time.time()
+        notice = {"request_id": str(request_id), "kind": kind, "text": str(text), "state": "pending", "attempts": 0,
+                  "available_at": now, "created_at": now}
+        db.execute("INSERT INTO runtime_state VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+                   (f"{_NOTICE}{request_id}:{kind}", json.dumps(notice, ensure_ascii=False), now))
+
+    @staticmethod
+    def _retire(db, request_id, kinds=("waiting", "held")):
+        """End the notices of these kinds about one mail that the host has not shown the owner: written in the same write
+        that settles, sends, starts sending or drops that mail, since they no longer hold. One already shown stays."""
+        db.executemany("DELETE FROM runtime_state WHERE key=? AND json_extract(value,'$.state')<>'sent'",
+                       [(f"{_NOTICE}{request_id}:{kind}",) for kind in kinds])
+
+    def note_waiting(self, address, *, sending_off=False):
+        """While this mailbox is signed out of Mail: one notice for each mail of it that has not gone out (queued or held)
+        and each whose outcome is unknown and not yet settled, naming the mailbox and what else holds the mail
+        (`sending_off`: Sending is off for this mailbox now). It waits; nothing is sent or drafted elsewhere. A send
+        whose worker stopped during it is first known to be of unknown outcome, as a worker's claim would find it.
+        Returns how many were kept now."""
+        kept = 0
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._settle_lost_sends(db, time.time())
+            rows = db.execute("SELECT id,request_id,ref,subject,state,last_error,hold_kind,reporting_json FROM outbox WHERE "
+                              "state IN ('pending','retry','processing','uncertain','partial')").fetchall()
+            for row in rows:
+                unknown = row["state"] in _UNKNOWN
+                if unknown and not _unsettled(row["state"], row["reporting_json"]):
+                    continue
+                key = f"{_NOTICE}{row['request_id']}:waiting"
+                if self._get(db, key) is not None:
+                    continue
+                hold = ("" if unknown else "sending_off" if sending_off else
+                        "held" if _held_otherwise(row["last_error"], row["hold_kind"]) else "")
+                self._note(db, row["request_id"], "waiting", waiting_notice(row["subject"], address, unknown=unknown,
+                                                                            hold=hold, ref=self._ref_of(db, row)))
+                kept += 1
+        return kept
+
+    @staticmethod
+    def _holds(db, notice, signed_out):
+        """Whether a notice not yet shown still says what is true: a `waiting` one while its mail has not gone out (or is
+        of unknown outcome, unsettled) and its mailbox is signed out; a `held` one while its mail is unsettled. A
+        `drafted` or `unresolved` one reports what rule A did, which stays true."""
+        if notice.get("kind") not in ("waiting", "held"):
+            return True
+        row = db.execute("SELECT state,reporting_json FROM outbox WHERE request_id=?",
+                         (str(notice.get("request_id")),)).fetchone()
+        if row is None:
+            return False
+        unsettled = _unsettled(row["state"], row["reporting_json"])
+        return unsettled if notice["kind"] == "held" else signed_out and (row["state"] in _QUEUED or unsettled)
+
+    def due_notices(self, *, signed_out=False):
+        """The owner's notices to post now: (key, notice), oldest first. `signed_out`: this mailbox is signed out now.
+        A notice that no longer holds (_holds) is ended unposted, under the write lock; otherwise this only reads."""
+        now = time.time()
+        with self._connect() as db:
+            pending = self._pending_notices(db)
+            if any(not self._holds(db, notice, signed_out) for _, notice in pending):
+                db.execute("BEGIN IMMEDIATE")
+                pending = self._pending_notices(db)  # as they are now, under the write lock
+                ended = {key for key, notice in pending if not self._holds(db, notice, signed_out)}
+                db.executemany("DELETE FROM runtime_state WHERE key=?", [(key,) for key in ended])
+                pending = [(key, notice) for key, notice in pending if key not in ended]
+        return [(key, notice) for key, notice in pending if notice["available_at"] <= now]
+
+    def notice_to_post(self, key, *, signed_out=False):
+        """The notice under `key` as it is now, read again just before it is posted (`signed_out`: its mailbox as it is
+        now): None unless it is still pending, due and still says what is true (_holds); one that no longer holds is
+        ended unposted, in this same write."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            notice = self._get(db, key)
+            if notice is None or notice.get("state") != "pending" or notice["available_at"] > time.time():
+                return None
+            if not self._holds(db, notice, signed_out):
+                db.execute("DELETE FROM runtime_state WHERE key=?", (key,))
+                return None
+            return notice
+
+    @staticmethod
+    def _pending_notices(db):
+        rows = db.execute("SELECT key,value FROM runtime_state WHERE key LIKE ? ORDER BY updated_at,key",
+                          (_NOTICE + "%",)).fetchall()
+        notices = [(row["key"], json.loads(row["value"])) for row in rows]
+        return [(key, notice) for key, notice in notices if notice.get("state") == "pending"]
+
+    def finish_notice(self, key, outcome, delay=0, note=""):
+        """`sent` once the host wrote it; `invalid` when the host refused its text, which posting again cannot change
+        (it stays in the status); otherwise it stays pending and is posted again after `delay` seconds."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            notice = self._get(db, key)
+            if notice is None:
+                return
+            notice.update(attempts=int(notice.get("attempts") or 0) + 1, note=str(note))
+            if outcome in ("sent", "invalid"):
+                notice.update(state=outcome, **({"sent_at": time.time()} if outcome == "sent" else {}))
+            else:
+                notice["available_at"] = time.time() + delay
+            self._put(db, key, notice)
 
     def fail_outbox(self, row_id, token, error, *, reports=()):
         self._update("outbox", row_id, token, "failed", error, reports=reports)
@@ -819,9 +1210,10 @@ class EmailStore:
                 self._put(db, own, record)
             self._put(db, key, record)
 
-    def receipt(self, request_id):
+    def receipt(self, request_id, *, with_letter=False):
+        """The delivery receipt of `request_id`; `with_letter` adds, while it has not gone out, the mail as queued."""
         with self._connect() as db:
-            r = db.execute("SELECT request_id,state,provider_message_id,attempts,last_error,updated_at,reporting_json,reports_json,accepted_json,refused_json FROM outbox WHERE request_id=?", (request_id,)).fetchone()
+            r = db.execute("SELECT request_id,ref,state,provider_message_id,attempts,last_error,updated_at,reporting_json,reports_json,accepted_json,refused_json FROM outbox WHERE request_id=?", (request_id,)).fetchone()
             if not r:
                 return None
             result = dict(r)
@@ -834,6 +1226,30 @@ class EmailStore:
             result["history_reports"] = json.loads(result.pop("reports_json"))
             result["accepted_recipients"] = json.loads(result.pop("accepted_json") or "[]")
             result["refused_recipients"] = json.loads(result.pop("refused_json") or "{}")
+            settled = result["delivery_reporting"].get("reconciled")
+            if settled:
+                # Rule A's outcome for a mail whose submission began: found sent, drafted, unresolved or discarded.
+                result["unknown_outcome"] = settled.get("outcome")
+            if (result["delivery_reporting"].get("draft") or {}).get("id"):
+                result["draft_id"] = result["delivery_reporting"]["draft"]["id"]  # in this mailbox's Gmail Drafts
+            notices = [json.loads(row[0]) for row in db.execute(
+                f"SELECT value FROM runtime_state WHERE key IN ({','.join('?' * len(_NOTICE_KINDS))})",
+                tuple(f"{_NOTICE}{request_id}:{kind}" for kind in _NOTICE_KINDS))]
+            if notices:
+                result["owner_notices"] = [{key: notice.get(key) for key in ("kind", "text", "state")}
+                                           for notice in notices]
+            if with_letter and r["state"] in (*_QUEUED, *_UNKNOWN, "cancelled"):
+                # The mail as queued, also once the owner dropped it here, so it can be sent from another mailbox.
+                row = db.execute("SELECT recipients_json,to_json,cc_json,bcc_json,subject,body,html_body,body_type,"
+                                 "in_reply_to,references_json,attachments_json FROM outbox WHERE request_id=?",
+                                 (request_id,)).fetchone()
+                to, cc, bcc = (list(group) for group in self._groups(row))
+                result["letter"] = {"to": to, "cc": cc, "bcc": bcc, "subject": row["subject"], "body": row["body"],
+                                    "html_body": row["html_body"], "body_type": row["body_type"],
+                                    "in_reply_to": row["in_reply_to"], "references": json.loads(row["references_json"]),
+                                    "attachments": [{"filename": item.get("filename"), "path": item.get("path")}
+                                                    for item in json.loads(row["attachments_json"] or "[]")
+                                                    if isinstance(item, dict)]}
             return result
 
     def status(self):
@@ -844,6 +1260,19 @@ class EmailStore:
                 "SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
             counts["delivery_reports_pending"] = db.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0]
             counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='retry' AND last_error LIKE 'Held:%'").fetchone()[0]
+            # What the owner is to be told and the host has not confirmed yet (owner_notice): shown here meanwhile.
+            notices = [json.loads(row[0]) for row in db.execute(
+                "SELECT value FROM runtime_state WHERE key LIKE ? ORDER BY updated_at", (_NOTICE + "%",))]
+            counts["owner_notices"] = [{key: notice.get(key) for key in ("request_id", "kind", "text", "attempts", "created_at")}
+                                       for notice in notices if notice.get("state") != "sent"][-20:]
+            # Every mail that has not gone out and is not settled, by its request_id and the ref a line names it by (either
+            # is taken by "send", "delete" and its receipt) and its subject, however many receipts came since.
+            counts["waiting"] = [{"request_id": r["request_id"], "ref": r["ref"], "subject": r["subject"],
+                                  "state": _delivery_state(r["state"], r["last_error"])}
+                                 for r in db.execute("SELECT request_id,ref,subject,state,last_error,reporting_json FROM outbox "
+                                                     "WHERE state IN ('pending','retry','processing','sending',"
+                                                     "'uncertain','partial') ORDER BY id")
+                                 if r["state"] not in _UNKNOWN or _unsettled(r["state"], r["reporting_json"])]
             # Retained events still observing their original attempt or child (counted in their inbox state too).
             counts["inbox_retained"] = db.execute("SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state NOT IN ('completed','failed')").fetchone()[0]
             counts["delivery_support"] = self._get(db, "delivery_support")

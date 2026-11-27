@@ -213,9 +213,18 @@ def test_reply_to_self_keeps_a_blank_draft_and_never_promotes_bcc_into_to(tmp_pa
     retry = draft(args)['retry_arguments']
     assert (retry['to'], retry['cc'], retry['bcc'], retry['subject'], retry['body']) == ('', [], [], '', '')
     assert draft(retry)['ok'] and calls[-1][0] == 'draft' and calls[-1][1]['to'] == ''
-    with pytest.raises(ValueError, match='to .*required'):
-        registered(service, 'email_send')({**args, 'body': 'Hello', 'bcc': [BLIND]})
+    send = registered(service, 'email_send')
+    with pytest.raises(ValueError, match='recipient .*required'):
+        send({**args, 'body': 'Hello'})  # no recipient at all: nothing to queue
     assert store.status()['outbox'] == {}
+    # Only a blind recipient: it may be sent (a mail moved from another mailbox keeps its groups), and that recipient
+    # stays blind as queued and on the wire; it is never promoted into To. Once this guard refused the send instead.
+    blind = send({**args, 'body': 'Hello', 'bcc': [BLIND]})['retry_arguments']
+    assert (blind['to'], blind['cc'], blind['bcc']) == ('', [], [BLIND])
+    assert send(blind)['ok']
+    item = store.queued_message(blind['request_id'])
+    assert (item.to, item.cc, item.bcc) == ((), (), (BLIND,))
+    assert MailClient({'EMAIL_USER': OWNER}).message(item)['To'] is None
 
 
 @pytest.mark.parametrize('stamp', [None, 'not-a-fingerprint'])

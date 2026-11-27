@@ -590,7 +590,10 @@ class MailClient:
             client.close()
 
     def message(self, item):
-        recipients = list(getattr(item, "to", ()) or item.recipients)
+        # To as queued; only an item that keeps no To, Cc or Bcc apart names every recipient in To. A mail with only Cc or
+        # Bcc recipients has none in To.
+        groups = [list(getattr(item, name, ()) or ()) for name in ("to", "cc", "bcc")]
+        recipients = groups[0] if any(groups) else list(item.recipients)
         return build_message(sender=item.reporting.get("sender") or self._get("EMAIL_DEFAULT_SENDER", self._get("EMAIL_USER")), recipients=recipients,
                              subject=item.subject, body=item.body, in_reply_to=item.in_reply_to,
                              references=item.references, message_id=item.message_id,

@@ -297,14 +297,19 @@ def test_legacy_hold_precedes_native_provider_transmission(tmp_path,monkeypatch,
     transmissions=[]
     if provider=='gmail':
         accounts=AccountStore(tmp_path/'provider')
+        # A saved local grant as a sign-in stores it: its client, refresh token and recorded Gmail permissions.
         accounts.save({'id':account,'provider':'gmail','address':'owner@example.invalid','senders':['owner@example.invalid'],
-                       'tokens':{'access_token':'synthetic','expires_at':time.time()+3600}})
+                       'oauth':{'client_id':'fixture-client'},'scopes':['https://www.googleapis.com/auth/gmail.modify'],
+                       'tokens':{'access_token':'synthetic','refresh_token':'fixture-refresh','expires_at':time.time()+3600}})
         def send(request):
             assert request.method=='POST' and request.url.path.endswith('/messages/send')
             transmissions.append(base64.urlsafe_b64decode(json.loads(request.content)['raw']+'==='))
             return httpx.Response(200,json={'id':'7b','threadId':'t1'})
         http=httpx.Client(transport=httpx.MockTransport(send))
         client=GmailClient(accounts,account,http=http)
+        with store._connect() as db:  # queued through a stand-in provider: record the local access a Gmail client keeps
+            db.execute("UPDATE outbox SET reporting_json=json_set(reporting_json,'$.gmail_connection',json(?)) "
+                       "WHERE request_id='r'", (json.dumps({'id': accounts.gmail_connection(account)}),))
     else:
         client=Exchange(xml('')); http=None
     runtime=EmailRuntime(store,client,adapter,account=account,account_loader=lambda:{'sending':'on'})
