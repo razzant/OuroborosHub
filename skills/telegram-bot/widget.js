@@ -566,6 +566,10 @@ var TransportKit = (function () {
             'The bot needs its token to connect to Telegram.',
             { strong: 'Add TELEGRAM_PUBLIC_BOT_TOKEN', text: 'in Settings → Accounts and keys and grant it to Telegram Transport in Extensions.' }
         ],
+        conflict_with_owner_bot: [
+            'The separate connection is paused because this is your personal bot.',
+            { strong: 'For a different @name,', text: 'use the token of another bot in Settings → Accounts and keys.' }
+        ],
         provider_error: [
             'The bot’s last request for new messages failed, so nothing new arrives. It retries by itself, at least once a minute.',
             { strong: 'If this stays,', text: 'the error text below says what failed.' }
@@ -610,12 +614,13 @@ var TransportKit = (function () {
      * goes: with a confirmed bot the place is checked again about every 5 s and a hold uses no attempt; a claim that
      * cannot reach Telegram (no token, the bot not confirmed or unreachable) uses up one of the row's 5 attempts and
      * the row is not sent after the last; a stopped bot runs no worker. The receipt says what became of it. */
-    function heldOutcome(link, one) {
+    function heldOutcome(link, one, waiting) {
         var waits = one ? 'it waits' : 'they wait', its = one ? 'its' : 'each item’s';
         var receipt = one ? ' Its receipt (telegram_receipt) shows what became of it.'
             : ' Each item’s receipt (telegram_receipt) shows what became of it.';
         if (link === 'stopped') return 'Nothing is retried while the bot is stopped; ' + (one ? 'it stays' : 'they stay')
             + ' in the queue.' + receipt;
+        if (waiting || link === 'conflict_with_owner_bot') return 'Checking the hold uses no attempt.' + receipt;
         if (link === 'not_started') return 'The bot is starting; ' + (one ? 'it is' : 'they are') + ' retried once it runs.'
             + receipt;
         if (link === 'waiting_for_token') return 'Without a bot token every retry uses up one of ' + its + ' 5 attempts; '
@@ -628,12 +633,48 @@ var TransportKit = (function () {
         return 'Retried while ' + waits + '; checking the hold uses no attempt.' + receipt;
     }
 
-    function itemFor(item, link) {
+    /* The owner's own bot in groups (the route's owner_bot, status_summary.owner_attention): its link items, by the
+     * feed's state or the reason it waits. Its group messages pass through Ouroboros on this computer, so no line
+     * here sends the owner to a token or to their network. */
+    var OWNER_LINES = {
+        feed_off: [
+            'Nothing from groups reaches Ouroboros through your own bot, and it sends nothing there. No second bot token is needed.',
+            { strong: 'Turn groups on', text: 'in Circles: Add a place › Telegram › your bot, then choose the group.' }
+        ],
+        local_error: [
+            'Reading your bot’s group messages from Ouroboros on this computer failed. It retries by itself.',
+            { strong: 'If this stays,', text: 'the error text below says what failed.' }
+        ],
+        stopped: [
+            'The skill’s process ended; nothing is received or sent.',
+            { strong: 'Turn this skill off and on', text: 'in Extensions to start it.' }
+        ],
+        bridge_not_ready: ['Your bot reads nothing for groups until Ouroboros’s own Telegram connection runs again; this resumes by itself.'],
+        identity_unconfirmed: ['Ouroboros checks again by itself which bot your Telegram connection uses.'],
+        account_mismatch: ['Groups connected for the earlier bot stay with it. This card follows the new bot once Ouroboros confirms it.'],
+        auth_blocked: [{ strong: 'Check this skill’s access', text: 'on Telegram Transport’s card in Extensions.' }],
+        connector_mismatch: [{ strong: 'Check this skill’s access', text: 'on Telegram Transport’s card in Extensions.' }],
+        waiting: ['Ouroboros is asked again by itself.']
+    };
+    var OWNER_LINK_WORD = {
+        connected: 'receiving through Ouroboros',
+        connecting: 'starting',
+        feed_off: 'groups are off for this bot',
+        waiting: 'waiting for Ouroboros',
+        local_error: 'reading from Ouroboros failing, retrying',
+        stopped: 'stopped'
+    };
+
+    function itemFor(item, link, waiting) {
         var out = { kind: item.kind, detail: item.detail || '', tone: item.tone, headline: item.headline, at: item.at || null, lines: [] };
         var error = item.error && item.error.text ? item.error : null;
         var one = count(item.messages) + count(item.events) === 1;
         var them = one ? 'it' : 'them', notRetried = one ? 'it is not retried.' : 'they are not retried.';
-        if (item.kind === 'link') {
+        if (item.kind === 'owner_link') {
+            out.lines = (OWNER_LINES[item.detail] || OWNER_LINES.waiting).slice();
+            if (item.detail === 'local_error') out.atLabel = 'last successful answer';
+            if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
+        } else if (item.kind === 'link') {
             var polled = item.detail === 'provider_error' || item.detail === 'local_error';
             out.lines = ((polled && POLL_LINES[item.failure]) || LINK_LINES[item.detail] || []).slice();
             if (polled && item.failure === 'local' && LOCAL_STAGE[item.stage]) out.lines[0] = LOCAL_STAGE[item.stage];
@@ -689,7 +730,7 @@ var TransportKit = (function () {
                 if (reason.reason) out.lines.push({ strong: reason.action ? 'Needs you:' : 'Reason:', text: heldReason(reason) + (reasons.length > 1 ? ' (' + num(count(reason.count)) + ')' : '') });
             });
             if (reasons.length > 4) out.lines.push('…and ' + plural(reasons.length - 4, 'more reason') + ' (Details › Queues counts all held items).');
-            out.lines.push(heldOutcome(link, one));
+            out.lines.push(heldOutcome(link, one, waiting));
         } else if (item.kind === 'binding') {
             out.lines = [
                 'This Ouroboros predates Places, so incoming messages wait for a place binding'
@@ -927,9 +968,41 @@ var TransportKit = (function () {
         return node;
     }
 
+    /* The owner's own bot (the route's owner_bot) while this Ouroboros offers it, else null. */
+    function ownerOf(data) {
+        return data.owner_bot && typeof data.owner_bot === 'object' && data.owner_bot.link !== 'unsupported'
+            ? data.owner_bot : null;
+    }
+
+    /* Without a standalone token the owner's bot leads the card: its facts under the names the card reads
+     * (a store not created yet has nothing in it, so its counts are zero). */
+    function ownerView(data, owner) {
+        var view = {};
+        Object.keys(owner).forEach(function (key) { view[key] = owner[key]; });
+        if (owner.store === 'none') {
+            ['inbox_submitted', 'inbox_waiting', 'inbox_leased', 'inbox_retained', 'inbox_failed', 'reactions_withheld',
+                'outbox_delivered', 'outbox_waiting', 'outbox_held', 'outbox_leased', 'outbox_failed', 'outbox_uncertain',
+                'work_waiting', 'work_leased', 'work_terminal', 'delivery_reports_pending', 'delivery_reports_held']
+                .forEach(function (key) { if (!K.known(view[key])) view[key] = 0; });
+        }
+        ['host_checked', 'host_checked_at', 'host_unasked', 'delivery_reporting', 'reaction_context', 'reaction_history',
+            'places_version', 'presence_continuation_version', 'binding_state'].forEach(function (key) { view[key] = data[key]; });
+        view.owner_view = true;
+        return view;
+    }
+
     function toModel(data, state, kit) {
         var now = Date.now();
-        var items = (Array.isArray(data.attention) ? data.attention : []).map(function (item) { return itemFor(item, data.link); });
+        var owner = ownerOf(data);
+        // The card's own line over both bots when the route gives one (status_summary.card_summary); Places keeps text.
+        var line = data.card && typeof data.card === 'object' ? data.card : data;
+        var ownerOnly = !!owner && data.link === 'waiting_for_token';
+        var separate = ownerOnly && line.separate_history === true ? data : null;
+        var items = (Array.isArray(line.attention) ? line.attention : []).map(function (item) {
+            var fromOwner = owner && ((ownerOnly && item.bot !== 'separate') || item.bot === 'owner');
+            return itemFor(item, fromOwner ? owner.link : data.link, !fromOwner && data.ready_wait);
+        });
+        if (ownerOnly) data = ownerView(data, owner);
         var recent = data.recent_problems || {};
         var outbound = recent.outbound || {}, inbound = recent.inbound || {};
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as.label : '';
@@ -968,17 +1041,84 @@ var TransportKit = (function () {
                     + (outbound.last_uncertain_at ? ', last ' + K.clock(outbound.last_uncertain_at, now) : '') : '', dim: true }
             ])]);
         }
+        if (separate) separateQueueRows(separate).forEach(function (entry) {
+            if (entry[1] !== 'none') facts.push(['Separate bot · ' + entry[0], entry[1]]);
+        });
         return {
-            status: { text: data.text || 'Status unknown', tone: data.tone || 'muted' },
+            status: { text: line.text || 'Status unknown', tone: line.tone || 'muted' },
             items: items,
             facts: facts,
             factsNote: !countsKnown ? '' : anyTraffic ? 'Totals since install; waiting, sending and held are the queue now.' : 'No messages received or sent yet.',
-            extra: groupForm(kit, data, true, state),
-            details: { title: 'Details', groups: detailGroups(data, now) }
+            // The management group marks rooms of the standalone bot only: the owner's own bot has none.
+            extra: ownerOnly ? null : groupForm(kit, data, true, state),
+            details: { title: 'Details', groups: ownerOnly ? ownerOnlyGroups(data, now, separate) : detailGroups(data, now, owner) }
         };
     }
 
-    function detailGroups(data, now) {
+    /* The owner's own bot in groups, as Details shows it beside or instead of the standalone bot. */
+    function ownerGroup(owner, now) {
+        var sendsAs = owner.identity && owner.identity.sends_as ? owner.identity.sends_as : null;
+        var known = owner.store !== 'unreadable';
+        return {
+            title: 'Your own bot in groups',
+            rows: [
+                row('State', OWNER_LINK_WORD[owner.link] || owner.link || '—',
+                    owner.runtime_state ? 'runtime state: ' + owner.runtime_state
+                        + (owner.feed_reason ? ' (' + owner.feed_reason + ')' : '') : ''),
+                row('Sends as', sendsAs ? sendsAs.label + (sendsAs.id ? ' (' + sendsAs.id + ')' : '') : ''),
+                row('Last answer from Ouroboros', K.clock(owner.provider_ok_at, now), K.exact(owner.provider_ok_at)),
+                row('Last update', K.clock(owner.last_event_at, now) || (known ? 'none yet' : '—'), K.exact(owner.last_event_at)),
+                row('Last delivery', K.clock(owner.last_delivery_at, now) || (known ? 'none yet' : '—'), K.exact(owner.last_delivery_at)),
+                owner.store === 'none' ? row('Queues', 'nothing received or sent yet') : row('Incoming updates', counts([
+                    [owner.inbox_waiting, 'waiting'], [owner.inbox_leased, 'being passed on'],
+                    [owner.inbox_retained, 'following a reply'], [owner.inbox_submitted, 'passed to Ouroboros'],
+                    [owner.inbox_failed, 'refused by Ouroboros'], [owner.reactions_withheld, 'reactions skipped']
+                // Updates of a bot that is no longer your connected one end unanswered; they were never refused.
+                ].concat(K.known(owner.inbox_retired) ? [[owner.inbox_retired, 'left with your earlier bot']] : []))),
+                owner.store === 'none' ? null : row('Outgoing', counts([
+                    [owner.outbox_waiting, 'waiting'], [owner.outbox_held, 'of them held'], [owner.outbox_leased, 'sending'],
+                    [owner.outbox_delivered, 'delivered'], [owner.outbox_failed, 'not delivered'],
+                    [owner.outbox_uncertain, 'outcome unknown']
+                ])),
+                owner.last_error ? row('Last error', rawText(owner.last_error)) : null
+            ].filter(Boolean),
+            note: OWNER_NOTE
+        };
+    }
+    var OWNER_NOTE = 'Your own bot speaks only in groups you connected for it in Circles, with the same files and '
+        + 'topics as a separate bot; your private chat with it stays Ouroboros’s own. It needs no second token. '
+        + 'Its group messages and sends pass through Ouroboros on this computer.';
+
+    function ownerOnlyGroups(view, now, separate) {
+        var groups = [ownerGroup(view, now)];
+        // The two bots' queues stay separate; Ouroboros's capabilities apply to both.
+        detailGroups(view, now, null).forEach(function (group) {
+            if (group.title === 'Ouroboros') groups.push(group);
+        });
+        groups.push({ title: 'A separate bot', rows: separate ? separateQueueRows(separate) : [],
+            note: separate ? 'Retained records from the separate bot. No token is set for it now.' : SEPARATE_NOTE });
+        return groups;
+    }
+    var SEPARATE_NOTE = 'Optional. A bot of its own, with its own @name, can also take private chats people open with '
+        + 'it and channels; it needs TELEGRAM_PUBLIC_BOT_TOKEN in Settings › Accounts and keys. Your own bot keeps '
+        + 'working beside it.';
+
+    function separateQueueRows(data) {
+        return [
+            row('Incoming updates', counts([
+                [data.inbox_waiting, 'waiting'], [data.inbox_leased, 'being passed on'],
+                [data.inbox_retained, 'following a reply'], [data.inbox_submitted, 'passed to Ouroboros'],
+                [data.inbox_failed, 'refused by Ouroboros'], [data.reactions_withheld, 'reactions skipped']
+            ])),
+            row('Outgoing', counts([
+                [data.outbox_waiting, 'waiting'], [data.outbox_held, 'of them held'], [data.outbox_leased, 'sending'],
+                [data.outbox_delivered, 'delivered'], [data.outbox_failed, 'not delivered'],
+                [data.outbox_uncertain, 'outcome unknown']
+            ]))
+        ];
+    }
+
+    function detailGroups(data, now, owner) {
         // Without the custody counts "none yet" would be a guess: the times stay unknown (—).
         var countsKnown = K.known(data.inbox_submitted) && K.known(data.outbox_delivered);
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as : null;
@@ -1003,6 +1143,7 @@ var TransportKit = (function () {
                     : (data.connect_unavailable || 'unavailable'))
             ].filter(Boolean)
         });
+        if (owner) groups.push(ownerGroup(owner, now));
         groups.push({
             title: 'Ouroboros',
             rows: [
@@ -1023,22 +1164,12 @@ var TransportKit = (function () {
         });
         groups.push({
             title: 'Queues',
-            rows: [
-                row('Incoming updates', counts([
-                    [data.inbox_waiting, 'waiting'], [data.inbox_leased, 'being passed on'],
-                    [data.inbox_retained, 'following a reply'], [data.inbox_submitted, 'passed to Ouroboros'],
-                    [data.inbox_failed, 'refused by Ouroboros'], [data.reactions_withheld, 'reactions skipped']
-                ])),
-                row('Outgoing', counts([
-                    [data.outbox_waiting, 'waiting'], [data.outbox_held, 'of them held'], [data.outbox_leased, 'sending'],
-                    [data.outbox_delivered, 'delivered'], [data.outbox_failed, 'not delivered'],
-                    [data.outbox_uncertain, 'outcome unknown']
-                ])),
+            rows: separateQueueRows(data).concat([
                 row('Ouroboros work', counts([
                     [data.work_waiting, 'waiting'], [data.work_leased, 'being read'], [data.work_terminal, 'finished']
                 ])),
                 row('Group history unreadable', count(data.group_backfill_unreadable) ? num(count(data.group_backfill_unreadable)) : '')
-            ].filter(Boolean),
+            ].filter(Boolean)),
             // Unknown is not zero: without the custody counts no row may read as zero or as a total.
             note: countsKnown ? 'Counts not listed are zero. Totals since install; waiting, sending and held are the queue now.'
                 : 'The custody counts were not read, so the queues are unknown.'

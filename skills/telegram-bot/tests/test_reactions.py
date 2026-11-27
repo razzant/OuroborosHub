@@ -561,7 +561,7 @@ def test_react_declares_a_gesture_and_the_mixed_operation_stays_a_write(tmp_path
     from test_plugin import FakeApi
     tools = _manifest_tools()
     assert {key: tools["telegram_react"][key] for key in ("effect", "target", "conversation", "thread", "message")} == {
-        "effect": "gesture", "target": "chat_id", "conversation": "chat_id", "thread": "topic_id", "message": "message_id"}
+        "effect": "gesture", "target": ["account_id", "chat_id"], "conversation": "chat_id", "thread": "topic_id", "message": "message_id"}
     assert tools["telegram_operation"]["effect"] == "write" and "message" not in tools["telegram_operation"]
     skill = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location("telegram_react_registered", skill / "plugin.py",

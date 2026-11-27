@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.13.1
+version: 0.14.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -20,8 +20,9 @@ env_from_settings:
 - TELEGRAM_PUBLIC_BOT_TOKEN
 timeout_sec: 60
 when_to_use: The owner wants Ouroboros in Telegram as a labelled bot (private chats people open with it,
-  groups and channels it is added to), separate from the native owner-control Telegram bridge. For a
-  dedicated ordinary account use the telegram-user-session connector instead.
+  groups and channels it is added to), either through its own standalone bot token or through an explicitly
+  connected group-only feed from the native owner-control Telegram bridge (or both concurrently when they
+  are distinct bots). For a dedicated ordinary account use the telegram-user-session connector instead.
 ui_tab:
   tab_id: transport
   title: Telegram Transport
@@ -35,38 +36,38 @@ ui_tab:
 tools:
 - name: telegram_send
   effect: message
-  target: chat_id
+  target: [account_id, chat_id]
   conversation: chat_id
   thread: topic_id
   description: Queue a proactive Telegram text, photo, document, video, audio, voice, animation or album for durable delivery.
 - name: telegram_moderate
   effect: write
-  target: chat_id
+  target: [account_id, chat_id]
   conversation: chat_id
   description: Queue exact-message deletion or member restriction, ban, or unban with durable receipts.
 - name: telegram_operation
   effect: write
-  target: chat_id
+  target: [account_id, chat_id]
   conversation: chat_id
   thread: topic_id
   sends:
     when:
       method: [editMessageText]
-    target: chat_id
+    target: [account_id, chat_id]
     conversation: chat_id
     thread: topic_id
     text: text
   description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
 - name: telegram_react
   effect: gesture
-  target: chat_id
+  target: [account_id, chat_id]
   conversation: chat_id
   thread: topic_id
   message: message_id
   description: Set or clear this bot's reaction on an exact Telegram message; a gesture, not speech.
 - name: telegram_typing
   effect: write
-  target: chat_id
+  target: [account_id, chat_id]
   conversation: chat_id
   thread: topic_id
   description: Ask for "typing…" in this turn's own chat while actually preparing a reply; a request, not speech, no receipt.
@@ -137,7 +138,7 @@ comes from the connector's word setting. Other bots carry `from_bot`; own bot
 echoes are ignored. Owner identity is the numeric Telegram ID the owner confirms
 in the Places sheet; a private chat with this bot grants no owner authority by
 itself. The owner-control chat remains the built-in Telegram bridge with its own
-bot token.
+bot token; groups can also use that bot ([Your own bot in groups](#your-own-bot-in-groups-0140)).
 
 The Bot API has no method for reading earlier chat history. This connector
 receives only updates delivered while it runs (Telegram keeps undelivered
@@ -773,6 +774,76 @@ When `/identity` advertises `presence_identity: 1`, the status route and every
 turn event declare `identity.sends_as` with the bot id and `@username` returned
 by Telegram `getMe`, and `kind: bot`. This is the sending credential, separate
 from the incoming message's actor. Older hosts receive no identity key.
+
+## Your own bot in groups (0.14.0)
+
+A group can talk to Ouroboros through the owner's own Telegram bot (**A**, the bot of the built-in owner-control
+bridge), through this skill's separate bot (**B**, `TELEGRAM_PUBLIC_BOT_TOKEN`), or through both when they are
+different bots. The choice changes the name people see; topics, photos, documents and replies work the same.
+
+- **What stays.** B works as in 0.13.1, also on an Ouroboros without `telegram_group_feed: 1`: no
+  `/telegram/feed/*` request, no `owner_bot/` folder, the same `GET status` keys. The manifest keeps its one
+  `place` declaration; a new Ouroboros projects the `owner_bot` place while this skill serves `GET
+  owner_bot_status`. A's private chat, commands, callbacks and Panic stay with the bridge, which alone holds A's
+  token and reads its updates: this skill never calls `getUpdates`, `deleteWebhook` or `getMe` for A.
+- **One pipeline.** A's group updates come from the bridge's spool (`GET /telegram/feed/updates`) into the same
+  parser, attachment staging, inbox and outbox, kept in `owner_bot/custody.sqlite3` with an offset per bot. Each
+  event keeps the place connection it arrived under (`place_id`, `connected_revision`, `thread_id`), including a
+  reaction whose topic the bridge resolved. Its turn
+  (`binding_id`, `connected_revision`), downloads, replies (immediate and deferred), typing and sends name that
+  connection and that bot on the Host relay (`/telegram/feed/call`, `upload`, `file`); nothing is rebound.
+- **Tools.** A call through A names `account_id`. Omitted in a turn that came through A, it is refused with that
+  turn's bot (`account_id_required`); naming that bot while it is not the connected one is refused
+  (`account_not_active`) and nothing moves to another bot. Without a separate token an omitted `account_id` is
+  refused as well; with one, an omitted `account_id` is B as before, also before `getMe` confirms B. A acts only in
+  groups. A reply in the turn's own chat and topic, a reply to its original message (including a file), and an
+  action on that message keep the bot that received it. Choosing another bot for such a call is refused
+  (`turn_account_mismatch`); a separately addressed operation can still select its bot explicitly. An omitted
+  `account_id` keeps the existing B action response shape while the action still uses its retained bot. If the
+  source of that action cannot be read (`turn_source_unavailable`), nothing is
+  queued. An A reply keeps its connection too (never bound again). Any other A call binds its exact place
+  (`/presence/place?operation=bind&contribution_id=owner_bot`) before any file is copied or row queued. Editing or
+  deleting a known message uses the place of the topic that message is in; member actions need the group's own place.
+- **Outcomes.** Before each part the worker rechecks the row's place (`operation=check`). Silent or Paused,
+  groups Off, a restarting bridge or a busy relay hold the row and use no attempt. A row whose connection was
+  disconnected or connected again, or whose bot is no longer this profile's (A's or B's; automatic and deferred
+  replies name their event's bot), ends `failed` with a "Not sent" reason. An update of an A that is no longer the
+  confirmed one ends `failed` (`owner_bot_changed`) before any download, shown as left with the earlier bot; while
+  groups are off or the feed is unread it waits. Other refusals before any provider call (`relay_refusal`) hold or
+  fail by their code. `503 not_sent` and a Host connection that was never made retry; `502 unknown`, an answer cut
+  short or lost after the request left ends `uncertain` and is not sent again. Requests to the Host never follow a
+  redirect. A's sends, edits and moderation record each call before making it.
+  A download whose connection ended settles that attachment as not received, so the event still reaches
+  Ouroboros; one that got no answer is retried and counts against no file, since the feed's answers say nothing
+  about Telegram. Uploads send confined copies checked by size and SHA-256 on one open handle; A's receipts carry
+  no `transfer` observation (B's still do).
+- **Order.** B's rows keep one order per chat and forum topic whether or not a caller named B (a topic written as a
+  number or as text is the same topic). A's rows are ordered per bot and place connection, so a row of an ended
+  connection or an earlier bot never holds back the current one. A's inbox follows the spool's numbers; an
+  event's identity stays `telegram:<bot>:<update>`. If a page exceeds the response limit, the skill reads a smaller
+  page at the same offset. If one item alone exceeds the limit, the card shows the error; that item is not skipped.
+- **Receipts.** `telegram_receipt` without `account_id` in a retained A turn reads that turn's bot in A's store only.
+  Other lookups still read B's receipt first, including earlier rows that name no bot. An explicit `account_id`
+  matches only a receipt that names that bot; it does not assign an account to an unnamed row. Two matching receipts
+  in different bot roles return `receipt_source_ambiguous`. If the explicit lookup cannot read either existing
+  store, it returns `receipt_source_unavailable` instead of guessing.
+- **One reader per bot.** B contacts Telegram only after Ouroboros answered `/identity` (no answer is never taken
+  for an older Ouroboros); meanwhile its rows hold without using attempts. With `telegram_group_poll_claim: 1`, B
+  claims its bot (`POST /telegram/feed/poller {bot_id}`) right before `deleteWebhook` and every `getUpdates`:
+  `owned: false` pauses it (`conflict_with_owner_bot`), `409 account_changed` and every other answer wait. With
+  only `telegram_group_feed: 1`, B asks `same_as_owner_bridge` first: `true` pauses it, `false` proceeds, `null`
+  waits. If core withholds an identical saved token, the native identity shows that B is paused rather than
+  unconfigured; waiting for a reader decision does not consume a delivery attempt. Status and settings reads
+  claim nothing, and A never claims.
+- **Status.** `GET owner_bot_status[?account_id=<A>]` returns `{v: 1, enabled, reason, connect, account_id?,
+  identity?, invite_url?}` for the confirmed A only, never B. It asks the native identity for `group_ids` only
+  for this lookup. An empty list is known empty; older or unavailable membership is unknown. Hub's saved sightings
+  can label those IDs but do not put groups from an earlier consent period back in the picker.
+  `GET status` keeps B's keys and, while Ouroboros offers
+  A, adds `owner_bot` (A's facts, counts and summary) and `card` (the Widgets card's line over both bots). Without a
+  separate token the card is A's and asks for no token; with both, B's line leads and A's problems are named as A's.
+  A's feed is read from Ouroboros on this computer, so its failures are reported as this computer's, never as
+  Telegram's or the network's, and a feed that answers reads "Receiving through Ouroboros", never "Connected".
 
 ## Earlier upgrades
 

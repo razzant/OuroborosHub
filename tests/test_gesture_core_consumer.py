@@ -83,7 +83,7 @@ def test_only_a_core_that_knows_gestures_offers_the_reaction_door(facts):
     if facts["knows_gesture"]:
         assert facts["gesture_doors"] == GESTURES
         assert "gesture: ext_" in speak["slack-bridge"] and "channel=C1, ts=1712.5)" in speak["slack-bridge"]
-        assert "chat_id=55, message_id=7)" in speak["telegram-bot"]
+        assert "chat_id=55, account_id=9, message_id=7)" in speak["telegram-bot"]
         for line in speak.values():
             assert "words: ext_" in line and "A gesture is a response, not speech." in line
     else:

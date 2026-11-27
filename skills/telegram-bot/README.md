@@ -1,8 +1,16 @@
-# Telegram Bot 0.13.1
+# Telegram Bot 0.14.0
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
 events and outgoing delivery receipts in its durable inbox/outbox.
+
+On an Ouroboros that offers it (`telegram_group_feed: 1`), groups can also talk
+to Ouroboros through your own Telegram bot, with no second token, or through a
+separate `TELEGRAM_PUBLIC_BOT_TOKEN` bot beside it. Your private chat with your
+own bot stays with the built-in bridge. An older Ouroboros keeps the separate
+bot exactly as before. See [Your own bot in groups](SKILL.md#your-own-bot-in-groups-0140).
+If automatic grants are off, use **Skills → Grant access** after Update to confirm
+the existing permissions for the new version; keep your tokens and connected groups.
 
 Private chats and groups the bot has seen are offered by name and numeric ID when you connect a Telegram place
 (Consciousness, **Connect a place**, **Telegram**); each new place starts Silent

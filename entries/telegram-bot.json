@@ -5,12 +5,12 @@
   "connects": [
     "Telegram"
   ],
-  "description": "Telegram bot connector for Places: private chats people open with the bot, groups and channels, with typed direct-message, mention and reply facts, optional literal word signals, durable media delivery and live place-state holds. The Bot API cannot read earlier history. Owner chat uses the built-in Telegram bridge.",
-  "digest": "d97ebb2d50f21dee4e4ddf9f3b3d841fb37c0babdbf6e72bd57640dff731b4c9",
+  "description": "Connect Telegram groups to Places using your connected bot on a compatible Ouroboros, or use a separate bot for groups, channels, and private chats people open with it. Both group paths support topics and durable media delivery. The Bot API cannot read earlier history.",
+  "digest": "fc456f1f7d74294e1e359292769af305ad67a16ba19fa35ed411a6113fb31c2c",
   "icon": "ui/icon.svg",
-  "mark": "bot token",
+  "mark": "Same or separate bot",
   "name": "telegram-bot",
-  "needs": "needs a Telegram bot token",
+  "needs": "On a compatible Ouroboros, your connected bot needs no new token. A separate bot needs its own token.",
   "owner": "ouroboros-agent",
   "pitch": "People and groups talk to it there",
   "schema_version": 2,
@@ -20,6 +20,6 @@
   },
   "title": "Telegram for others",
   "type": "extension",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "withdrawn": null
 }

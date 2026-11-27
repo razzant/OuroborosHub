@@ -21,6 +21,7 @@ from .events import _integer
 _ACCOUNT = re.compile(r"[1-9][0-9]*")
 _GROUP_TYPES = ("group", "supergroup")
 _CHAT_TYPES = ("private", *_GROUP_TYPES)
+_FEED_MEMBERSHIPS = frozenset({"present", "left", "kicked", "migrated"})
 _BACKFILL_KEY = "chat_backfill"
 _BACKFILL_BATCH = 200
 
@@ -63,7 +64,7 @@ class GroupSighting:
     title: Optional[str] = None  # None: the update names this chat without its metadata
 
 
-def group_sightings(update: Any, account_id: str) -> Tuple[GroupSighting, ...]:
+def group_sightings(update: Any, account_id: str, *, group_only: bool = False) -> Tuple[GroupSighting, ...]:
     """What one raw update shows about the chats of the bot ``account_id``.
 
     A message, edit, service message or reaction from a group shows the bot there
@@ -72,7 +73,7 @@ def group_sightings(update: Any, account_id: str) -> Tuple[GroupSighting, ...]:
     group upgraded to a supergroup is retired by ``migrate_to_chat_id``; the
     supergroup is observed under its new id from its own updates, which carry its
     type and title. Private messages and the bot's block/unblock updates also
-    name their chat. Channels are not offered.
+    name their chat unless ``group_only=True``. Channels are not offered.
     """
     if not isinstance(update, dict) or not _ACCOUNT.fullmatch(str(account_id)):
         return ()
@@ -85,23 +86,47 @@ def group_sightings(update: Any, account_id: str) -> Tuple[GroupSighting, ...]:
         if status in ("creator", "administrator", "member") or (
             status == "restricted" and member.get("is_member") is True
         ):
-            return _sighting(account_id, change.get("chat"), "present")
+            return _sighting(account_id, change.get("chat"), "present", group_only=group_only)
         if status in ("left", "kicked", "restricted"):
-            return _sighting(account_id, change.get("chat"), "kicked" if status == "kicked" else "left")
+            return _sighting(
+                account_id, change.get("chat"), "kicked" if status == "kicked" else "left", group_only=group_only
+            )
         return ()
     message = next((update[kind] for kind in ("message", "edited_message")
                     if isinstance(update.get(kind), dict)), None)
     if message is None:
         reaction = update.get("message_reaction") or update.get("message_reaction_count")
-        return _sighting(account_id, _object(reaction).get("chat"), "present")
+        return _sighting(account_id, _object(reaction).get("chat"), "present", group_only=group_only)
     chat = message.get("chat")
     if _user_id(message.get("left_chat_member")) == account_id:
-        return _sighting(account_id, chat, "left")
+        return _sighting(account_id, chat, "left", group_only=group_only)
     if _integer(message.get("migrate_to_chat_id")) is not None:
-        return _sighting(account_id, chat, "migrated")
-    seen = _sighting(account_id, chat, "present")
+        return _sighting(account_id, chat, "migrated", group_only=group_only)
+    seen = _sighting(account_id, chat, "present", group_only=group_only)
     old = _integer(message.get("migrate_from_chat_id"))
-    if seen and old is not None and str(old) != seen[0].chat_id:
+    if seen and old is not None and str(old) != seen[0].chat_id and (not group_only or old < 0):
+        seen += (GroupSighting(account_id, str(old), "migrated"),)
+    return seen
+
+
+def feed_sighting(sighting: Any, account_id: str) -> Tuple[GroupSighting, ...]:
+    """Parse one wire-v2 unconnected group sighting for ``account_id`` (group/supergroup only).
+
+    Expected shape: ``{"chat": {id, type, title?, ...}, "membership": "present|left|kicked|migrated",
+    "migrate_to_chat_id"?, "migrate_from_chat_id"?}``. Private chats, channels and non-negative chat IDs are ignored.
+    """
+    if not isinstance(sighting, dict) or not _ACCOUNT.fullmatch(str(account_id)):
+        return ()
+    membership = str(sighting.get("membership") or "").strip()
+    if membership not in _FEED_MEMBERSHIPS:
+        return ()
+    seen = _sighting(account_id, sighting.get("chat"), membership, group_only=True)
+    if not seen:
+        return ()
+    if _integer(sighting.get("migrate_to_chat_id")) is not None and seen[0].membership != "migrated":
+        return (GroupSighting(account_id, seen[0].chat_id, "migrated", seen[0].chat_type, seen[0].title),)
+    old = _integer(sighting.get("migrate_from_chat_id"))
+    if old is not None and str(old) != seen[0].chat_id and old < 0:
         seen += (GroupSighting(account_id, str(old), "migrated"),)
     return seen
 
@@ -115,17 +140,25 @@ def record_sightings(conn: sqlite3.Connection, update_id: int, sightings: Sequen
         ))
 
 
-def offered_groups(conn: sqlite3.Connection, account_id: str) -> List[Dict[str, str]]:
+def offered_groups(conn: sqlite3.Connection, account_id: str, *, group_only: bool = False) -> List[Dict[str, str]]:
     """Connect rows for chats whose newest evidence shows this bot present, by label.
 
     Every such chat is listed. The label carries the numeric id beside the
     name, so chats with the same name stay distinguishable. The existing
     telegram_groups projection also holds private chats; no second registry.
     """
-    rows = conn.execute(
-        "SELECT chat_id, title, chat_type FROM telegram_groups WHERE account_id=? AND membership='present'",
-        (account_id,),
-    ).fetchall()
+    if group_only:
+        rows = conn.execute(
+            "SELECT chat_id, title, chat_type FROM telegram_groups "
+            "WHERE account_id=? AND membership='present' AND chat_type IN ('group', 'supergroup') "
+            "AND CAST(chat_id AS INTEGER) < 0",
+            (account_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT chat_id, title, chat_type FROM telegram_groups WHERE account_id=? AND membership='present'",
+            (account_id,),
+        ).fetchall()
     return [
         {"account_id": account_id, "conversation_id": chat_id,
          "label": f"{' '.join(title.split()) or ('Private chat' if kind == 'private' else 'Group')} ({chat_id})"}
@@ -216,10 +249,13 @@ def _progress(conn: sqlite3.Connection) -> Dict[str, Any]:
         return {"after": -1, "unreadable": 0, "done": False}
 
 
-def _sighting(account_id: str, chat: Any, membership: str) -> Tuple[GroupSighting, ...]:
+def _sighting(account_id: str, chat: Any, membership: str, *, group_only: bool = False) -> Tuple[GroupSighting, ...]:
     chat = _object(chat)
     chat_id, title = _integer(chat.get("id")), chat.get("title")
-    if chat.get("type") not in _CHAT_TYPES or chat_id is None:
+    allowed = _GROUP_TYPES if group_only else _CHAT_TYPES
+    if chat.get("type") not in allowed or chat_id is None:
+        return ()
+    if group_only and chat_id >= 0:
         return ()
     if chat["type"] == "private":
         title = _private_label(chat)

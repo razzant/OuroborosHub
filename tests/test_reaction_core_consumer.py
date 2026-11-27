@@ -899,7 +899,7 @@ def _scripted_network(requests, *, bots, updates=()):
     import urllib.error
     import urllib.request
 
-    def urlopen(request, timeout=None):
+    def open_request(_opener, request, data=None, timeout=None):
         url = request.full_url
         requests.append(url)
         if "/bot" in url:
@@ -922,7 +922,8 @@ def _scripted_network(requests, *, bots, updates=()):
         body = json.dumps({"ok": False, "error": "Connect this place in Consciousness > Places.",
                            "code": "place_not_connected", "field": "place", "disposition": "blocked"}).encode()
         raise urllib.error.HTTPError(url, 409, "Conflict", {}, io.BytesIO(body))
-    urllib.request.urlopen = urlopen
+    # Both the default Telegram opener and the Host's no-redirect opener use this dispatch.
+    urllib.request.OpenerDirector.open = open_request
 
 
 def _load_skill(root, token):

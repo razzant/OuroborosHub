@@ -900,7 +900,7 @@ def test_mixed_tools_remain_write_and_email_covers_all_recipients():
     assert manifests["email-presence"]["email_send"]["target"] == ["account_id", "to", "cc", "bcc"]
     # A mixed tool stays a write and declares which calls deliver words: an edit of the bot's message, not a reaction.
     sends = manifests["telegram-bot"]["telegram_operation"]["sends"]
-    assert (sends["when"], sends["target"], sends["text"]) == ({"method": ["editMessageText"]}, "chat_id", "text")
+    assert (sends["when"], sends["target"], sends["text"]) == ({"method": ["editMessageText"]}, ["account_id", "chat_id"], "text")
     assert manifests["telegram-user-session"]["tg_edit"]["effect"] == "message"
     upload = manifests["slack-bridge"]["slack_file_upload"]
     assert (upload["effect"], upload["conversation"], upload["thread"], upload["text"]) == (
