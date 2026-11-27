@@ -3,7 +3,7 @@
     "ouroboros"
   ],
   "description": "Claudexor quota dashboard and read-only quota_summary: measured reserve, reported resets, watched pace and dated resources. Eligible hosts may show a brief advisory snapshot. No automatic provider refresh or routing changes.",
-  "digest": "596aa7c0983cb1e76987a7a0e472486d706ce26010c28c156362f209675e1e70",
+  "digest": "10f8555b8abc9e8546f29cae7911567de01bc06e9cb5039ca2f02eb225ad327b",
   "mark": "linked account",
   "name": "claudexor_quotas",
   "needs": "needs an account already connected to Claudexor",
