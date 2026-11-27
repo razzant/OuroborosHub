@@ -23,7 +23,7 @@ from .gmail_host import (CARD, SignInError, bearer_scopes, credential_owner, hos
                          mail_scope, queued_link, sending_link)
 from .google_auth import FULL_MAIL_SCOPE, SETTINGS_SCOPE
 from .client import MailClient
-from .delivery import DeliveryRejected
+from .delivery import DeliveryDeferred, DeliveryRejected
 from .mime import (_addresses, build_message, canonical_message_id, conversation_root, mailbox_addresses,
                    parse_message)
 
@@ -879,7 +879,9 @@ class GmailClient(MailClient):
     def _check_draft(self, draft, link=None):
         """Read the draft a mail sent by draft_id names, with the access it is sent under: refused (DeliveryRejected,
         nothing was sent) when it is gone or changed since it was checked. A bearer Gmail refuses for this read is replaced
-        once by the next bearer of the same sign-in (the same `link`), and the send presents that one."""
+        once by the next bearer of the same sign-in (the same `link`), and the send presents that one. A read Gmail did
+        not answer, or answered busy or failing (408, 429, 5xx), is DeliveryDeferred: nothing was sent and nothing is
+        known about the draft, so the mail waits, with Gmail's Retry-After when it named one."""
         path = "/drafts/" + _draft_id(draft["id"])
         try:
             try:
@@ -892,7 +894,13 @@ class GmailClient(MailClient):
         except GmailError as exc:
             if exc.status == 404:
                 raise DeliveryRejected("The draft no longer exists; nothing was sent") from exc
+            if exc.status in (408, 429) or exc.status >= 500:
+                raise DeliveryDeferred(f"Gmail could not show the draft now ({exc}); nothing was sent",
+                                       retry_after=exc.retry_after) from exc
             raise
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            raise DeliveryDeferred(f"Gmail did not answer when the draft was read ({type(exc).__name__}); "
+                                   "nothing was sent") from exc
         raw = ((current.get("message") or {}) if isinstance(current, dict) else {}).get("raw")
         if not isinstance(raw, str) or hashlib.sha256(raw.encode()).hexdigest() != draft.get("digest"):
             raise DeliveryRejected("The draft changed after it was checked; nothing was sent. Check it and send it again")

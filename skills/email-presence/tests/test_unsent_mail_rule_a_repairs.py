@@ -257,6 +257,54 @@ def test_a_draft_check_that_fails_before_the_send_leaves_the_mail_queued(mail):
     assert len(mail.gmail.posts('/drafts/send')) == 1
 
 
+def test_a_long_outage_of_the_draft_check_never_ends_the_mail(mail):
+    """Gmail does not answer the draft's check five passes in a row: nothing was sent, and the mail waits without
+    spending its attempts; once Gmail answers again it goes, once (Hub #382 second review, P4)."""
+    queue_draft(mail, draft_raw(), draft_id='train', request_id='train')
+    reads, states = [], []
+
+    def no_answer(request):
+        assert request.method == 'GET' and request.url.path == '/mail/drafts/train'
+        reads.append(request.method)
+        raise httpx.ReadTimeout('temporary loss of connectivity', request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(no_answer)) as broken:
+        mail.runtime.client.http = broken
+        for _ in range(5):
+            due_now(mail.store)
+            assert mail.runtime.process_outbox()
+            receipt = mail.store.receipt('train')
+            states.append((receipt['state'], receipt['attempts']))
+    mail.runtime.client.http = mail.http
+    assert len(reads) == 5 and states == [('retry', 0)] * 5 and mail.gmail.posts('/drafts/send') == []
+    due_now(mail.store)
+    assert mail.runtime.process_outbox() and mail.store.receipt('train')['state'] == 'completed'
+    assert len(mail.gmail.posts('/drafts/send')) == 1
+
+
+@pytest.mark.parametrize('answer', [(429, {'Retry-After': '120'}), (503, {})])
+def test_a_draft_check_gmail_asks_to_wait_for_waits_as_long_as_it_asks(mail, answer):
+    """A busy or failing Gmail asks to wait (429 with Retry-After) or fails for now (5xx): the mail is asked about again
+    after the provider's interval, or a transport pause without one, spending no attempt and sending nothing. A draft
+    gone or changed since its check is still refused at once (test_a_draft_changed_or_deleted_after_its_check_...)."""
+    status, headers = answer
+    queue_draft(mail, draft_raw(), draft_id='quota', request_id='quota')
+
+    def busy(request):
+        assert request.method == 'GET' and request.url.path == '/mail/drafts/quota'
+        return httpx.Response(status, headers=headers, json={})
+
+    with httpx.Client(transport=httpx.MockTransport(busy)) as wire:
+        mail.runtime.client.http = wire
+        assert mail.runtime.process_outbox()
+    mail.runtime.client.http = mail.http
+    receipt = mail.store.receipt('quota')
+    with mail.store._connect() as db:
+        wait = db.execute("SELECT available_at-updated_at FROM outbox WHERE request_id='quota'").fetchone()[0]
+    assert receipt['state'] == 'retry' and receipt['attempts'] == 0 and mail.gmail.posts('/drafts/send') == []
+    assert wait >= (119 if headers else 29)
+
+
 def test_a_bearer_refused_while_the_draft_is_checked_is_renewed_for_its_send(mail):
     queue_draft(mail, draft_raw())
     seen = []

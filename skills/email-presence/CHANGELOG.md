@@ -106,7 +106,9 @@
   recipients), HTML and files, those of a draft sent by its id included. `email_accounts`
   lists every mail that waits (`waiting`) by request_id and subject. A draft sent by its
   id is read again before its sending begins, under the sign-in it is then sent with, so a
-  read that fails leaves it queued and a renewed bearer serves both.
+  read that fails leaves it queued and a renewed bearer serves both; a read Gmail does not
+  answer, or answers busy or failing (429, 5xx), waits without spending an attempt, asked
+  again after Gmail's Retry-After, so a long outage never ends the mail.
 - An unreserved mailbox keeps its local sign-in within recorded Gmail permissions
   even when automatic transfer is not possible. The host's complete list must name
   no sign-in of its subject and no withdrawal may apply. A change reads the list

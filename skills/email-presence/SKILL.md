@@ -535,7 +535,10 @@ remain readable by explicit account_id.
   Safety reads its subject and text (and HTML), which `retry_arguments` names first;
   its attachments are not named in the call. It is queued like any mail and goes out
   only while the draft is unchanged since that check (users.drafts.send): it is read
-  again before its sending begins, under the sign-in it is sent with. Mail keeps the
+  again before its sending begins, under the sign-in it is sent with. A read Gmail
+  does not answer, or answers busy or failing (429, 5xx), leaves it waiting without
+  spending an attempt, asked again after Gmail's Retry-After (or a pause when it names
+  none); a draft gone or changed since that check is refused. Mail keeps the
   draft's source and files as they were queued, with the mailbox's other staged mail:
   its receipt gives them, and rule A puts the draft back from them.
 - email_mailbox `discard_queued` with a request_id drops, in one write, a mail of

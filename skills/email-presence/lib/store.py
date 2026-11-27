@@ -816,6 +816,15 @@ class EmailStore:
                        "available_at=?,updated_at=?,attempts=MAX(0,attempts-1),hold_kind=? WHERE id=? AND lease_token=?",
                        (str(reason), time.time() + delay, time.time(), str(kind), item.row_id, item.lease_token))
 
+    def wait_outbox(self, item, error, *, delay):
+        """Ask about a leased mail again after `delay` seconds without counting this try: something it needs before its
+        sending begins could not be read now (a provider that did not answer or asked to wait). Nothing was sent; it is
+        `retry`, not a hold, and its holds and lines stay as they were."""
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,available_at=?,"
+                       "updated_at=?,attempts=MAX(0,attempts-1) WHERE id=? AND lease_token=?",
+                       (str(error), time.time() + delay, time.time(), item.row_id, item.lease_token))
+
     def uncertain_outbox(self, row_id, token, error, *, reports=()):
         # Never sent again by a pass; its mailbox is searched for it once Gmail search can show it (claim_uncertain).
         self._update("outbox", row_id, token, "uncertain", error, RECONCILE_AFTER, reports=reports)

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .delivery import DeliveryRejected, email_report
+from .delivery import DeliveryDeferred, DeliveryRejected, email_report
 from .accounts import AccountError
 from .gmail import GmailError
 from .gmail_host import HostNotReached
@@ -544,6 +544,10 @@ class EmailRuntime:
                         self.store.complete_outbox(item.row_id, item.lease_token, reports=[email_report(item, "accepted")], reporting=reporting)
                     else:
                         self.store.complete_outbox(item.row_id, item.lease_token, reports=[email_report(item, "accepted")])
+        except DeliveryDeferred as exc:
+            # A read the send needs first was not answered, or Gmail asked to wait: nothing was sent, and it waits,
+            # spending no attempt, for the provider's Retry-After (at least the usual 5 s) or a transport pause.
+            self.store.wait_outbox(item, str(exc), delay=30 if exc.retry_after is None else max(5, exc.retry_after))
         except DeliveryRejected as exc:
             if exc.retryable and item.attempts < 5:
                 self.store.retry_outbox(item.row_id, item.lease_token, str(exc), max(5, exc.retry_after or 0))

@@ -9,6 +9,15 @@ class DeliveryRejected(RuntimeError):
         super().__init__(str(cause))
 
 
+class DeliveryDeferred(RuntimeError):
+    """Something a send needs before it begins could not be read now: the provider did not answer, or asked to wait.
+    Nothing was submitted; the mail waits, spending no attempt, and is asked about again after `retry_after` seconds
+    (the provider's Retry-After) or a transport pause when it named none."""
+    def __init__(self, cause, *, retry_after=None):
+        self.retry_after = retry_after
+        super().__init__(str(cause))
+
+
 def tool_origin(ctx):
     origin = {"kind": "tool"}
     if getattr(ctx, "task_id", None):
