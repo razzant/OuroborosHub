@@ -19,9 +19,9 @@ stored paid output without generating it again. Unknown provider acceptance is
 never automatically resent: for Gmail, Mail looks for the mail in its own mailbox
 and otherwise keeps it there as one draft, and tells the owner once in the chat,
 naming the mail by a short reference Mail gives it (never its request_id). Queued
-Gmail mail, including mail queued before this
-version, goes out under its mailbox's current sign-in, and waits while that mailbox
-is signed out of Mail; a line about it is posted only while it is still true.
+Gmail mail, including mail queued before this version, goes out under its mailbox's
+current sign-in, and waits while that mailbox is signed out of Mail; a line about it
+is posted only while it is still true.
 Sender authentication remains explicitly unverified.
 
 Searches return pages: pass `next_page_token` back as `page_token` with the same

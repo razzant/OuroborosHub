@@ -77,8 +77,9 @@
   Nothing is drafted in another mailbox. The owner is told once, in one line naming the
   subject and a short reference Mail gave the mail in its mailbox (never the caller's
   request_id, which may carry an address and may read like another's): "The email ...
-  (ref m-...) is in Drafts of ...: check it and send it". Gmail may give a sent message a Message-ID of its own, so a
-  search that finds nothing never proves it unsent: that is why the line asks to check it.
+  (ref m-...) is in Drafts of ...: check it and send it". Gmail may give a sent message a
+  Message-ID of its own, so a search that finds nothing never proves it unsent: that is
+  why the line asks to check it.
 - Those lines go through the host's `notify_owner` permission (`POST /notify`, one System
   row in the owner's chat, mirrored to Telegram); recipients, Bcc and body stay out of
   them. Until the host confirms one (no grant yet, an older host without `notify_version`,
@@ -87,8 +88,9 @@
   A line is posted only while it is still true: one saying a mail waits ends unposted, in
   the same write, once the mail goes, is deleted or settled, or once its mailbox is
   signed in again; each line is read again, with its mailbox's sign-in, just before it is
-  posted, so a change made while the host took the line before it is seen. A send whose worker stopped during it is known to be of unknown
-  outcome also while its mailbox is signed out.
+  posted, so a change made while the host took the line before it is seen. A send whose
+  worker stopped during it is known to be of unknown outcome also while its mailbox is
+  signed out.
 - "Send" and "delete" in chat are the mind's: `email_send` with a Gmail `draft_id` sends
   an existing draft as it is now (the Host checks its actual recipients and Safety reads
   its subject and text, returned in `retry_arguments`; its attachments are not named in

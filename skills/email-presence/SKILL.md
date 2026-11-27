@@ -249,24 +249,24 @@ remain unchanged and delivery additionally checks their emitted scope.
    is never sent a second time: its own mailbox is searched for it by Message-ID;
    found in that mailbox's Sent, it is recorded sent (a copy that came in, in Inbox
    or Spam, proves nothing; the search asks for sent copies, Trash included, and
-   reads every page of its answer); otherwise one draft of it (its envelope with Bcc, body,
-   attachments and thread; a mail sent from a draft is put back as that draft was
-   queued) is kept in that mailbox's Drafts, once the Places of its Drafts, and for a
-   reply those of its conversation (asked with its thread), allow writing there as
-   they do for email_draft, and the owner is told once to check it and send it. While
-   a Place or this skill's access keeps Mail from writing there, the mail waits and
-   the owner is told so once. Nothing is drafted in
-   another mailbox. These notices go through the host's `notify_owner` (one System row
-   in Main, mirrored to the owner's Telegram) and name the mail by its subject and a
+   reads every page of its answer); otherwise one draft of it (its envelope with
+   Bcc, body, attachments and thread; a mail sent from a draft is put back as that
+   draft was queued) is kept in that mailbox's Drafts, once the Places of its
+   Drafts, and for a reply those of its conversation (asked with its thread), allow
+   writing there as they do for email_draft, and the owner is told once to check it
+   and send it. While a Place or this skill's access keeps Mail from writing there,
+   the mail waits and the owner is told so once. Nothing is drafted in another
+   mailbox. These notices go through the host's `notify_owner` (one System row in
+   Main, mirrored to the owner's Telegram) and name the mail by its subject and a
    short reference Mail gave it in its mailbox (`ref`, like `m-3fa91c07`), never by
    the caller's request_id, which may carry an address and may read like another's;
-   until the host confirms one (no grant yet, an older host, the host away) it is shown in the
-   mailbox's status and the mail's receipt and posted later, only while it is still
-   true: a waiting line ends unposted once its mail went, was deleted or settled, or
-   its mailbox is signed in again, and each line is read again, with its mailbox's
-   sign-in, just before it is posted. The owner's "send" or "delete" in chat is for the
-   mind to apply: `email_send` with `draft_id` sends such a draft as it is then,
-   `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
+   until the host confirms one (no grant yet, an older host, the host away) it is
+   shown in the mailbox's status and the mail's receipt and posted later, only while
+   it is still true: a waiting line ends unposted once its mail went, was deleted or
+   settled, or its mailbox is signed in again, and each line is read again, with its
+   mailbox's sign-in, just before it is posted. The owner's "send" or "delete" in chat
+   is for the mind to apply: `email_send` with `draft_id` sends such a draft as it is
+   then, `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
    discard_queued sends now or drops a mail that has not gone out; `email_accounts`
    lists every mail that waits (`waiting`) by request_id, ref and subject. Those tools
    and `email_receipt` take the ref in `request_id` as they take the request_id
@@ -548,15 +548,15 @@ remain readable by explicit account_id.
 - email_mailbox `discard_queued` with a request_id (or the mail's ref) drops, in one
   write, a mail of that account that has not begun to go out (also one a stopped
   worker had taken), also while the mailbox is signed out; its receipt stays with the
-  mail, so replaying that request_id never queues it again. To send a waiting mail from another mailbox,
-  drop it here first and then, only when that answers that it will not go out from
-  this mailbox, send the mail its result returns from the other mailbox: it can then
-  never go out from both. The answer is what the deleting write itself found, never an
-  earlier look: a mail whose sending began meanwhile (the mailbox signed in again) is
-  answered as possibly gone out. For a mail of unknown outcome not yet checked it
-  means no draft is made; such a mail may already have gone out and is never offered
-  for sending anywhere. `send_queued` sends a mail that is still queued or held now,
-  under the mailbox's current confirmed sign-in.
+  mail, so replaying that request_id never queues it again. To send a waiting mail
+  from another mailbox, drop it here first and then, only when that answers that it
+  will not go out from this mailbox, send the mail its result returns from the other
+  mailbox: it can then never go out from both. The answer is what the deleting write
+  itself found, never an earlier look: a mail whose sending began meanwhile (the
+  mailbox signed in again) is answered as possibly gone out. For a mail of unknown
+  outcome not yet checked it means no draft is made; such a mail may already have
+  gone out and is never offered for sending anywhere. `send_queued` sends a mail that
+  is still queued or held now, under the mailbox's current confirmed sign-in.
 - New Hosts advertise presence_place_binding_version=1. The tool captures the
   applicable target binding before enqueue; delivery checks that retained binding
   against current scope. A newly unbound send is distinct from a disconnected
