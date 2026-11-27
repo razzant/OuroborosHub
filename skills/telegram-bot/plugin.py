@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from starlette.responses import JSONResponse
 
@@ -19,13 +19,21 @@ from .telegram_bot.custody import CustodyStore
 from .telegram_bot.delivery import tool_origin
 from .telegram_bot.formatting import prepare_text
 from .telegram_bot.host import PresenceHostClient
+from .telegram_bot.owner_feed import (
+    OwnerFeedClient,
+    SOURCE_OWNER_BOT,
+    SOURCE_STANDALONE,
+    owner_state_dir,
+)
 from .telegram_bot.runtime import BOT_NOT_RUNNING, BOT_UNCONFIRMED, TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
-from .telegram_bot.status_summary import link_state, summarize as summarize_status
+from .telegram_bot.status_summary import card_summary, link_state, summarize as summarize_status, summarize_owner
 from .telegram_bot.tools import (
+    ACCOUNT_ID_SCHEMA,
     album_items,
     discard_files,
     discard_unqueued,
+    enforce_source_chat_policy,
     frozen_caption,
     make_moderation_tool,
     make_operation_tool,
@@ -33,6 +41,9 @@ from .telegram_bot.tools import (
     make_receipt_tool,
     make_typing_tool,
     queue_file,
+    resolve_tool_source,
+    turn_place_or_bind,
+    turn_target,
     upload_path,
     ALBUM_KINDS,
     MODERATION_SCHEMA,
@@ -45,6 +56,7 @@ from .telegram_bot.tools import (
 
 
 _RUNTIME: Optional[TelegramTransportRuntime] = None
+_OWNER_RUNTIME: Optional[TelegramTransportRuntime] = None
 _STATE_DIR: Optional[pathlib.Path] = None
 _SETTINGS_SAVE = threading.Lock()
 
@@ -78,9 +90,11 @@ def _status_payload() -> Dict[str, Any]:
             groups = _RUNTIME.store.offered_groups(account)
         except (sqlite3.Error, OSError):
             unavailable = "Observed chats could not be read"
+    owner = _owner_bot_facts(observed)
     return {
         "runtime_state": runtime.get("runtime_state", "not_started"),
         "bot_label": runtime.get("bot_label", "not connected"),
+        "ready_wait": runtime.get("ready_wait", ""),
         **({"identity": runtime["identity"]} if "identity" in runtime else {}),
         "last_event_at": runtime.get("last_event_at", ""),
         "last_delivery_at": runtime.get("last_delivery_at", ""),
@@ -122,16 +136,71 @@ def _status_payload() -> Dict[str, Any]:
         "held_reasons": card.get("held_reasons") or [],
         # Waiting updates whose last attempt failed, by where it stopped; null when the store was not read.
         "handoff_retrying": card.get("handoff_retrying"),
+        # Additive: the owner's own bot in groups while this Ouroboros offers it, from its own store and runtime;
+        # never mixed into the standalone bot's keys above.
+        **({"owner_bot": owner} if owner is not None else {}),
     }
 
 
+def _owner_bot_facts(observed: float) -> Optional[Dict[str, Any]]:
+    """The owner's own bot in groups for the Widgets card, under the names the standalone bot's facts use, with its
+    summary (status_summary.summarize_owner); None while this Ouroboros does not offer it (telegram_group_feed).
+
+    ``store``: ``none`` before anything was ever received or queued through it (no store file: its counts are zero
+    and none is created by this read), ``read``, or ``unreadable`` (counts unknown, never zero)."""
+    owner, standalone = _OWNER_RUNTIME, _RUNTIME
+    if owner is None or standalone is None or getattr(standalone.submitter, "telegram_group_feed", 0) != 1:
+        return None
+    counts: Dict[str, Any] = {}
+    card: Dict[str, Any] = {}
+    store = "none"
+    if owner.store_exists:
+        try:
+            counts, card = owner.store.read_status(observed)
+            store = "read"
+        except (sqlite3.Error, OSError):
+            store = "unreadable"
+    facts = owner.status_snapshot(counts)
+    payload = {**facts, **counts, "store": store,
+               "recent_problems": card.get("recent_problems"), "held_reasons": card.get("held_reasons") or [],
+               "handoff_retrying": card.get("handoff_retrying")}
+    return {**payload, **summarize_owner(payload)}
+
+
+def _query_account_id(request: Any) -> str:
+    if request is None:
+        return ""
+    params = getattr(request, "query_params", None)
+    if params is None:
+        return ""
+    try:
+        return str(params.get("account_id") or "").strip()
+    except Exception:
+        return ""
+
+
 async def _status_route(_request: Any) -> JSONResponse:
-    # Custody counts, the token and local settings are file reads: they run beside the Host's HTTP loop.
+    # Unchanged legacy standalone B status route (never mixes in owner-bot A).
     payload = await asyncio.to_thread(_status_payload)
-    # One rule for the Places line and the card's first line: the same words, the worst current tone.
     summary = summarize_status(payload)
-    payload.update(text=summary["text"], tone=summary["tone"], attention=summary["attention"],
-                   link=link_state(payload), title="Telegram transport")
+    payload.update(
+        text=summary["text"],
+        tone=summary["tone"],
+        attention=summary["attention"],
+        link=link_state(payload),
+        title="Telegram transport",
+    )
+    if "owner_bot" in payload:
+        # The card's own line over both bots; text/tone above stay the standalone bot's (Places reads them).
+        payload["card"] = card_summary(payload, payload["owner_bot"])
+    return JSONResponse(payload)
+
+
+async def _owner_bot_status_route(request: Any) -> JSONResponse:
+    """Dedicated owner-bot status route projected for ``owner_bot`` places by new core only."""
+    owner = _OWNER_RUNTIME
+    payload = (await owner.owner_status_snapshot(_query_account_id(request)) if owner is not None else
+               {"v": 1, "enabled": None, "reason": "not_started", "connect": None})
     return JSONResponse(payload)
 
 
@@ -139,7 +208,14 @@ def _load_local_settings() -> Dict[str, Any]:
     return load_settings(_STATE_DIR) if _STATE_DIR is not None else {}
 
 
-def _make_telegram_send(api: Any):
+def _make_telegram_send(
+    api: Any,
+    *,
+    standalone_account: Callable[[], str] = lambda: "",
+    owner_account: Callable[[], str] = lambda: "",
+    standalone_configured: Optional[Callable[[], bool]] = None,
+    owner_place_binder: Optional[Callable[[str, str, str], Dict[str, Any]]] = None,
+):
     def telegram_send(
         ctx=None,
         *,
@@ -153,6 +229,7 @@ def _make_telegram_send(api: Any):
         request_id: str = "",
         markdown: bool = True,
         items: Optional[list] = None,
+        account_id: str = "",
     ) -> Dict[str, Any]:
         target = str(chat_id or "").strip()
         selected_kind = str(kind or "message").strip()
@@ -165,17 +242,51 @@ def _make_telegram_send(api: Any):
             return {"ok": False, "error": "kind must be " + ", ".join(SEND_KINDS)}
         if not isinstance(markdown, bool):
             return {"ok": False, "error": "markdown must be a boolean"}
+        clean_topic = str(topic_id).strip() if topic_id not in (None, "") else ""
+        try:
+            root = pathlib.Path(api.get_state_dir())
+            # A reply in this turn's own chat and topic keeps the bot and place connection its event came through; a
+            # reply to the original message still refers to it when given another topic. Other sends are bound now.
+            turn = turn_target(root, ctx, target, topic_id=clean_topic)
+            if turn is None and reply_to_message_id not in (None, ""):
+                turn = turn_target(root, ctx, target, message_id=reply_to_message_id)
+            source = resolve_tool_source(
+                root,
+                account_id=account_id,
+                ctx=ctx,
+                standalone_account=standalone_account,
+                owner_account=owner_account,
+                standalone_configured=standalone_configured,
+                turn=turn,
+            )
+            enforce_source_chat_policy(source, target)
+            place_binding = turn_place_or_bind(
+                source,
+                turn,
+                target,
+                topic_id=clean_topic,
+                owner_place_binder=owner_place_binder,
+            )
+        except SendRefused as refusal:
+            return refusal.answer()
+        reporting: Dict[str, Any] = {"version": -1, "origin": tool_origin(ctx)}
+        if source.pin_account:
+            reporting["account_id"] = source.account_id
         payload: Dict[str, Any] = {
             "kind": selected_kind,
             "chat_id": target,
             "markdown": markdown,
-            "_reporting": {"version": -1, "origin": tool_origin(ctx)},
+            "_reporting": reporting,
         }
-        if topic_id not in (None, ""):
-            payload["topic_id"] = str(topic_id).strip()
+        if source.pin_account:
+            payload["account_id"] = source.account_id
+        if place_binding is not None:
+            payload["_place_binding"] = place_binding
+        if clean_topic:
+            payload["topic_id"] = clean_topic
         if reply_to_message_id not in (None, ""):
             payload["reply_to_message_id"] = str(reply_to_message_id).strip()
-        state_dir = pathlib.Path(api.get_state_dir())
+        state_dir = source.state_dir
         try:
             if selected_kind == "message":
                 if not str(text or "").strip():
@@ -186,18 +297,18 @@ def _make_telegram_send(api: Any):
                 payload["items"], payload["_rendered_items"], payload["_frozen"] = album_items(
                     items, str(caption or text or ""), markdown, state_dir)
             else:
-                source = upload_path(selected_kind, file_path)
+                source_file = upload_path(selected_kind, file_path)
                 payload["caption"] = str(caption or text or "")
                 payload["_rendered_caption"] = frozen_caption(payload["caption"], markdown)
                 # The bytes the row sends are fixed now: a copy, sent under the file's own name.
-                kept = queue_file(selected_kind, source, state_dir)
+                kept = queue_file(selected_kind, source_file, state_dir)
                 payload["file_path"], payload["_frozen"] = kept["path"], [kept]
         except SendRefused as refusal:
             return refusal.answer()
         receipt = str(request_id or uuid.uuid4().hex).strip()
         delivery_id, store = f"telegram-send:{receipt}", None
         try:
-            store = CustodyStore.shared(state_dir / "custody.sqlite3")
+            store = CustodyStore.shared(source.store_path, owner_bot=source.source == SOURCE_OWNER_BOT)
             inserted = store.enqueue_outbox(delivery_id, payload)
         except BaseException:
             # The row may be committed already: a copy goes only when no row is known to name it.
@@ -212,6 +323,7 @@ def _make_telegram_send(api: Any):
             "request_id": receipt,
             "chat_id": target,
             "kind": selected_kind,
+            **({"account_id": source.account_id} if source.expose_account else {}),
         }
 
     return telegram_send
@@ -293,7 +405,7 @@ async def _settings_save_route(request: Any) -> JSONResponse:
 
 def register(api: Any) -> None:
     """Register the bounded provider runtime and its read-only status Widget."""
-    global _RUNTIME, _STATE_DIR
+    global _RUNTIME, _OWNER_RUNTIME, _STATE_DIR
     _STATE_DIR = pathlib.Path(api.get_state_dir())
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -311,25 +423,77 @@ def register(api: Any) -> None:
         host_port = int(os.environ.get("OUROBOROS_HOST_SERVICE_PORT", "8767"))
     except ValueError:
         host_port = 8767
+    host_base = f"http://127.0.0.1:{host_port}"
+
     submitter = PresenceHostClient(
         state_dir=_STATE_DIR,
         token_provider=host_token_provider,
-        host_base=f"http://127.0.0.1:{host_port}",
+        host_base=host_base,
+    )
+    owner_submitter = PresenceHostClient(
+        state_dir=_STATE_DIR,
+        token_provider=host_token_provider,
+        host_base=host_base,
+    )
+    owner_feed = OwnerFeedClient(
+        host_base=host_base,
+        token_provider=host_token_provider,
+        transport_provider=lambda: getattr(_RUNTIME.submitter, "transport", None) if _RUNTIME is not None else None,
     )
     runtime = _RUNTIME = TelegramTransportRuntime(
         state_dir=_STATE_DIR,
         token_provider=token_provider,
         logger=api,
         submitter=submitter,
+        source_mode=SOURCE_STANDALONE,
+        owner_feed=owner_feed,
     )
+    owner_runtime = _OWNER_RUNTIME = TelegramTransportRuntime(
+        state_dir=owner_state_dir(_STATE_DIR),
+        settings_dir=_STATE_DIR,
+        token_provider=lambda: "",
+        logger=api,
+        submitter=owner_submitter,
+        source_mode=SOURCE_OWNER_BOT,
+        owner_feed=owner_feed,
+        store_lazy=True,
+        capability_source=lambda: _RUNTIME.submitter if _RUNTIME is not None else None,
+    )
+
+    async def _run_owner_safely() -> None:
+        assert _OWNER_RUNTIME is not None
+        try:
+            await _OWNER_RUNTIME.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            api.log("warning", f"telegram-bot: owner-bot group feed exited: {type(exc).__name__}: {exc}")
 
     async def supervised_runtime() -> None:
         assert _RUNTIME is not None
-        await _RUNTIME.run()
+        if _OWNER_RUNTIME is None:
+            await _RUNTIME.run()
+            return
+        owner_task = asyncio.create_task(_run_owner_safely(), name="telegram-owner-feed-supervisor")
+        try:
+            await _RUNTIME.run()
+        finally:
+            _OWNER_RUNTIME.stop()
+            owner_task.cancel()
+            await asyncio.gather(owner_task, return_exceptions=True)
 
     def unload() -> None:
+        if _OWNER_RUNTIME is not None:
+            _OWNER_RUNTIME.stop()
         if _RUNTIME is not None:
             _RUNTIME.stop()
+
+    source_kwargs = {
+        "standalone_account": runtime.recorded_bot,
+        "owner_account": owner_runtime.recorded_bot,
+        "standalone_configured": lambda: bool(token_provider()),
+        "owner_place_binder": owner_submitter.bind_owner_place_sync,
+    }
 
     api.register_supervised_task(
         "telegram_presence",
@@ -339,11 +503,12 @@ def register(api: Any) -> None:
     )
     api.register_tool(
         "telegram_send",
-        _make_telegram_send(api),
+        _make_telegram_send(api, **source_kwargs),
         description=(
             "Durably queue a proactive Telegram send for an exact numeric chat, with optional topic and reply ids: "
             "text, or a file as photo, document, video, audio, voice (OGG/Opus, MP3 or M4A), animation (GIF or "
-            "silent MP4) or album (2-10 items: photos with videos, or only audio, or only documents). A bot uploads "
+            "silent MP4) or album (2-10 items: photos with videos, or only audio, or only documents). Pass explicit "
+            "account_id when targeting the connected owner-bot group feed. A bot uploads "
             "at most 50 MB per file and 10 MB per photo; a larger file or a caption over 1024 characters is refused, "
             "never cut. A file is copied when queued, and that copy is what Telegram receives; later changes to the "
             "file are not sent. Standard Markdown is rendered by default; set markdown=false for literal text. "
@@ -361,6 +526,7 @@ def register(api: Any) -> None:
         schema={
             "type": "object",
             "properties": {
+                "account_id": ACCOUNT_ID_SCHEMA,
                 "chat_id": {"type": "string"},
                 "text": {
                     "type": "string",
@@ -405,11 +571,17 @@ def register(api: Any) -> None:
     )
     api.register_tool(
         "telegram_moderate",
-        make_moderation_tool(api),
+        make_moderation_tool(api, **source_kwargs),
         description="Queue a Telegram delete/restrict/ban/unban operation with exact provider IDs. Reuse request_id when retrying; queued is not delivered.",
         schema=MODERATION_SCHEMA,
     )
-    operation = make_operation_tool(api, runtime.recorded_bot)
+    operation = make_operation_tool(
+        api,
+        runtime.recorded_bot,
+        owner_account=owner_runtime.recorded_bot,
+        standalone_configured=source_kwargs["standalone_configured"],
+        owner_place_binder=owner_submitter.bind_owner_place_sync,
+    )
     api.register_tool(
         "telegram_operation",
         operation,
@@ -417,8 +589,8 @@ def register(api: Any) -> None:
             "Queue an edit of this bot's own message, or set or clear this bot's reaction on any message it can "
             "reach, through the existing outbox. A reaction can be the whole social response, and it is not "
             "speech or proof of finished work; telegram_react is the same reaction with simpler arguments. "
-            "Use exact numeric chat/message IDs and a new request_id; "
-            "in a forum pass the target's known topic_id, which is never invented."
+            "Use exact numeric chat/message IDs and a new request_id; pass explicit account_id when targeting "
+            "the owner-bot group feed; in a forum pass the target's known topic_id, which is never invented."
         ),
         schema=TELEGRAM_OPERATION_SCHEMA,
     )
@@ -437,7 +609,7 @@ def register(api: Any) -> None:
     )
     api.register_tool(
         "telegram_typing",
-        make_typing_tool(api),
+        make_typing_tool(api, **source_kwargs),
         description=(
             "Ask for \u201ctyping\u2026\u201d in this turn's own Telegram chat while you are actually preparing a reply "
             "there. The call only records the request (it answers requested): it is not speech, nothing is queued or "
@@ -460,19 +632,22 @@ def register(api: Any) -> None:
             "piece). Only a saved end observation has `ended_at` and `answer`; an uncertain row can keep the last "
             "phase and count without them. Those bytes are never proof Telegram has them; the row's state and "
             "provider receipt decide delivery. `queued_at` says when the row was queued; re-read the same "
-            "request_id to watch an upload move."
+            "request_id to watch an upload move. A retained owner-bot turn reads its own bot without an account_id; "
+            "other calls prefer the separate bot. Pass account_id to read a receipt that names a particular bot."
         ),
         schema={
             "type": "object",
             "properties": {
                 "request_id": {"type": "string"},
                 "operation": {"type": "string", "enum": ["send", "moderate", "operation"]},
+                "account_id": ACCOUNT_ID_SCHEMA,
             },
             "required": ["request_id"],
         },
     )
     api.register_route("status", _status_route, methods=("GET",))
     api.register_route("settings/save", _settings_save_route, methods=("GET", "POST"))
+    api.register_route("owner_bot_status", _owner_bot_status_route, methods=("GET",))
     api.register_settings_section("transport", title="Telegram", schema={"components": [
         {"type": "form", "route": "settings/save", "method": "POST",
          "submit_label": "Save transport settings", "fields": [

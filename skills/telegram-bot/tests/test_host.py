@@ -174,7 +174,9 @@ def test_http_rejection_preserves_status_code(monkeypatch):
             io.BytesIO(b'{"error":"binding mismatch"}'),
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", reject)
+    # The transport opens each request with a no-redirect opener (host._open_host), not urllib.request.urlopen.
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
+                        lambda _opener, request, data=None, timeout=None: reject(request, timeout=timeout))
     with pytest.raises(PresenceHostHTTPError, match="binding mismatch") as raised:
         UrllibPresenceHostTransport._request_json(
             "POST",

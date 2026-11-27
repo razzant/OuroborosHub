@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import re
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -90,6 +90,14 @@ class TelegramEvent:
     text: str
     facts: Optional[list[str]] = None
 
+    def in_thread(self, thread_id: str) -> TelegramEvent:
+        """Keep all three route projections of a resolved topic in sync."""
+        return replace(
+            self, thread_id=thread_id,
+            conversation_key=f"telegram:{self.account_id}:{self.conversation_id}:{thread_id or '0'}",
+            conversation={**self.conversation, "topic_id": int(thread_id) if thread_id else None},
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         if self.facts is None:
@@ -100,7 +108,7 @@ class TelegramEvent:
 def parse_telegram_update(
     update: Dict[str, Any], *, bot_account_id: str, management_group_id: str = "",
     places: bool = False, bot_username: str = "", words: Sequence[str] = (),
-    download_limit: int = CLOUD_DOWNLOAD_LIMIT,
+    download_limit: int = CLOUD_DOWNLOAD_LIMIT, group_only: bool = False,
 ) -> Optional[TelegramEvent]:
     """Return one factual external-message event or ``None`` for unsupported updates."""
     if not isinstance(update, dict):
@@ -111,7 +119,7 @@ def parse_telegram_update(
     if not isinstance(message, dict) and isinstance(update.get("edited_message"), dict):
         message = update["edited_message"]
         event_kind = "edited_message"
-    if places and not isinstance(message, dict):
+    if places and not group_only and not isinstance(message, dict):
         for kind in ("channel_post", "edited_channel_post"):
             if isinstance(update.get(kind), dict):
                 message, event_kind = update[kind], kind
@@ -126,6 +134,7 @@ def parse_telegram_update(
             bot_account_id=bot_account_id,
             management_group_id=management_group_id,
             places=places,
+            group_only=group_only,
         )
     if update_id is None or not isinstance(message, dict):
         return None
@@ -137,12 +146,16 @@ def parse_telegram_update(
         return None
     if (not places and actor.get("is_bot")) or (places and str(actor.get("id")) == bot_account_id):
         return None
+    if group_only and chat.get("type") not in ("group", "supergroup"):
+        return None
     if places and chat.get("type") not in _PLACE_CHAT_TYPES:
         return None
 
     actor_id = _integer(actor.get("id"))
     chat_id = _integer(chat.get("id"))
     if actor_id is None or chat_id is None:
+        return None
+    if group_only and chat_id >= 0:
         return None
 
     # Telegram also sets message_thread_id on replies outside topics (ordinary
@@ -260,6 +273,7 @@ def _parse_reaction_update(
     bot_account_id: str,
     management_group_id: str = "",
     places: bool = False,
+    group_only: bool = False,
 ) -> Optional[TelegramEvent]:
     """Turn Telegram's reaction update into a neutral provider fact.
 
@@ -280,6 +294,8 @@ def _parse_reaction_update(
     if update_id is None or message_id is None or chat_id is None or (actor_id is None and not counted):
         return None
     if (not places and source.get("is_bot")) or (places and str(actor_id) == bot_account_id):
+        return None
+    if group_only and (chat.get("type") not in ("group", "supergroup") or chat_id >= 0):
         return None
     if places and chat.get("type") not in _PLACE_CHAT_TYPES:
         return None

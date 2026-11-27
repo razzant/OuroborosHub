@@ -20,6 +20,7 @@ from . import discovery, outbox_files
 from .delivery import stored_answers
 from .events import ALBUM_POSITION_KEY, TelegramEvent
 from .formatting import prepare_text
+from .owner_feed import OWNER_BOT_SUBDIR, canonical_bot_id
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class InboxLease:
     event_id: str
     payload: Dict[str, Any]
     attempts: int
+    place_binding: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,10 @@ _FILE_SEND_KINDS = frozenset({"photo", "document", "video", "audio", "voice", "a
 _SEND_KINDS = _FILE_SEND_KINDS | {"message"}
 # An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
 REACTION_WITHHELD = "reaction_host_context_unavailable"
+# An owner-bot inbox row that came through a bot the bridge no longer reads: the bridge confirmed another bot since, so
+# it is neither downloaded nor handed over through that one. Ouroboros did not refuse it, so it is not counted as
+# refused; the row keeps its own bot, place, revision and any file already fetched.
+OWNER_BOT_CHANGED = "owner_bot_changed"
 # The Widgets card lists terminal problems of the last day as attention; older ones are history in the totals.
 RECENT_PROBLEM_WINDOW_S = 86400
 # A mark 0.13.1 writes with a row's settlement (an inbox row's ``last_stage``, an outbox hold's ``hold_kind``) counts
@@ -256,6 +262,18 @@ def recorded_calls(payload: Dict[str, Any]) -> bool:
     A row without ``kind`` is a text message. Edits, reactions and moderation keep their own handling unchanged.
     """
     return str(payload.get("kind") or "message") in _SEND_KINDS
+
+
+def recorded_owner_mutation(payload: Dict[str, Any]) -> bool:
+    """An owner-bot A edit or moderation row whose provider call is recorded before dispatch.
+
+    Standalone B rows carry no ``_place_binding`` and keep their existing handling unchanged.
+    Reactions (``setMessageReaction``) keep their own dedicated path.
+    """
+    if not isinstance(payload.get("_place_binding"), dict):
+        return False
+    kind = str(payload.get("kind") or "message")
+    return kind == "moderation" or (kind == "operation" and payload.get("method") == "editMessageText")
 
 
 def _held_by(attempts: Optional[int]) -> tuple:
@@ -352,9 +370,12 @@ def _newest_chat_forum(conn: sqlite3.Connection, event: Any) -> Optional[int]:
 
 
 def _with_reaction_target(conn: sqlite3.Connection, event: TelegramEvent) -> TelegramEvent:
-    """Add what an exact retained record proves about the target; a miss changes nothing."""
+    """Add matching retained facts; never replace a topic already resolved by the owner feed."""
     fact = event.message["reaction"]
     row = _retained_message(conn, event.account_id, event.conversation_id, event.message["message_id"])
+    if event.thread_id and (row is None or str(row["topic_id"]) != event.thread_id):
+        return replace(event, message={**event.message, "reaction": {
+            **fact, "target": {**fact["target"], "resolution": "resolved"}}})
     if row is None:
         if fact["target"]["resolution"] == "resolved" and _newest_chat_forum(conn, event) == 1:
             # The update named no forum, yet this chat has shown topics: the conversation is unproven.
@@ -370,9 +391,7 @@ def _with_reaction_target(conn: sqlite3.Connection, event: TelegramEvent) -> Tel
                               "truncated": len(words) > _REACTION_EXCERPT_CHARS}} if words.strip() else {})}
     topic = str(row["topic_id"])
     return replace(
-        event, thread_id=topic,
-        conversation_key=f"telegram:{event.account_id}:{event.conversation_id}:{topic or '0'}",
-        conversation={**event.conversation, "topic_id": int(topic) if topic else None},
+        event.in_thread(topic),
         message={**event.message, "reaction": {**fact, "target": target},
                  "target_lookup": {"source": "telegram-bot custody", "text": words, "topic_id": topic,
                                    "author_id": row["author_id"], "author_name": row["author_name"],
@@ -383,7 +402,7 @@ def _with_reaction_target(conn: sqlite3.Connection, event: TelegramEvent) -> Tel
 # Candidates of the three claims, oldest first. A claim reads its query plainly first and takes the write
 # lock only when it found a row; under that lock the same query decides again (see _claim_candidate).
 _CLAIMABLE_INBOX = """
-SELECT event_id, payload_json, attempts
+SELECT event_id, payload_json, attempts, place_binding_json
 FROM inbox AS candidate
 WHERE (
     (candidate.state='pending' AND candidate.available_at<=?)
@@ -409,7 +428,19 @@ WHERE (state='pending' AND available_at<=?)
 ORDER BY available_at ASC, created_at ASC
 LIMIT 1
 """
-_CLAIMABLE_OUTBOX = """
+
+
+def _same(path: str, default: str = "''") -> str:
+    """SQL: the earlier row and the candidate name the same value at ``path``, compared as text: earlier versions
+    kept a forum topic as a JSON number in some rows and as a string in others."""
+    return (f"CAST(COALESCE(json_extract(earlier.payload_json, '{path}'), {default}) AS TEXT) = "
+            f"CAST(COALESCE(json_extract(candidate.payload_json, '{path}'), {default}) AS TEXT)")
+
+
+def _claimable_outbox(*lane: str) -> str:
+    """The outbox claim: a row waits behind the unfinished earlier rows of its own destination (``lane``)."""
+    same = "\n      AND ".join(lane)
+    return f"""
 SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts,
        candidate.state, candidate.last_error
 FROM outbox AS candidate
@@ -419,12 +450,29 @@ AND NOT EXISTS (
     SELECT 1 FROM outbox AS earlier
     WHERE earlier.rowid < candidate.rowid
       AND earlier.state IN ('pending','leased')
-      AND json_extract(earlier.payload_json, '$.chat_id') = json_extract(candidate.payload_json, '$.chat_id')
-      AND COALESCE(json_extract(earlier.payload_json, '$.topic_id'), '') = COALESCE(json_extract(candidate.payload_json, '$.topic_id'), '')
+      AND {same}
 )
 ORDER BY candidate.created_at ASC, candidate.rowid ASC
 LIMIT 1
 """
+
+
+# The standalone bot's store holds one bot: its destination is the chat and its forum topic, as 0.13.1 ordered it, so
+# a row whose caller named the bot and one whose caller left it out keep their order.
+_CLAIMABLE_OUTBOX = _claimable_outbox(
+    "json_extract(earlier.payload_json, '$.chat_id') = json_extract(candidate.payload_json, '$.chat_id')",
+    _same("$.topic_id"),
+)
+# The owner bot's store (owner_feed.OWNER_BOT_SUBDIR) can hold several of the owner's bots and connections over time:
+# its destination is also the bot and the exact place connection a row was bound to, so a row of an ended connection
+# or an earlier bot never holds back the current one.
+_CLAIMABLE_OUTBOX_OWNER_BOT = _claimable_outbox(
+    "json_extract(earlier.payload_json, '$.chat_id') = json_extract(candidate.payload_json, '$.chat_id')",
+    _same("$.topic_id"),
+    _same("$.account_id"),
+    _same("$._place_binding.place_id"),
+    _same("$._place_binding.connected_revision", "-1"),
+)
 
 # This process's store of each custody file, for as long as something holds it (see CustodyStore.shared).
 _SHARED: "weakref.WeakValueDictionary[str, CustodyStore]" = weakref.WeakValueDictionary()
@@ -442,15 +490,19 @@ class CustodyStore:
     someone's name or an acknowledged update be lost.
     """
 
-    def __init__(self, path: pathlib.Path):
+    def __init__(self, path: pathlib.Path, *, owner_bot: Optional[bool] = None):
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Which bot's custody this is decides how its outbox is ordered (_CLAIMABLE_OUTBOX*): the owner bot's store
+        # lives in its own folder (owner_feed.owner_store_path); a caller that knows the profile may say so.
+        self.owner_bot = self.path.parent.name == OWNER_BOT_SUBDIR if owner_bot is None else bool(owner_bot)
+        self._claimable_outbox = _CLAIMABLE_OUTBOX_OWNER_BOT if self.owner_bot else _CLAIMABLE_OUTBOX
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
         self._initialize()
 
     @classmethod
-    def shared(cls, path: pathlib.Path) -> "CustodyStore":
+    def shared(cls, path: pathlib.Path, *, owner_bot: Optional[bool] = None) -> "CustodyStore":
         """The store of this file that something in this process already holds, else a new one.
 
         The runtime, the status route and the tools of one process then share one connection,
@@ -460,7 +512,7 @@ class CustodyStore:
         with _SHARED_LOCK:
             store = _SHARED.get(key)
             if store is None:
-                store = _SHARED[key] = cls(path)
+                store = _SHARED[key] = cls(path, owner_bot=owner_bot)
             return store
 
     def __del__(self) -> None:
@@ -476,9 +528,18 @@ class CustodyStore:
             if conn is not None:
                 conn.close()
 
-    def commit_update(self, update_id: int, event: Optional[TelegramEvent],
-                      groups: Sequence[discovery.GroupSighting] = ()) -> bool:
-        """Atomically deduplicate an event, note its groups and advance the provider offset."""
+    def commit_update(
+        self,
+        update_id: int,
+        event: Optional[TelegramEvent],
+        groups: Sequence[discovery.GroupSighting] = (),
+        *,
+        advance_offset: bool = True,
+        feed_cursor: Optional[Tuple[str, int]] = None,
+        sighting_order: Optional[int] = None,
+        place_binding: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Atomically deduplicate an event, note its groups and advance the provider offset or owner-feed offset."""
         now = time.time()
         inserted = False
         with self._connect() as conn:
@@ -489,33 +550,89 @@ class CustodyStore:
                 else:
                     event = _with_album_position(conn, event)
                     _remember_event(conn, event)
+                stored_binding = dict(place_binding) if isinstance(place_binding, dict) else None
+                if stored_binding is not None and str(event.thread_id or "") and not str(stored_binding.get("thread_id") or ""):
+                    stored_binding["thread_id"] = str(event.thread_id)
                 cursor = conn.execute(
                     """
                     INSERT OR IGNORE INTO inbox(
-                        event_id, update_id, conversation_key, payload_json,
+                        event_id, update_id, conversation_key, payload_json, place_binding_json,
                         state, attempts, available_at, received_at
-                    ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
                     """,
                     (
                         event.source_event_id,
                         int(update_id),
                         event.conversation_key,
                         _json(event.to_dict()),
+                        _json(stored_binding) if stored_binding is not None else "",
                         now,
                         now,
                     ),
                 )
                 inserted = cursor.rowcount == 1
-            discovery.record_sightings(conn, int(update_id), groups)
-            current = self._metadata_int(conn, "telegram_offset")
-            next_offset = max(current, int(update_id) + 1)
-            conn.execute(
-                "INSERT INTO metadata(key, value) VALUES('telegram_offset', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(next_offset),),
-            )
+            discovery.record_sightings(conn, int(sighting_order if sighting_order is not None else update_id), groups)
+            if advance_offset:
+                current = self._metadata_int(conn, "telegram_offset")
+                next_offset = max(current, int(update_id) + 1)
+                conn.execute(
+                    "INSERT INTO metadata(key, value) VALUES('telegram_offset', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(next_offset),),
+                )
+            if feed_cursor is not None:
+                account_id, next_feed_offset = str(feed_cursor[0]), max(0, int(feed_cursor[1]))
+                key = f"owner_feed_offset:{account_id}"
+                current_feed = self._metadata_int(conn, key)
+                conn.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(max(current_feed, next_feed_offset))),
+                )
             conn.commit()
         return inserted
+
+    def owner_feed_offset(self, account_id: str) -> int:
+        """Next feed offset for ``account_id`` in the isolated owner-bot store (never touches ``telegram_offset``)."""
+        with self._connect() as conn:
+            return self._metadata_int(conn, f"owner_feed_offset:{str(account_id)}")
+
+    def record_confirmed_owner_bot(self, account_id: str, username: str = "", label: str = "") -> None:
+        """Persist confirmed owner-bot metadata for pooled workers and status reads."""
+        record = {
+            "account_id": str(account_id),
+            "username": str(username or "").strip().lstrip("@"),
+            "label": str(label or "").strip() or (f"@{str(username).strip().lstrip('@')}" if username else str(account_id)),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES('confirmed_owner_bot', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_json(record),),
+            )
+
+    def forget_confirmed_owner_bot(self) -> None:
+        """Clear the active confirmed owner-bot marker while keeping all retained custody rows."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metadata WHERE key='confirmed_owner_bot'")
+
+    def confirmed_owner_bot(self) -> Optional[Dict[str, str]]:
+        """Confirmed owner-bot metadata persisted by the running feed, or ``None``."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key='confirmed_owner_bot'").fetchone()
+        if row is None:
+            return None
+        try:
+            parsed = json.loads(row["value"])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict) or not str(parsed.get("account_id") or "").strip():
+            return None
+        return {
+            "account_id": str(parsed["account_id"]).strip(),
+            "username": str(parsed.get("username") or "").strip(),
+            "label": str(parsed.get("label") or "").strip(),
+        }
 
     def telegram_offset(self) -> int:
         with self._connect() as conn:
@@ -582,7 +699,27 @@ class CustodyStore:
                 event_id=str(row["event_id"]),
                 payload=json.loads(row["payload_json"]),
                 attempts=int(row["attempts"]) + 1,
+                place_binding=_parse_optional_dict(row["place_binding_json"]),
             )
+
+    def inbox_place_binding(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Retained wire-v2 place binding for an owner-bot inbox event, else ``None``."""
+        record = self.inbox_event(event_id)
+        return record[1] if record is not None else None
+
+    def inbox_event(self, event_id: str) -> Optional[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
+        """One retained event as received (its payload) and its place binding (owner bot only), else ``None``."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json, place_binding_json FROM inbox WHERE event_id=?",
+                (str(event_id or ""),),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = _parse_optional_dict(row["payload_json"])
+        if payload is None:
+            raise ValueError("Retained Telegram event is unreadable")
+        return payload, _parse_optional_dict(row["place_binding_json"])
 
     def release_inbox(
         self, event_id: str, *, reason: str, retry_after_sec: float, stage: str = ""
@@ -691,13 +828,29 @@ class CustodyStore:
             if conn.execute("SELECT 1 FROM download_failures WHERE event_id=? LIMIT 1", (event_id,)).fetchone():
                 conn.execute("DELETE FROM download_failures WHERE event_id=?", (event_id,))
 
-    def request_typing(self, *, chat_id: str, topic_id: str, turn_ref: str, source_event_id: str) -> None:
+    def request_typing(
+        self,
+        *,
+        chat_id: str,
+        topic_id: str,
+        turn_ref: str,
+        source_event_id: str,
+        place_binding: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Ask the runtime to show "typing…" for this turn; a repeated call renews its two-minute window."""
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO typing_requests(chat_id, topic_id, turn_ref, source_event_id, requested_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (str(chat_id), str(topic_id or ""), str(turn_ref), str(source_event_id or ""), time.time()),
+                "INSERT OR REPLACE INTO typing_requests("
+                "chat_id, topic_id, turn_ref, source_event_id, requested_at, place_binding_json"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    str(chat_id),
+                    str(topic_id or ""),
+                    str(turn_ref),
+                    str(source_event_id or ""),
+                    time.time(),
+                    _json(place_binding) if isinstance(place_binding, dict) else "",
+                ),
             )
 
     def typing_requests(self) -> List[Dict[str, Any]]:
@@ -764,13 +917,16 @@ class CustodyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'",
+                "SELECT payload_json, place_binding_json FROM inbox WHERE event_id=? AND state='leased'",
                 (event_id,),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 raise ValueError("inbox event is not leased")
             event = json.loads(row["payload_json"])
+            place_binding = _parse_optional_dict(row["place_binding_json"])
+            if place_binding is not None:
+                event["_place_binding"] = place_binding
             self._add_work(conn, event_id, binding_id, turn_ref, "turn", event, mode, now)
             if child_ref and child_ref != turn_ref:
                 self._add_work(conn, event_id, binding_id, child_ref, "child", event, mode, now)
@@ -841,13 +997,16 @@ class CustodyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'",
+                "SELECT payload_json, place_binding_json FROM inbox WHERE event_id=? AND state='leased'",
                 (event_id,),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 raise ValueError("inbox event is not leased")
             event = json.loads(row["payload_json"])
+            place_binding = _parse_optional_dict(row["place_binding_json"])
+            if place_binding is not None:
+                event["_place_binding"] = place_binding
             event["_reporting"] = {
                 "version": delivery_reporting_version,
                 "account_id": event.get("account_id", ""),
@@ -1058,7 +1217,7 @@ class CustodyStore:
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
         now = time.time()
         with self._connect() as conn:
-            row = self._claim_candidate(conn, _CLAIMABLE_OUTBOX, now)
+            row = self._claim_candidate(conn, self._claimable_outbox, now)
             if row is None:
                 return None
             payload = json.loads(row["payload_json"])
@@ -1085,6 +1244,16 @@ class CustodyStore:
                     if file_send:
                         payload[_FILE_ATTEMPTS_MARKED] = row["attempts"] + 1
                     marked = _json(payload)
+            elif recorded_owner_mutation(payload) and CALL_STARTED not in payload:
+                # Owner-bot A edit/moderation: every attempt records CALL_STARTED before dispatch.
+                # Any unrecorded prior attempt without a stored provider result settles uncertain.
+                if "_operation_result" not in payload and "_moderation_result" not in payload:
+                    stamp = payload.get(REACTION_ATTEMPTS_MARKED)
+                    other = row["attempts"] - (stamp if type(stamp) is int else 0)
+                    unrecorded = other != 0
+                    if not unrecorded:
+                        payload = {**payload, REACTION_ATTEMPTS_MARKED: row["attempts"] + 1}
+                        marked = _json(payload)
             updated = conn.execute(
                 """
                 UPDATE outbox
@@ -1129,11 +1298,19 @@ class CustodyStore:
             )
             return updated.rowcount == 1
 
-    def hold_outbox(self, delivery_id: str, reason: str, *, attempts: Optional[int] = None, kind: str = "") -> bool:
+    def hold_outbox(
+        self,
+        delivery_id: str,
+        reason: str,
+        *,
+        attempts: Optional[int] = None,
+        kind: str = "",
+        retry_after_sec: float = 5.0,
+    ) -> bool:
         # A hold returns its attempt to the count; stamps for that attempt move with it. ``kind`` names the Host
         # answer type of a hold only the owner can end (host.OWNER_HOLD_KINDS), "" otherwise.
         held, args = _held_by(attempts)
-        due = time.time() + 5
+        due = time.time() + max(1.0, float(retry_after_sec))
         with self._connect() as conn:
             updated = conn.execute(
                 "UPDATE outbox SET state='pending',available_at=?,lease_until=0,hold_kind=?,hold_kind_due=?,"
@@ -1326,12 +1503,14 @@ class CustodyStore:
         files = [{"file_name": pathlib.PurePath(str(item["path"])).name, "source_path": str(item.get("source") or ""),
                   "copy_path": str(item["path"]), "sha256": str(item.get("sha256") or ""),
                   "size_bytes": item.get("size")} for item in outbox_files.records(payload)]
+        pinned_account = str(payload.get("account_id") or "").strip()
         return {
             # -1: the outbox has not yet asked this Host.
             **({"history_limitation": "Host history for reactions is unavailable: this receipt stays local."}
                if reaction and (reporting.get("version") != -1 or row["state"] != "pending")
                and reporting.get("explicit_completion") != 1
                and not any(entry["acked"] for entry in json.loads(row["reports_json"])) else {}),
+            **({"account_id": pinned_account} if pinned_account else {}),
             "state": "held" if row["state"] == "pending" and str(row["last_error"]).startswith("Held:") else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
             "attempts": int(row["attempts"]),
             "queued_at": _timestamp(row["created_at"]),
@@ -1346,10 +1525,10 @@ class CustodyStore:
             "history_reports": json.loads(row["reports_json"]),
         }
 
-    def offered_groups(self, account_id: str) -> List[Dict[str, str]]:
+    def offered_groups(self, account_id: str, *, group_only: bool = False) -> List[Dict[str, str]]:
         """Connect choices of one bot; reads its chat projection, never message history."""
         with self._connect() as conn:
-            return discovery.offered_groups(conn, account_id)
+            return discovery.offered_groups(conn, account_id, group_only=group_only)
 
     def card_snapshot(self, now: Optional[float] = None, window_s: float = RECENT_PROBLEM_WINDOW_S) -> Dict[str, Any]:
         """Additive status facts for the Widgets card: recent terminal problems with their time, and every hold reason.
@@ -1388,12 +1567,14 @@ class CustodyStore:
 
         ``failed`` (_FAILED_PASS): failed rows, of them uncertain, recent failed, recent uncertain, and recent failed /
         uncertain confirmed in part; ``inbox_failed``: refused rows that are withheld reactions, refused rows (not
-        withheld) within the window; ``held``: each hold note with its count and kind.
+        withheld, nor left with an earlier owner bot) within the window, rows left with an earlier owner bot
+        (OWNER_BOT_CHANGED); ``held``: each hold note with its count and kind.
         """
         failed = tuple(int(value) for value in conn.execute(_FAILED_PASS, (since, since)).fetchone())
         inbox_failed = tuple(int(value) for value in conn.execute(
-            "SELECT IFNULL(SUM(last_error=?),0), IFNULL(SUM(last_error<>? AND failed_at>=?),0) FROM inbox "
-            "WHERE state='failed'", (REACTION_WITHHELD, REACTION_WITHHELD, since)).fetchone())
+            "SELECT IFNULL(SUM(last_error=?),0), IFNULL(SUM(last_error NOT IN (?,?) AND failed_at>=?),0), "
+            "IFNULL(SUM(last_error=?),0) FROM inbox WHERE state='failed'",
+            (REACTION_WITHHELD, REACTION_WITHHELD, OWNER_BOT_CHANGED, since, OWNER_BOT_CHANGED)).fetchone())
         # Each reason once, with the Host answer type it came from (hold_kind; a row held before 0.13.1 kept none).
         held = conn.execute(
             f"SELECT last_error, COUNT(*), MAX({_HOLD_KIND}) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%' "
@@ -1419,8 +1600,8 @@ class CustodyStore:
         # The newest failed send of either kind, by the same order the two queries use.
         newest_send = max((row for row in (newest_failed, newest_uncertain) if row is not None),
                           key=lambda row: (row["failed_at"] or 0, row["rowid"]), default=None)
-        newest_in = one("SELECT failed_at, last_error FROM inbox WHERE state='failed' AND last_error<>? "
-                        "ORDER BY failed_at DESC, update_id DESC LIMIT 1", (REACTION_WITHHELD,))
+        newest_in = one("SELECT failed_at, last_error FROM inbox WHERE state='failed' AND last_error NOT IN (?,?) "
+                        "ORDER BY failed_at DESC, update_id DESC LIMIT 1", (REACTION_WITHHELD, OWNER_BOT_CHANGED))
         # Waiting updates whose last attempt failed, by where it stopped (_INBOX_RETRYING). The error shown is the
         # latest failed attempt's (by when it ended; rows whose end was not recorded come after, newest update first).
         handoff = one(
@@ -1476,7 +1657,7 @@ class CustodyStore:
 
     def _status_counts(self, conn: sqlite3.Connection, shared: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         shared = self._shared_facts(conn, time.time()) if shared is None else shared
-        failed, withheld = shared["failed"], shared["inbox_failed"][0]
+        failed, withheld, retired = shared["failed"], shared["inbox_failed"][0], shared["inbox_failed"][2]
         inbox = {
             str(row["state"]): int(row["count"])
             for row in conn.execute(
@@ -1511,8 +1692,10 @@ class CustodyStore:
                 "SELECT COUNT(DISTINCT event_id) FROM presence_work "
                 "WHERE role IN ('turn','child') AND state IN ('pending','leased')"
             ).fetchone()[0],
-            "inbox_failed": inbox.get("failed", 0) - withheld,
+            "inbox_failed": inbox.get("failed", 0) - withheld - retired,
             "reactions_withheld": withheld,
+            # The owner bot's store only: updates left with a bot the bridge no longer reads (OWNER_BOT_CHANGED).
+            **({"inbox_retired": retired} if self.owner_bot else {}),
             "outbox_waiting": outbox.get("pending", 0),
             # The same held rows the card groups by reason (_shared_facts).
             "outbox_held": sum(int(row[1]) for row in shared["held"]),
@@ -1612,9 +1795,13 @@ class CustodyStore:
                 if column not in outbox_columns:
                     conn.execute(f"ALTER TABLE outbox ADD COLUMN {column} {kind}")
             for column, kind in (("last_stage", "TEXT NOT NULL DEFAULT ''"), ("last_stage_at", "REAL NOT NULL DEFAULT 0"),
-                                 ("last_stage_due", "REAL NOT NULL DEFAULT 0")):
+                                 ("last_stage_due", "REAL NOT NULL DEFAULT 0"),
+                                 ("place_binding_json", "TEXT NOT NULL DEFAULT ''")):
                 if column not in inbox_columns:
                     conn.execute(f"ALTER TABLE inbox ADD COLUMN {column} {kind}")
+            typing_columns = {r[1] for r in conn.execute("PRAGMA table_info(typing_requests)")}
+            if "place_binding_json" not in typing_columns:
+                conn.execute("ALTER TABLE typing_requests ADD COLUMN place_binding_json TEXT NOT NULL DEFAULT ''")
             if "role" not in {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}:
                 self._key_work_by_reference(conn)
             conn.commit()
@@ -1714,6 +1901,16 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _parse_optional_dict(raw: Any) -> Optional[Dict[str, Any]]:
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _card_error(row: Any, state: str) -> Optional[Dict[str, Any]]:
     return {"at": _timestamp(row["failed_at"]), "state": state, "text": str(row["last_error"] or "")} if row else None
 
@@ -1767,6 +1964,10 @@ def _anchor_message_id(
 
 
 def _reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Dict[str, Any]:
+    """An automatic or deferred answer to ``event``. It keeps the bot the event came through, and the owner bot's
+    exact place connection, so it is sent by that bot on that connection or not at all, never through another
+    (runtime._ensure_pinned_account): for either bot and from any caller. A row an earlier version queued without a
+    bot stays as it is, neither migrated nor guessed."""
     payload: Dict[str, Any] = {
         "kind": "message",
         "chat_id": str(event.get("conversation_id") or ""),
@@ -1775,6 +1976,12 @@ def _reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Di
         "_rendered_chunks": prepare_text(str(text)),
         "_reporting": event.get("_reporting", {"version": 0}),
     }
+    account_id = canonical_bot_id(event.get("account_id"))
+    if account_id:
+        payload["account_id"] = account_id
+    place_binding = event.get("_place_binding")
+    if isinstance(place_binding, dict):
+        payload["_place_binding"] = dict(place_binding)
     thread_id = str(event.get("thread_id") or "").strip()
     if thread_id:
         payload["topic_id"] = thread_id

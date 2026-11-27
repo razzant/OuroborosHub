@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.14.0
+
+- A group can reach Ouroboros through the owner's own Telegram bot. On an Ouroboros advertising
+  `telegram_group_feed: 1`, that bot's group updates come from the built-in bridge over the Host relay
+  (`/telegram/feed/{identity,updates,call,upload,file}`) into this skill's parser, attachments, inbox and outbox, kept
+  in `owner_bot/custody.sqlite3`; no second token is needed. Its private chat, commands, callbacks and Panic stay
+  with the bridge. An older Ouroboros can still use its separate bot (`TELEGRAM_PUBLIC_BOT_TOKEN`) without the relay.
+  The separate bot waits for the Host's identity response and keeps the original bot of a retained reply when known.
+- After getFile succeeds, a wait for file bytes that times out through the owner's bot uses the existing
+  bounded attachment retry. This includes a read timeout reported by the native bridge, not an unclassified
+  gateway timeout. If retries run out, the original file ID and a failure note remain; the topic moves on.
+  The timeout does not establish why the file was not received.
+- Every event, reply (immediate or deferred), download, typing request and send of the owner's bot keeps the bot
+  and the exact place connection it belongs to (`place_id`, `connected_revision`, topic). Telegram tools take an
+  optional `account_id` (manifest targets `[account_id, chat_id]`): a call through the owner's bot names it, and a
+  turn that came through that bot is never answered through another. A tool reply in the turn's own chat and topic,
+  or an action on its own message, keeps the event's connection instead of binding a newer one. Naming that message
+  in a reply keeps its bot; under the owner bot, a different topic is refused. Typing renewals use the bot recorded
+  for the originating event in either mode.
+- Holds (Silent or Paused, groups Off, a restarting bridge, a busy relay) use no attempt; a refusal before any
+  provider call fails; `503 not_sent` and a Host connection that was never made retry; a lost or cut-short answer
+  ends `uncertain` and is not sent again, and Host requests never follow a redirect. A row whose connection was
+  disconnected or connected again, or whose bot is no longer this profile's (automatic replies of either bot name
+  their event's bot), ends `failed` ("Not sent") instead of waiting for ever; an update of an owner's bot that is no
+  longer the confirmed one ends before any download and is counted apart from refusals. Retained arrivals wait for
+  confirmed A even when they carry only text. B's earlier automatic replies keep their recorded bot; rows that never
+  named a bot still do not. The owner bot's sends, edits and moderation record each call before making it.
+- The separate bot keeps one order per chat and topic whether or not a caller named it; the owner's bot orders its
+  rows per bot and connection and preserves a reaction's topic when the bridge named it. A full feed page that exceeds
+  the read limit is retried in smaller pages at the same offset; a single oversized item is reported, not skipped.
+  The separate bot contacts Telegram only after Ouroboros has answered, and claims its
+  bot before polling where Ouroboros asks for that (`telegram_group_poll_claim: 1`), so one bot is read by one
+  reader.
+- `GET status` keeps its keys and adds `owner_bot`, `card`, and `ready_wait`. The last field explains why the
+  separate bot is not ready, for example when waiting for Ouroboros or poll ownership, distinct from a missing token.
+  The Widgets card does not ask for a second token when the owner's bot is enough. If the separate bot's
+  token is removed, undelivered and pending records stay visible under the separate bot.
+  `GET owner_bot_status` serves the owner bot's place.
+
 ## 0.13.1
 
 - The Telegram Transport card on the Widgets page is rebuilt. Its first line answers whether the link works and

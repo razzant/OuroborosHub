@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import http.client
 import json
 import math
 import pathlib
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence
+
+from .api import _declared_length, _open_multipart
 
 
 _OUTCOMES = {"message", "silent", "tool_delivered", "deferred"}
@@ -32,7 +37,9 @@ SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
 # connected (the Host's own words say how to connect it). The outbox keeps this kind beside the note.
 HOLD_SKILL_ACCESS = "skill_access"
 HOLD_PLACE_NOT_CONNECTED = "place_not_connected"
+HOLD_BINDING_CHANGED = "binding_changed"
 OWNER_HOLD_KINDS = frozenset({HOLD_SKILL_ACCESS, HOLD_PLACE_NOT_CONNECTED})
+_OWNER_CONTRIBUTION_ID = "owner_bot"
 
 
 class HoldNote(str):
@@ -60,6 +67,16 @@ _EVENT_KEYS = {
 
 class PresenceHostError(RuntimeError):
     """The local Host rejected a presence request or returned an invalid response."""
+
+
+class PresenceHostResponseTooLarge(PresenceHostError):
+    """The response exceeded the local JSON read limit; no partial body is usable."""
+
+
+class PresenceHostUnreachable(PresenceHostError):
+    """No connection to the local Host existed (its name did not resolve or it refused the connection), so no byte of
+    the request left this machine. Any failure once a connection exists stays a plain PresenceHostError: the Host
+    may have acted on it."""
 
 
 class PresenceHostHTTPError(PresenceHostError):
@@ -151,6 +168,18 @@ class PresenceHostTransport(Protocol):
     ) -> Dict[str, Any]: ...
 
 
+def _open_host(request: urllib.request.Request, timeout: float) -> Any:
+    """Open one Host request and read only that request's own answer: the opener file sends already use, which never
+    follows a redirect, so neither the request nor this skill's token header reaches another address."""
+    return _open_multipart(request, timeout=timeout)
+
+
+def _whole(response: Any, data: bytes) -> bool:
+    """Whether ``data`` is the whole body the answer declared; an answer that declared no length counts as whole."""
+    declared = _declared_length(response)
+    return declared is None or len(data) == declared
+
+
 class UrllibPresenceHostTransport:
     async def request_json(
         self,
@@ -190,17 +219,33 @@ class UrllibPresenceHostTransport:
             headers=request_headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_sec) as response:  # noqa: S310 - fixed loopback URL
+            with _open_host(request, timeout_sec) as response:  # noqa: S310 - fixed loopback URL
                 data = response.read(2 * 1024 * 1024 + 1)
+                whole = _whole(response, data)
         except urllib.error.HTTPError as exc:
-            body = exc.read(64 * 1024)
+            # A redirect arrives here too (it is not followed): neither its status nor its body answers this request.
+            # An error body cut short or unreadable is no answer either; only its status stays.
+            try:
+                with exc:
+                    body = exc.read(64 * 1024) if exc.code >= 400 else b""
+                body = body if _whole(exc, body) else b""
+            except (OSError, ValueError, http.client.HTTPException):
+                body = b""
             raise PresenceHostHTTPError(exc.code, _error_detail(body), _error_payload(body)) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (socket.gaierror, ConnectionRefusedError)):
+                raise PresenceHostUnreachable(
+                    f"presence Host request failed: {type(exc).__name__} ({type(exc.reason).__name__})"
+                ) from exc
+            raise PresenceHostError(f"presence Host request failed: {type(exc).__name__}") from exc
+        except (TimeoutError, OSError, http.client.HTTPException) as exc:
             raise PresenceHostError(
                 f"presence Host request failed: {type(exc).__name__}"
             ) from exc
         if len(data) > 2 * 1024 * 1024:
-            raise PresenceHostError("presence Host response exceeds 2 MiB")
+            raise PresenceHostResponseTooLarge("presence Host response exceeds 2 MiB")
+        if not whole:
+            raise PresenceHostError("presence Host answer was cut short")
         try:
             result = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -221,6 +266,8 @@ class HostCapabilities:
     reaction_context: int = 0
     explicit_completion: int = 0
     continuation_version: int = 0
+    telegram_group_feed: int = 0
+    telegram_group_poll_claim: int = 0
     checked_at: float = 0.0
     # Set when the check made no request (UNASKED_SKILL_TOKEN). Its status stays "unavailable", so every gate (place
     # holds, reactions, reports) acts as for an unanswered check; only the words differ: Ouroboros was not asked.
@@ -261,6 +308,8 @@ class PresenceHostClient:
     presence_explicit_completion = property(lambda self: self.capabilities.explicit_completion)
     # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
     continuation_version = property(lambda self: self.capabilities.continuation_version)
+    telegram_group_feed = property(lambda self: self.capabilities.telegram_group_feed)
+    telegram_group_poll_claim = property(lambda self: self.capabilities.telegram_group_poll_claim)
     # When the last /identity check ended (answered or not): the card words its capabilities as that past check.
     identity_checked_at = property(lambda self: self.capabilities.checked_at)
 
@@ -311,6 +360,10 @@ class PresenceHostClient:
                                         and response["presence_explicit_completion"] == 1),
                 continuation_version=_EARLY_CONTINUATION if isinstance(versions, list) and any(
                     type(item) is int and item == _EARLY_CONTINUATION for item in versions) else 0,
+                telegram_group_feed=int(type(response.get("telegram_group_feed")) is int
+                                        and response["telegram_group_feed"] == 1),
+                telegram_group_poll_claim=int(type(response.get("telegram_group_poll_claim")) is int
+                                              and response["telegram_group_poll_claim"] == 1),
                 checked_at=time.time())
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
             # No answer: a fresh record, nothing carried from any earlier one; the next caller asks again.
@@ -352,6 +405,121 @@ class PresenceHostClient:
             return PLACE_POLICY_UNREAD
         return "" if state == "active" else f"Held: {place.get('label') or 'Telegram'} is {state}"
 
+    async def bind_owner_place(
+        self, account_id: str, conversation_id: str, thread_id: str = ""
+    ) -> Dict[str, Any]:
+        """Capture an exact wire-v2 ``owner_bot`` place binding via ``GET /presence/place?operation=bind``."""
+        query = urllib.parse.urlencode({
+            "operation": "bind",
+            "provider": "telegram",
+            "account_id": str(account_id),
+            "conversation_id": str(conversation_id),
+            "thread_id": str(thread_id or ""),
+            "require_place": "true",
+            "contribution_id": _OWNER_CONTRIBUTION_ID,
+        })
+        url = f"{self.host_base}/presence/place?{query}"
+        try:
+            response = await self.transport.request_json(
+                "GET", url, headers=self._headers(), payload=None, timeout_sec=10.0,
+            )
+        except PresenceHostHTTPError as exc:
+            return _owner_bind_http_error(exc)
+        except (PresenceHostError, OSError, TimeoutError) as exc:
+            return {
+                "allowed": False,
+                "binding": None,
+                "state": "unavailable",
+                "code": "place_binding_unavailable",
+                "error": str(exc),
+            }
+        return dict(response) if isinstance(response, dict) else {
+            "allowed": False,
+            "binding": None,
+            "state": "unavailable",
+            "code": "place_binding_unavailable",
+            "error": "presence Host returned an invalid place binding response",
+        }
+
+    def bind_owner_place_sync(
+        self, account_id: str, conversation_id: str, thread_id: str = ""
+    ) -> Dict[str, Any]:
+        """Synchronous owner-bot place bind for tool handlers (uses direct urllib in production)."""
+        if isinstance(self.transport, UrllibPresenceHostTransport):
+            query = urllib.parse.urlencode({
+                "operation": "bind",
+                "provider": "telegram",
+                "account_id": str(account_id),
+                "conversation_id": str(conversation_id),
+                "thread_id": str(thread_id or ""),
+                "require_place": "true",
+                "contribution_id": _OWNER_CONTRIBUTION_ID,
+            })
+            url = f"{self.host_base}/presence/place?{query}"
+            try:
+                response = self.transport._request_json("GET", url, self._headers(), None, 10.0)
+            except PresenceHostHTTPError as exc:
+                return _owner_bind_http_error(exc)
+            except (PresenceHostError, OSError, TimeoutError) as exc:
+                return {
+                    "allowed": False,
+                    "binding": None,
+                    "state": "unavailable",
+                    "code": "place_binding_unavailable",
+                    "error": str(exc),
+                }
+            return dict(response) if isinstance(response, dict) else {
+                "allowed": False,
+                "binding": None,
+                "state": "unavailable",
+                "code": "place_binding_unavailable",
+                "error": "presence Host returned an invalid place binding response",
+            }
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.bind_owner_place(account_id, conversation_id, thread_id))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run, self.bind_owner_place(account_id, conversation_id, thread_id)
+            ).result(timeout=15.0)
+
+    async def check_owner_place(
+        self,
+        binding: Dict[str, Any],
+        *,
+        account_id: str,
+        conversation_id: str,
+        thread_id: str = "",
+    ) -> str:
+        """Recheck a retained ``owner_bot`` place binding via ``GET /presence/place?operation=check``."""
+        query = urllib.parse.urlencode({
+            "operation": "check",
+            "provider": "telegram",
+            "account_id": str(account_id),
+            "conversation_id": str(conversation_id),
+            "thread_id": str(thread_id or ""),
+            "require_place": "true",
+            "contribution_id": _OWNER_CONTRIBUTION_ID,
+            "binding": json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        })
+        try:
+            place = await self.transport.request_json(
+                "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(),
+                payload=None, timeout_sec=10.0,
+            )
+        except PresenceHostHTTPError as exc:
+            if exc.status_code == 403 or exc.payload.get("code") == "presence_auth_blocked":
+                return HoldNote(SKILL_ACCESS_REFUSED, HOLD_SKILL_ACCESS)
+            if exc.status_code in (400, 404, 409) and isinstance(exc.payload, dict):
+                return _owner_place_hold_verdict(exc.payload)
+            return PLACE_POLICY_UNREAD
+        except (PresenceHostError, OSError, TimeoutError):
+            return PLACE_POLICY_UNREAD
+        if not isinstance(place, dict):
+            return PLACE_POLICY_UNREAD
+        return _owner_place_hold_verdict(place)
+
     async def report_delivery(self, payload: Dict[str, Any]) -> None:
         response = await self.transport.request_json(
             "POST", f"{self.host_base}/presence/delivery", headers=self._headers(),
@@ -364,11 +532,15 @@ class PresenceHostClient:
         self,
         event: Dict[str, Any],
         staged_files: Sequence[pathlib.Path],
+        *,
+        binding_id: str = "",
+        connected_revision: Optional[int] = None,
     ) -> PresenceSubmission:
         if not isinstance(event, dict) or set(event) - {"facts"} != _EVENT_KEYS:
             raise PresenceHostError("presence event does not match the frozen contract")
         mode = await self.discover_delivery_support()
-        binding_id = "" if self.places_version else load_binding_id(self.state_dir)
+        explicit_binding = str(binding_id or "").strip()
+        resolved_binding = explicit_binding or ("" if self.places_version else load_binding_id(self.state_dir))
         event = dict(event)
         if not self.places_version:
             event.pop("facts", None)
@@ -383,7 +555,9 @@ class PresenceHostClient:
                 f"{self.host_base}/presence/turn",
                 headers=self._headers(),
                 payload={
-                    **({"binding_id": binding_id} if not self.places_version else {}),
+                    **({"binding_id": resolved_binding} if (explicit_binding or not self.places_version) else {}),
+                    **({"connected_revision": connected_revision}
+                       if type(connected_revision) is int and connected_revision >= 0 else {}),
                     "event": dict(event),
                     "staged_files": [str(path) for path in staged_files],
                     **({"delivery_reporting_version": 1} if mode else {}),
@@ -392,7 +566,7 @@ class PresenceHostClient:
                 timeout_sec=1800.0,
             )
         except PresenceHostHTTPError as exc:
-            exc.binding_id = binding_id  # retained references are polled under this binding
+            exc.binding_id = resolved_binding  # retained references are polled under this binding
             raise
         status = str(response.get("status") or "")
         continuation_ref = ""
@@ -417,7 +591,7 @@ class PresenceHostClient:
             text=str(response.get("text") or ""),
             turn_ref=str(response.get("turn_ref") or "").strip(),
             work_ref=work_ref,
-            binding_id=binding_id,
+            binding_id=resolved_binding,
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
             continuation_ref=continuation_ref,
             output_ref=str(response.get("output_ref") or "").strip(),
@@ -528,6 +702,60 @@ def _error_payload(data: bytes) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _owner_bind_http_error(exc: PresenceHostHTTPError) -> Dict[str, Any]:
+    if exc.status_code == 403 or exc.payload.get("code") == "presence_auth_blocked":
+        return {
+            "allowed": False,
+            "binding": None,
+            "state": "auth_blocked",
+            "code": "presence_auth_blocked",
+            "error": str(exc.payload.get("error") or SKILL_ACCESS_REFUSED),
+        }
+    if exc.status_code in (400, 404, 409) and isinstance(exc.payload, dict):
+        return {
+            **exc.payload,
+            "allowed": False,
+            "binding": exc.payload.get("binding"),
+        }
+    return {
+        "allowed": False,
+        "binding": None,
+        "state": "unavailable",
+        "code": "place_binding_unavailable",
+        "error": str(exc),
+    }
+
+
+def _owner_place_hold_verdict(payload: Dict[str, Any]) -> str:
+    code = str(payload.get("code") or "").strip()
+    state = str(payload.get("state") or "").strip()
+    label = str(payload.get("label") or "").strip() or "Telegram"
+    error = str(payload.get("error") or "").strip()
+    if payload.get("allowed") is True and state == "active":
+        return ""
+    if code == "presence_auth_blocked":
+        return HoldNote(SKILL_ACCESS_REFUSED, HOLD_SKILL_ACCESS)
+    # The connection a row was bound to ended: a reconnect is a new connection, so this never undoes itself and the
+    # runtime ends the row unsent (its words are the row's final error).
+    if state == "disconnected" or code == "place_disconnected":
+        return HoldNote(
+            f"Not sent: {label} was disconnected or connected again after this was queued; "
+            "it is never sent to the new connection.",
+            HOLD_BINDING_CHANGED,
+        )
+    if state == "changed" or code in ("place_scope_changed", "place_binding_invalid"):
+        return HoldNote(
+            f"Not sent: {label} no longer covers this chat or topic as it did when this was queued; "
+            "it is never sent elsewhere.",
+            HOLD_BINDING_CHANGED,
+        )
+    if code == "place_not_connected":
+        return HoldNote(f"Held: {error or 'Connect this chat in Places first.'}", HOLD_PLACE_NOT_CONNECTED)
+    if state in ("silent", "paused"):
+        return HoldNote(f"Held: {label} is {state}", "")
+    return PLACE_POLICY_UNREAD
+
+
 def _error_detail(data: bytes) -> str:
     payload = _error_payload(data)
     return str(payload.get("error") or payload.get("code") or "request rejected")[:300]
@@ -537,6 +765,7 @@ __all__ = [
     "PresenceHostClient",
     "PresenceHostError",
     "PresenceHostHTTPError",
+    "PresenceHostUnreachable",
     "PresenceHostTransport",
     "PresenceSubmission",
     "PresenceWorkResult",

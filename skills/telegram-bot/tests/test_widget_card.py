@@ -12,6 +12,7 @@ import sys
 import pytest
 
 from test_plugin import FakeApi
+from telegram_bot.status_summary import card_summary, summarize_owner
 
 SKILL = pathlib.Path(__file__).resolve().parents[1]
 WIDGET = SKILL / "widget.js"
@@ -32,6 +33,40 @@ def _registered(tmp_path):
 @pytest.mark.skipif(not NODE or not pathlib.Path(NODE).exists(), reason="node is not installed")
 def test_widget_parses():
     subprocess.run([NODE, "--check", str(WIDGET)], check=True)
+
+
+@pytest.mark.skipif(not NODE or not pathlib.Path(NODE).exists(), reason="node is not installed")
+def test_owner_only_widget_keeps_separate_delivery_records_in_card_and_details():
+    owner = {"runtime_state": "polling", "poll_result": "ok", "store": "none", "bot_label": "@personal"}
+    owner = {**owner, **summarize_owner(owner)}
+    clean = {"link": "waiting_for_token", "runtime_state": "waiting_for_token", "owner_bot": owner,
+             "connect": None, "connect_unavailable": "Bot token missing", **dict.fromkeys(
+                 ("inbox_waiting", "inbox_leased", "inbox_retained", "inbox_submitted", "inbox_failed",
+                  "reactions_withheld", "outbox_waiting", "outbox_held", "outbox_leased", "outbox_delivered",
+                  "outbox_failed", "outbox_uncertain"), 0)}
+    old = {**clean, "outbox_failed": 2, "outbox_waiting": 1, "outbox_uncertain": 3}
+    for payload in (clean, old):
+        payload["card"] = card_summary(payload, owner)
+    script = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+const end = src.lastIndexOf('    var kit = K.mount({');
+if (end < 0) process.exit(1);
+const project = vm.runInNewContext(src.slice(0, end) + 'return toModel; })()');
+process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(0, 'utf8')).map(data => project(data, {}, {}))));
+"""
+    result = subprocess.run([NODE, "-e", script, str(WIDGET)], input=json.dumps([clean, old]), text=True,
+                            capture_output=True, check=True)
+    alone, retained = json.loads(result.stdout)
+    assert alone["items"] == [] and alone["facts"] == [["Bot", "@personal"]]
+    assert alone["details"]["groups"][-1]["rows"] == []
+    assert retained["items"] == []  # old totals, not a new failure or a request to set a token
+    summary = "1 waiting · 2 not delivered · 3 outcome unknown"
+    assert ["Separate bot · Outgoing", summary] in retained["facts"]
+    separate = retained["details"]["groups"][-1]
+    assert separate["title"] == "A separate bot" and separate["rows"][1][:2] == ["Outgoing", summary]
+    assert "2 not delivered" not in json.dumps(retained["details"]["groups"][0])
 
 
 def test_widget_follows_the_module_contract():
@@ -100,7 +135,8 @@ def test_every_status_field_the_card_reads_exists_on_the_route(tmp_path):
     finally:
         api.unload()
     read = set(re.findall(r"\bdata\.([a-z_]+)", WIDGET.read_text(encoding="utf-8")))
-    optional = {"identity", "connect_unavailable"}  # present only in some states (plugin.py)
+    # Present only in some states (plugin.py); owner_bot and card only while Ouroboros offers the owner's own bot.
+    optional = {"identity", "connect_unavailable", "owner_bot", "card"}
     assert sorted(field for field in read - optional if field not in payload) == []
 
 
