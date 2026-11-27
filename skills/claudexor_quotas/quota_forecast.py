@@ -7,50 +7,70 @@ context snapshot and Details) completely separate from this forecast.
 Estimator:
     Reads ONLY the exact selected limit series (never mixing window lengths,
     request kinds or model scopes) over the preceding 48 hours ``[now - 48h, now]``.
-    For each account and source, extracts valid comparable intervals:
+    Attaches all fresh recordable live readings per source from ``state.norm``
+    (falling back to ``calc.measured`` for synthetic states with empty
+    ``norm.readings``) via ``quota_summary._with_live`` without bridging gaps.
+    For each account and source, extracts valid comparable segments:
+    - Same-timestamp superseded readings (e.g. a bad reading replaced at the
+      same ``observed_at``) are retracted so they never count as burn or
+      cross-source conflicts; when replaced inside one unbroken watch, the
+      corrected reading stands in for the retracted sighting without bridging
+      any gap or extrapolating hidden plateau timestamps.
     - Unchanged plateaus with at least two distinct fresh observations
-      (``n_obs >= 2``) and unbroken watch contribute zero burn over their
-      clipped observation span; a single cached observation (``n_obs == 1``)
-      contributes zero measured time, never a fake zero hour.
+      (``n_obs >= 2``), unbroken watch, no failed sweeps and an unsuperseded
+      end contribute zero burn over their clipped observation span; a single
+      cached observation (``n_obs == 1``) contributes zero measured time.
     - Consecutive runs of the same ``(account, source, plan, reset cycle)``
-      with ``boundary(prev, nxt, view) == ""``, no failed collector sweeps in
-      between, strictly advancing observation time inside ``[now - 48h, now]``,
-      and non-negative delta contribute their positive ratio increase.
-      Plan changes, resets beyond ``RESET_TOLERANCE_SEC``, ratio drops /
-      restores, corrections, missing readings, collector gaps and failed
-      sweeps are never counted as burn or as zero-burn time.
-    - Multi-source accounts are deduplicated to one deterministic source per
-      elementary interval and rejected wherever concurrent sources disagree on
-      value or reset; cross-source differences are never treated as burn.
+      with ``boundary(prev, nxt, view) == ""``, no failed sweeps in between,
+      strictly advancing observation time inside ``[now - 48h, now]`` and
+      non-negative delta contribute their positive ratio increase.
+    - Multi-source accounts check reset compatibility across active spans and
+      monotonic observation/plateau compatibility within ``VALUE_TOLERANCE``
+      and ``RESET_TOLERANCE_SEC`` (no linear chord interpolation, no artificial
+      padding, and no veto by a frozen ``n_obs == 1`` old cached reading on
+      newer fresh observations), then deduplicate clean same-source legs with
+      a simple deterministic source choice on transition-atomic cells.
 
-Pool coverage and minimum duration:
-    An elementary interval counts toward the pool's valid measured time only
-    when at least ``ceil(0.80 * N)`` of the ``N`` currently measured accounts
-    in the pool AND at least ``ceil(0.80 * M)`` of the historically active
-    cohort at that moment have valid comparable measurements. For 1-4 fully
-    visible accounts ``ceil(0.80 * N) == N`` (100%, no min-5 account floor),
-    while partial history (e.g. 1 of 22 current accounts) yields 0 valid time
-    and stays unknown rather than inventing zero pace. At least 12 valid hours
-    are required before emitting a rate: ``total_observed_burn / valid_hours``.
+Pool coverage, capacity-bearing denominator and explicit limitations:
+    An elementary interval is adequately covered only when at least
+    ``ceil(0.80 * N)`` of the ``N`` currently measured accounts AND at least
+    ``ceil(0.80 * M)`` of the active historical cohort have valid comparable
+    measurements (100% for 1-4 accounts, >=80% for 5+). Within adequately
+    covered time, only intervals where at least one observed account still had
+    selected-limit reserve (``ratio < 1.0 - RATIO_EPS``) count toward
+    ``valid_seconds`` / ``valid_hours`` and the rate denominator, requiring
+    >=12 such hours before emitting ``rate_per_hour = observed_burn /
+    valid_hours`` or ``state == "zero"``. When >=12h were covered overall but
+    zero hours had reserve, returns ``insufficient`` /
+    ``all_observed_at_limit``; mixed positive reserve hours below 12h return
+    ``insufficient`` / ``few_hours`` reporting those hours and no rate.
+
+    Explicit limitations:
+    - No extrapolation over missing accounts under 80% coverage (5+ accounts).
+    - Exhaustion censoring applies to the selected limit series only (not
+      historical pauses caused by a sibling binding window).
+    - Historical cohort presence comes from recorded sightings rather than a
+      separate historical roster table.
 
 Unified simulation and honesty:
-    When Typical is unknown (fewer than 12 valid hours, history unavailable or
-    every account held), no numeric future line, checkpoints or schedule are
-    emitted under Typical's name. When Typical is known (positive rate, or a
-    measured zero with sufficient non-exhausted pool capacity), ONE pooled
-    simulation produces the chart line, the pre-first-reset verdict, Details
-    checkpoints, reset schedule and depletion instants. Each account refills at
-    most once at its next reported reset (no repeated/unreported resets).
-    Tracking runnable (unblocked) reserve separately from total selected-window
-    reserve ensures that a temporary stall caused by another spent limit is
-    surfaced openly rather than reported as uninterrupted availability.
+    When Typical is unknown (fewer than 12 valid hours with available reserve,
+    history unavailable or every account held), no numeric future line,
+    checkpoints or schedule are emitted under Typical's name. When Typical is
+    known (positive rate, or a measured zero with sufficient non-exhausted pool
+    capacity), ONE pooled simulation produces the chart line, the
+    pre-first-reset verdict, Details checkpoints, reset schedule and depletion
+    instants. Each account refills at most once at its next reported reset (no
+    repeated/unreported resets). Tracking runnable (unblocked) reserve
+    separately from total selected-window reserve ensures that a temporary
+    stall caused by another spent limit is surfaced openly rather than reported
+    as uninterrupted availability.
 """
 
 from __future__ import annotations
 
 import bisect
 import math
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 try:  # the host loads the skill as a package: siblings are relative imports
     from . import quota_summary as qs
@@ -65,7 +85,17 @@ VERDICT_TIGHT_RESERVE = 0.05
 
 
 # ---------------------------------------------------------------------------
-# 48-hour observed pool burn / valid measured time
+# 48-hour observed pool burn / valid capacity-bearing measured time
+
+
+class _Seg(NamedTuple):
+    t0: float
+    t1: float
+    burn: float
+    r0: float
+    r1: float
+    resets_at: Optional[float]
+    is_plateau: bool
 
 
 def _has_failed_sweep(failed: Sequence[float], lo: float, hi: float) -> bool:
@@ -75,53 +105,130 @@ def _has_failed_sweep(failed: Sequence[float], lo: float, hi: float) -> bool:
     return idx < len(failed) and failed[idx] <= hi + 1e-6
 
 
-def _source_segments(
+def _seg_has_cap(seg: _Seg) -> bool:
+    return seg.r0 < 1.0 - qs.RATIO_EPS or seg.r1 < 1.0 - qs.RATIO_EPS
+
+
+def _clean_source_runs(
+    runs: Sequence["qs.Run"],
+    now: float,
+    view: "qs.HistoryView",
+    failed: Sequence[float],
+) -> List[Tuple["qs.Run", bool]]:
+    """Chronological ``(run, last_superseded)`` pairs for one source.
+
+    Retracts observations superseded at the same ``observed_at`` by a later
+    sighting with changed content or ``after_correction``. When a retracted
+    single-observation run is replaced within the same unbroken watch, the
+    replacement inherits the original sighting start so a valid comparable
+    change matches a clean control; a gapped correction still retracts the bad
+    observation without bridging the gap.
+    """
+    ordered = sorted(
+        (r for r in runs if r.first_seen <= now + 1e-6),
+        key=lambda r: (r.first_seen, r.first_obs, int(r.after_correction)),
+    )
+    n = len(ordered)
+    last_sup = [False] * n
+    first_sup = [False] * n
+    for i in range(n - 2, -1, -1):
+        cur, nxt = ordered[i], ordered[i + 1]
+        if abs(nxt.first_obs - cur.last_obs) <= 1e-6 and (
+            first_sup[i + 1]
+            or nxt.after_correction
+            or nxt.ratio != cur.ratio
+            or nxt.resets_at != cur.resets_at
+            or nxt.plan != cur.plan
+        ):
+            last_sup[i] = True
+            if abs(cur.first_obs - cur.last_obs) <= 1e-6:
+                first_sup[i] = True
+
+    out: List[Tuple[qs.Run, bool]] = []
+    ret_start: Optional[qs.Run] = None
+    ret_prev: Optional[qs.Run] = None
+    ret_gap = False
+    for i, run in enumerate(ordered):
+        if first_sup[i] and last_sup[i]:
+            if ret_start is None:
+                ret_start = run
+                ret_gap = False
+            elif (qs.watched_gap(ret_prev, run, view)
+                  or _has_failed_sweep(failed, ret_prev.first_seen, run.first_seen)):
+                ret_gap = True
+            ret_prev = run
+            continue
+        if ret_start is not None:
+            broken = (
+                ret_gap
+                or qs.watched_gap(ret_prev, run, view)
+                or _has_failed_sweep(failed, ret_prev.first_seen, run.first_seen)
+            )
+            if not broken and abs(run.first_obs - ret_start.first_obs) <= 1e-6:
+                run = qs.replace(
+                    run,
+                    first_seen=ret_start.first_seen,
+                    after_gap=ret_start.after_gap,
+                    after_correction=ret_start.after_correction,
+                )
+            elif broken:
+                run = qs.replace(run, after_gap=True)
+            ret_start = ret_prev = None
+            ret_gap = False
+        out.append((run, last_sup[i]))
+    return out
+
+
+def _source_evidence(
     runs: Sequence["qs.Run"],
     win_start: float,
     now: float,
     view: "qs.HistoryView",
     failed: Sequence[float],
-) -> List[Tuple[float, float, float, float, float, Optional[float]]]:
-    """Valid disjoint comparable segments ``(t0, t1, burn, r0, r1, resets_at)``
-    for one ``(account, source)`` inside ``[win_start, now]``."""
-    ordered = sorted(runs, key=lambda r: (r.first_seen, r.first_obs))
-    segs: List[Tuple[float, float, float, float, float, Optional[float]]] = []
+    *,
+    need_spans: bool = False,
+) -> Tuple[
+    List[_Seg],
+    List[Tuple[float, float, Optional[float]]],
+    List[Tuple[float, float, float]],
+]:
+    """Extract disjoint comparable segments and non-superseded cross-source
+    observations / active reset spans for one ``(account, source)``."""
+    cleaned = _clean_source_runs(runs, now, view, failed)
+    segs: List[_Seg] = []
+    watch_starts: List[float] = []
     watch_start = -math.inf
-    for idx, run in enumerate(ordered):
-        prev = ordered[idx - 1] if idx > 0 else None
+    for idx, (run, run_last_sup) in enumerate(cleaned):
+        prev, prev_last_sup = cleaned[idx - 1] if idx > 0 else (None, False)
         if (prev is None
                 or qs.watched_gap(prev, run, view)
                 or _has_failed_sweep(failed, prev.first_seen, run.first_seen)):
             watch_start = run.first_seen
-        if run.after_correction:
+        if run.after_correction and not prev_last_sup:
             watch_start = max(watch_start, run.first_seen)
+        watch_starts.append(watch_start)
         if run.first_obs > now + 1e-6:
             continue
         # 1. Constant plateau within a run: requires >= 2 distinct fresh
-        #    observations so a frozen cached reading (n_obs == 1) never counts,
-        #    and never extends earlier than this source's current uninterrupted
-        #    watch segment (or correction sighting).
-        if run.n_obs >= 2 and not _has_failed_sweep(failed, run.first_seen, run.last_seen):
+        #    observations, unbroken watch, no failed sweep and an unsuperseded
+        #    end observation; never extends earlier than watch_start.
+        if (run.n_obs >= 2
+                and not run_last_sup
+                and not _has_failed_sweep(failed, run.first_seen, run.last_seen)):
             obs_start = max(run.first_obs, watch_start)
             obs_end = min(run.last_obs, now)
             if run.resets_at is not None:
                 obs_end = min(obs_end, run.resets_at)
-            a = max(obs_start, win_start)
-            b = min(obs_end, now)
+            a, b = max(obs_start, win_start), min(obs_end, now)
             if b > a + 1e-6:
-                segs.append((a, b, 0.0, run.ratio, run.ratio, run.resets_at))
+                segs.append(_Seg(a, b, 0.0, run.ratio, run.ratio, run.resets_at, True))
         # 2. Comparable transition from previous run of the SAME source.
-        if prev is None:
-            continue
-        if prev.first_obs > now + 1e-6:
+        if prev is None or prev_last_sup or prev.first_obs > now + 1e-6:
             continue
         if qs.boundary(prev, run, view):
             continue
         if _has_failed_sweep(failed, prev.first_seen, run.first_seen):
             continue
-        # A cached observation timestamped before this source's current
-        # uninterrupted watch segment (or correction) cannot open a transition
-        # unless that level was re-observed at or after watch_start.
         if prev.last_obs < watch_start - 1e-6:
             continue
         t0, t1 = prev.last_obs, run.first_obs
@@ -134,82 +241,110 @@ def _source_segments(
         if t0 < win_start - 1e-6 or t1 > now + 1e-6:
             continue
         delta = max(0.0, run.ratio - prev.ratio)
-        segs.append((max(t0, win_start), min(t1, now), delta, prev.ratio, run.ratio, run.resets_at))
-    segs.sort(key=lambda s: (s[0], s[1]))
-    # Guard against any overlap from clock jitter without inventing data.
-    clean: List[Tuple[float, float, float, float, float, Optional[float]]] = []
+        is_flat = delta <= qs.RATIO_EPS
+        segs.append(_Seg(
+            max(t0, win_start), min(t1, now),
+            0.0 if is_flat else delta, prev.ratio, run.ratio,
+            run.resets_at, is_flat,
+        ))
+
+    segs.sort(key=lambda s: (s.t0, s.t1))
+    clean: List[_Seg] = []
     for seg in segs:
         if clean:
-            if seg[0] < clean[-1][1] - 1e-6:
+            if seg.t0 < clean[-1].t1 - 1e-6:
                 continue
-            if seg[0] < clean[-1][1]:
-                seg = (clean[-1][1], seg[1], seg[2], seg[3], seg[4], seg[5])
-                if seg[1] <= seg[0] + 1e-6:
+            if seg.t0 < clean[-1].t1:
+                if seg.t1 <= clean[-1].t1 + 1e-6:
                     continue
+                seg = seg._replace(t0=clean[-1].t1)
         clean.append(seg)
-    return clean
+
+    if not need_spans:
+        return clean, [], []
+
+    same_t = qs.SAME_INSTANT_SEC
+    obs: List[Tuple[float, float, Optional[float]]] = []
+    reset_spans: List[Tuple[float, float, float]] = []
+    spans = qs._source_spans([r for r, _sup in cleaned], now, view)
+    for (run, end), (_r, run_last_sup), w_start in zip(spans, cleaned, watch_starts):
+        if run.first_obs > now + 1e-6:
+            continue
+        if run.resets_at is not None:
+            lo = max(run.first_seen, win_start)
+            hi = min(end, now, run.last_obs) if run_last_sup else min(end, now)
+            if hi > lo + 1e-6:
+                reset_spans.append((lo, hi, run.resets_at))
+        obs_lo = max(win_start - same_t, w_start - qs.SIGHTING_GAP_SEC - 1e-6)
+        if obs_lo <= run.first_obs <= now + 1e-6:
+            obs.append((run.first_obs, run.ratio, run.resets_at))
+        if (not run_last_sup
+                and run.last_obs > run.first_obs + 1e-6
+                and obs_lo <= run.last_obs <= now + 1e-6):
+            obs.append((run.last_obs, run.ratio, run.resets_at))
+
+    obs.sort(key=lambda o: o[0])
+    reset_spans.sort(key=lambda r: (r[0], r[1]))
+    return clean, obs, reset_spans
 
 
-def _seg_ratio_at(
-    seg: Tuple[float, float, float, float, float, Optional[float]],
-    at: float,
-) -> float:
-    t0, t1, _burn, r0, r1, _res = seg
-    if t1 <= t0:
-        return r0
-    return r0 + (r1 - r0) * ((at - t0) / (t1 - t0))
+def _source_segments(
+    runs: Sequence["qs.Run"],
+    win_start: float,
+    now: float,
+    view: "qs.HistoryView",
+    failed: Sequence[float],
+) -> List[Tuple[float, float, float, float, float, Optional[float]]]:
+    """Valid disjoint comparable segments ``(t0, t1, burn, r0, r1, resets_at)``
+    for one ``(account, source)`` inside ``[win_start, now]``."""
+    segs, _obs, _rspans = _source_evidence(runs, win_start, now, view, failed)
+    return [(s.t0, s.t1, s.burn, s.r0, s.r1, s.resets_at) for s in segs]
 
 
-def _sources_disagree(
-    covering: Dict[str, Tuple[float, float, float, float, float, Optional[float]]],
-    cover: "qs.Cover",
-    u: float,
-    v: float,
+def _point_vs_seg_conflict(
+    t: float, y: float, res_t: Optional[float], seg: _Seg
 ) -> bool:
-    """True when concurrent sources for the same account disagree on value or
-    reset across ``[u, v]`` (or at either end of a shared covering overlap)."""
+    """True when observation ``(t, y, res_t)`` of another source contradicts
+    ``seg`` under monotonic same-cycle semantics and ``quota_summary`` tolerances."""
+    same_t = qs.SAME_INSTANT_SEC
+    if t < seg.t0 - same_t or t > seg.t1 + same_t:
+        return False
+    # Ended cycles cannot veto a running cycle at the same instant (quota_summary).
+    pt_ended = res_t is not None and res_t <= t + same_t
+    seg_ended = seg.resets_at is not None and seg.resets_at <= t + same_t
+    if pt_ended != seg_ended:
+        return False
+    if (seg.resets_at is not None
+            and res_t is not None
+            and abs(seg.resets_at - res_t) > qs.RESET_TOLERANCE_SEC):
+        return True
     tol = qs.VALUE_TOLERANCE + qs.RATIO_EPS
-    segs = list(covering.values())
-    ratios_u: List[float] = []
-    ratios_v: List[float] = []
-    resets: List[float] = []
-    for seg in segs:
-        ratios_u.append(_seg_ratio_at(seg, u))
-        ratios_v.append(_seg_ratio_at(seg, v))
-        if seg[5] is not None:
-            resets.append(seg[5])
-    # Check both endpoints of every shared covering overlap so two crossing
-    # transitions (e.g. 10->22% vs 15->17%) cannot agree around their crossing.
-    for i in range(len(segs)):
-        a = segs[i]
-        for j in range(i + 1, len(segs)):
-            b = segs[j]
-            o0 = max(a[0], b[0])
-            o1 = min(a[1], b[1])
-            if o1 > o0 + 1e-6:
-                if abs(_seg_ratio_at(a, o0) - _seg_ratio_at(b, o0)) > tol:
-                    return True
-                if abs(_seg_ratio_at(a, o1) - _seg_ratio_at(b, o1)) > tol:
-                    return True
-    mid = (u + v) * 0.5
-    active = qs._active(cover, mid, False)
-    for run in active:
-        if run.source not in covering:
-            ratios_u.append(run.ratio)
-            ratios_v.append(run.ratio)
-            if run.resets_at is not None:
-                resets.append(run.resets_at)
-    if (len(active) > 1
-            and len({r.ratio for r in active}) > 1
-            and any(r.first_obs != r.last_obs and mid < r.last_seen for r in active)):
+    near0 = abs(t - seg.t0) <= same_t
+    near1 = abs(t - seg.t1) <= same_t
+    if near0 and not near1:
+        return abs(y - seg.r0) > tol
+    if near1 and not near0:
+        return abs(y - seg.r1) > tol
+    return y < seg.r0 - tol or y > seg.r1 + tol
+
+
+def _segments_conflict(a: _Seg, b: _Seg) -> bool:
+    """Symmetric monotonic + reset compatibility check for two segments of
+    different sources without linear chord interpolation."""
+    same_t = qs.SAME_INSTANT_SEC
+    if a.t1 < b.t0 - same_t or b.t1 < a.t0 - same_t:
+        return False
+    if (min(a.t1, b.t1) > max(a.t0, b.t0) + 1e-6
+            and a.resets_at is not None
+            and b.resets_at is not None
+            and abs(a.resets_at - b.resets_at) > qs.RESET_TOLERANCE_SEC):
         return True
-    if resets and max(resets) - min(resets) > qs.RESET_TOLERANCE_SEC:
-        return True
-    if len(ratios_u) > 1 and max(ratios_u) - min(ratios_u) > tol:
-        return True
-    if len(ratios_v) > 1 and max(ratios_v) - min(ratios_v) > tol:
-        return True
-    return False
+    return (
+        _point_vs_seg_conflict(a.t0, a.r0, a.resets_at, b)
+        or _point_vs_seg_conflict(a.t1, a.r1, a.resets_at, b)
+        or _point_vs_seg_conflict(b.t0, b.r0, b.resets_at, a)
+        or _point_vs_seg_conflict(b.t1, b.r1, b.resets_at, a)
+    )
 
 
 def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
@@ -227,6 +362,106 @@ def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, 
     return merged
 
 
+def _subtract_intervals(
+    a: float, b: float, exclusions: Sequence[Tuple[float, float]]
+) -> List[Tuple[float, float]]:
+    """Return disjoint sub-intervals of ``[a, b]`` remaining after removing sorted disjoint ``exclusions``."""
+    if not exclusions:
+        return [(a, b)]
+    out: List[Tuple[float, float]] = []
+    cur = a
+    for lo, hi in exclusions:
+        if hi <= cur + 1e-6:
+            continue
+        if lo >= b - 1e-6:
+            break
+        if lo > cur + 1e-6:
+            out.append((cur, min(lo, b)))
+        cur = max(cur, hi)
+        if cur >= b - 1e-6:
+            break
+    if b > cur + 1e-6:
+        out.append((cur, b))
+    return out
+
+
+def _in_intervals(t: float, intervals: Sequence[Tuple[float, float]], margin: float) -> bool:
+    if not intervals:
+        return False
+    idx = bisect.bisect_right(intervals, (t + margin, math.inf)) - 1
+    return idx >= 0 and intervals[idx][1] >= t - margin
+
+
+def _filter_clean_segments(
+    segs: Sequence[_Seg],
+    others: Sequence[str],
+    by_src: Dict[str, Tuple[List[_Seg], List[float], List[Tuple[float, float, Optional[float]]], List[float], List[Tuple[float, float, float]], List[float]]],
+) -> List[_Seg]:
+    """Keep segments free of cross-source value/reset conflicts.
+
+    Transitions are atomic (dropped on any conflict). Plateaus carve out exact
+    overlapping conflicting segments / reset spans and drop on any standalone
+    conflicting observation without artificial padding.
+    """
+    same_t = qs.SAME_INSTANT_SEC
+    kept: List[_Seg] = []
+    for seg in segs:
+        exclusions: List[Tuple[float, float]] = []
+        drop = False
+        for other in others:
+            osegs, oseg_ends, _oobs, _oobs_ts, orspans, omax_hi = by_src[other]
+            j = bisect.bisect_left(oseg_ends, seg.t0 - same_t - 1e-6)
+            while j < len(osegs) and osegs[j].t0 <= seg.t1 + same_t + 1e-6:
+                ob_seg = osegs[j]
+                if _segments_conflict(seg, ob_seg):
+                    o0, o1 = max(seg.t0, ob_seg.t0), min(seg.t1, ob_seg.t1)
+                    if seg.is_plateau and o1 > o0 + 1e-6:
+                        exclusions.append((o0, o1))
+                    else:
+                        drop = True
+                        break
+                j += 1
+            if drop:
+                break
+            if seg.resets_at is not None:
+                j = bisect.bisect_left(omax_hi, seg.t0 + 1e-6)
+                while j < len(orspans) and orspans[j][0] < seg.t1 - 1e-6:
+                    lo, hi, r_other = orspans[j]
+                    if (hi > seg.t0 + 1e-6
+                            and abs(seg.resets_at - r_other) > qs.RESET_TOLERANCE_SEC):
+                        if seg.is_plateau:
+                            exclusions.append((max(seg.t0, lo), min(seg.t1, hi)))
+                        else:
+                            drop = True
+                            break
+                    j += 1
+                if drop:
+                    break
+        if drop:
+            continue
+        merged_excl = _merge_intervals(exclusions)
+        for other in others:
+            _osegs, _oseg_ends, oobs, oobs_ts, _orspans, _omax_hi = by_src[other]
+            j = bisect.bisect_left(oobs_ts, seg.t0 - same_t - 1e-6)
+            while j < len(oobs) and oobs_ts[j] <= seg.t1 + same_t + 1e-6:
+                ot, oy, ores = oobs[j]
+                if _point_vs_seg_conflict(ot, oy, ores, seg):
+                    if not seg.is_plateau or not _in_intervals(ot, merged_excl, same_t + 1e-6):
+                        drop = True
+                        break
+                j += 1
+            if drop:
+                break
+        if drop:
+            continue
+        if not merged_excl:
+            kept.append(seg)
+        else:
+            for a, b in _subtract_intervals(seg.t0, seg.t1, merged_excl):
+                kept.append(seg._replace(t0=a, t1=b))
+    return kept
+
+
 def _account_segments(
     runs: Sequence["qs.Run"],
     win_start: float,
@@ -236,73 +471,118 @@ def _account_segments(
 ) -> List[Tuple[float, float, float, bool]]:
     """Deduplicated valid intervals ``(u, v, rate_per_sec, has_capacity)`` for
     one account over ``[win_start, now]``."""
-    by_src: Dict[str, List[qs.Run]] = {}
+    by_src_runs: Dict[str, List[qs.Run]] = {}
     for r in runs:
-        by_src.setdefault(r.source, []).append(r)
-    src_segs = {
-        src: _source_segments(srs, win_start, now, view, failed)
-        for src, srs in by_src.items()
-    }
-    if len(by_src) == 1:
-        only = next(iter(src_segs.values()))
-        return [
-            (t0, t1, burn / (t1 - t0), (r0 < 1.0 - qs.RATIO_EPS or r1 < 1.0 - qs.RATIO_EPS))
-            for t0, t1, burn, r0, r1, _res in only
-        ]
+        by_src_runs.setdefault(r.source, []).append(r)
+    if len(by_src_runs) == 1:
+        only_segs, _obs, _rspans = _source_evidence(
+            next(iter(by_src_runs.values())), win_start, now, view, failed
+        )
+        return [(s.t0, s.t1, s.burn / (s.t1 - s.t0), _seg_has_cap(s)) for s in only_segs]
 
-    cover = qs._member_cover(list(runs), now, view)
-    pts: Set[float] = set()
-    for segs in src_segs.values():
-        for t0, t1, *_rest in segs:
-            pts.add(t0)
-            pts.add(t1)
-    for _starts, spans in cover:
-        for run, end in spans:
-            for at in (run.first_seen, run.last_seen, end):
-                if win_start <= at <= now:
-                    pts.add(at)
-    if len(pts) < 2:
+    sources = sorted(by_src_runs)
+    evidence: Dict[str, Tuple[List[_Seg], List[float], List[Tuple[float, float, Optional[float]]], List[float], List[Tuple[float, float, float]], List[float]]] = {}
+    for src in sources:
+        segs, obs, rspans = _source_evidence(
+            by_src_runs[src], win_start, now, view, failed, need_spans=True
+        )
+        max_hi: List[float] = []
+        hi_so_far = -math.inf
+        for _lo, hi, _res in rspans:
+            hi_so_far = max(hi_so_far, hi)
+            max_hi.append(hi_so_far)
+        evidence[src] = (segs, [s.t1 for s in segs], obs, [o[0] for o in obs], rspans, max_hi)
+
+    clean_by_src: Dict[str, List[_Seg]] = {}
+    for src in sources:
+        kept = _filter_clean_segments(
+            evidence[src][0], [o for o in sources if o != src], evidence
+        )
+        if kept:
+            clean_by_src[src] = kept
+
+    if not clean_by_src:
         return []
+    if len(clean_by_src) == 1:
+        only_segs = next(iter(clean_by_src.values()))
+        return [(s.t0, s.t1, s.burn / (s.t1 - s.t0), _seg_has_cap(s)) for s in only_segs]
 
-    ordered = sorted(pts)
-    sources = sorted(src_segs)
-    cursors = {src: 0 for src in sources}
-    out: List[Tuple[float, float, float, bool]] = []
-    sticky: Optional[str] = None
-    for u, v in zip(ordered, ordered[1:]):
-        if v - u <= 1e-6:
+    # Simple deterministic source rank: longer clean coverage, more resolved
+    # same-source legs (finer cadence), then source name. Transition-atomic
+    # cells ensure no transition leg is ever split across sources.
+    active_sources = sorted(clean_by_src)
+    src_rank = {
+        src: (-round(sum(s.t1 - s.t0 for s in segs), 3), -len(segs), src)
+        for src, segs in clean_by_src.items()
+    }
+    all_pts = sorted({t for segs in clean_by_src.values() for s in segs for t in (s.t0, s.t1)})
+    merged_trans: List[Tuple[float, float]] = []
+    for lo, hi in sorted(
+        (s.t0, s.t1) for segs in clean_by_src.values() for s in segs if not s.is_plateau
+    ):
+        if merged_trans and lo < merged_trans[-1][1] - 1e-6:
+            merged_trans[-1] = (merged_trans[-1][0], max(merged_trans[-1][1], hi))
+        else:
+            merged_trans.append((lo, hi))
+
+    cuts: List[float] = []
+    t_idx = 0
+    for p in all_pts:
+        while t_idx < len(merged_trans) and merged_trans[t_idx][1] <= p + 1e-6:
+            t_idx += 1
+        if t_idx < len(merged_trans) and merged_trans[t_idx][0] + 1e-6 < p < merged_trans[t_idx][1] - 1e-6:
             continue
-        covering: Dict[str, Tuple[float, float, float, float, float, Optional[float]]] = {}
-        for src in sources:
-            segs = src_segs[src]
+        if not cuts or p > cuts[-1] + 1e-6:
+            cuts.append(p)
+
+    cursors = {src: 0 for src in active_sources}
+    out: List[Tuple[float, float, float, bool]] = []
+    for c0, c1 in zip(cuts, cuts[1:]):
+        if c1 - c0 <= 1e-6:
+            continue
+        best_key: Optional[Tuple[float, Tuple[float, int, str]]] = None
+        best_segs: List[_Seg] = []
+        for src in active_sources:
+            segs = clean_by_src[src]
             pos = cursors[src]
-            while pos < len(segs) and segs[pos][1] <= u + 1e-6:
+            while pos < len(segs) and segs[pos].t1 <= c0 + 1e-6:
                 pos += 1
             cursors[src] = pos
-            if pos < len(segs) and segs[pos][0] <= u + 1e-6 and segs[pos][1] >= v - 1e-6:
-                covering[src] = segs[pos]
-        if not covering:
-            sticky = None
-            continue
-        if _sources_disagree(covering, cover, u, v):
-            sticky = None
-            continue
-        pick = sticky if sticky in covering else min(covering)
-        sticky = pick
-        t0, t1, burn, r0, r1, _res = covering[pick]
-        has_cap = r0 < 1.0 - qs.RATIO_EPS or r1 < 1.0 - qs.RATIO_EPS
-        out.append((u, v, burn / (t1 - t0), has_cap))
+            j = pos
+            cell_segs: List[_Seg] = []
+            covered = 0.0
+            while j < len(segs) and segs[j].t0 < c1 - 1e-6:
+                seg = segs[j]
+                lo, hi = max(seg.t0, c0), min(seg.t1, c1)
+                if hi > lo + 1e-6:
+                    cell_segs.append(seg._replace(t0=lo, t1=hi) if seg.is_plateau else seg)
+                    covered += hi - lo
+                if seg.t1 <= c1 + 1e-6:
+                    j += 1
+                else:
+                    break
+            if not cell_segs:
+                continue
+            cand_key = (-round(covered, 3), src_rank[src])
+            if best_key is None or cand_key < best_key:
+                best_key = cand_key
+                best_segs = cell_segs
+        for seg in best_segs:
+            out.append((seg.t0, seg.t1, seg.burn / (seg.t1 - seg.t0), _seg_has_cap(seg)))
     return out
 
 
 def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dict[str, Any]:
     """Observed pooled burn rate of one limit over the preceding 48 hours:
-    ``total_observed_pool_burn / valid_measured_hours``.
+    ``observed_burn / valid_hours``.
 
-    Never mixes different window durations or scopes. Requires at least
-    ``TYPICAL_MIN_VALID_SEC`` (12 valid hours) of intervals where both the
-    current measured pool and the historically active cohort meet
-    ``TYPICAL_COVERAGE`` (80%, i.e. 100% for 1-4 accounts and >=80% for 5+).
+    Never mixes different window durations or scopes. ``valid_seconds`` and
+    ``valid_hours`` count adequately covered pool time (at least
+    ``ceil(0.80 * N)`` of current measured accounts and ``ceil(0.80 * M)`` of
+    the active historical cohort — 100% for 1-4 accounts) during which at least
+    one observed account still had selected-limit reserve (not all pinned at
+    100% used). Requires at least ``TYPICAL_MIN_VALID_SEC`` (12 such hours)
+    before emitting a rate or measured zero.
     """
     cached = state.typical_cache.get(calc.key)
     if cached is not None:
@@ -340,24 +620,53 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
               else [True] * len(raw_ts))
     failed = sorted(t for t, ok in zip(raw_ts, raw_ok) if not ok and t <= now + 1e-6)
 
-    # Gather runs strictly for calc.key and attach live current readings
-    # without bridging gaps (same rule as member_rate).
+    # Gather runs strictly for calc.key and attach all fresh recordable live
+    # readings per source (same filter as the collector), falling back to
+    # calc.measured for synthetic SummaryStates with empty norm.readings.
     by_sub: Dict[str, List[qs.Run]] = {}
     for (sub, series), runs in view.runs.items():
         if series == calc.key and runs:
             by_sub[sub] = list(runs)
+
+    pseudo_by_subject: Dict[Tuple[str, str], str] = {
+        (m.harness, m.subject_id): m.pseudo
+        for m in calc.slots if m.pseudo
+    }
+    live_by_sub_src: Dict[Tuple[str, str], List[qs.Reading]] = {}
+    for reading in qs.recordable(state.norm, now):
+        if reading.key != calc.key:
+            continue
+        sub = pseudo_by_subject.get((reading.harness, reading.subject_id))
+        if not sub and view.salt:
+            sub = qs.pseudo_id(view.salt, reading.harness, reading.subject_id)
+        if not sub:
+            continue
+        live_by_sub_src.setdefault((sub, reading.source), []).append(reading)
     for m in calc.measured:
-        if not m.pseudo or m.reading is None or m.reading.observed_at is None:
+        rd = m.reading
+        if not m.pseudo or rd is None or not rd.fresh:
             continue
-        if m.reading.observed_at > now + qs.FUTURE_SKEW_SEC:
+        if rd.observed_at is None or not math.isfinite(rd.observed_at):
             continue
-        existing = by_sub.get(m.pseudo, [])
+        if qs.ratio_of(rd.ratio)[0] is None:
+            continue
+        if rd.observed_at > now + qs.FUTURE_SKEW_SEC:
+            continue
+        if rd.resets_at is not None and (not math.isfinite(rd.resets_at) or rd.resets_at <= now):
+            continue
+        live_by_sub_src.setdefault((m.pseudo, rd.source), [rd])
+
+    for (sub, src), live_readings in live_by_sub_src.items():
+        live_readings.sort(key=lambda r: r.observed_at)
+        existing = by_sub.get(sub, [])
         same_src = sorted(
-            (r for r in existing if r.source == m.reading.source),
-            key=lambda r: (r.first_seen, r.first_obs),
+            (r for r in existing if r.source == src),
+            key=lambda r: (r.first_seen, r.first_obs, int(r.after_correction)),
         )
-        other_src = [r for r in existing if r.source != m.reading.source]
-        by_sub[m.pseudo] = other_src + qs._with_live(same_src, m.reading, now, view)
+        other_src = [r for r in existing if r.source != src]
+        for reading in live_readings:
+            same_src = qs._with_live(same_src, reading, now, view)
+        by_sub[sub] = other_src + same_src
 
     if not by_sub:
         warming = view.collecting_since is None or (now - view.collecting_since) < TYPICAL_LOOKBACK_SEC
@@ -369,9 +678,7 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
         })
 
     # Sweep-line over disjoint valid measurement segments and merged cohort
-    # presence spans inside [win_start, now]. Splitting by account participation
-    # boundaries keeps a brief or single sighting of another account local, and
-    # avoids re-scanning runs per elementary interval.
+    # presence spans inside [win_start, now].
     # Event tuple: (at, kind, sub, is_current, rate_sec, has_cap)
     # kind order at equal timestamp: 0=seg_end, 1=pres_end, 2=pres_start, 3=seg_start.
     events: List[Tuple[float, int, str, bool, float, bool]] = []
@@ -397,8 +704,8 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
 
     events.sort(key=lambda e: (e[0], e[1]))
     need_current = math.ceil(TYPICAL_COVERAGE * len(current_subs))
-    valid_sec = 0.0
-    unblocked_valid_sec = 0.0
+    covered_sec = 0.0
+    usable_sec = 0.0
     total_burn = 0.0
 
     valid_total = 0
@@ -442,43 +749,46 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
             continue
         if hist_count > 0 and valid_total < math.ceil(TYPICAL_COVERAGE * hist_count):
             continue
-        valid_sec += dt
-        if pos_rates:
-            total_burn += sum(pos_rates.values()) * dt
+        covered_sec += dt
         if cap_count > 0:
-            unblocked_valid_sec += dt
+            usable_sec += dt
+            if pos_rates:
+                total_burn += sum(pos_rates.values()) * dt
 
-    valid_hours = valid_sec / 3600.0
-    if valid_sec < TYPICAL_MIN_VALID_SEC - 1e-6:
+    usable_hours = usable_sec / 3600.0
+    if usable_sec < TYPICAL_MIN_VALID_SEC - 1e-6:
+        if covered_sec >= TYPICAL_MIN_VALID_SEC - 1e-6:
+            reason = "all_observed_at_limit" if usable_sec <= 1e-6 else "few_hours"
+            return _finish({
+                "state": "insufficient", "reason": reason,
+                "rate_per_hour": None, "valid_seconds": round(usable_sec),
+                "valid_hours": round(usable_hours, 2),
+                "observed_burn": round(total_burn, 6),
+                "window_hours": window_hours, "min_valid_hours": min_hours,
+            })
         warming = view.collecting_since is None or (now - view.collecting_since) < TYPICAL_LOOKBACK_SEC
         return _finish({
             "state": "warming_up" if warming else "insufficient", "reason": "few_hours",
-            "rate_per_hour": None, "valid_seconds": round(valid_sec),
-            "valid_hours": round(valid_hours, 2), "observed_burn": round(total_burn, 6),
+            "rate_per_hour": None, "valid_seconds": round(usable_sec),
+            "valid_hours": round(usable_hours, 2),
+            "observed_burn": round(total_burn, 6),
             "window_hours": window_hours, "min_valid_hours": min_hours,
         })
 
     if total_burn <= qs.RATIO_EPS:
-        # Observing 0 burn while every observed account was pinned at 100% used
-        # cannot prove zero demand, even when the pool is still empty now.
-        if unblocked_valid_sec < TYPICAL_MIN_VALID_SEC - 1e-6:
-            return _finish({
-                "state": "insufficient", "reason": "all_observed_at_limit",
-                "rate_per_hour": None, "valid_seconds": round(valid_sec),
-                "valid_hours": round(valid_hours, 2), "observed_burn": 0.0,
-                "window_hours": window_hours, "min_valid_hours": min_hours,
-            })
         return _finish({
             "state": "zero", "reason": "", "rate_per_hour": 0.0,
-            "valid_seconds": round(valid_sec), "valid_hours": round(valid_hours, 2),
+            "valid_seconds": round(usable_sec),
+            "valid_hours": round(usable_hours, 2),
             "observed_burn": 0.0, "window_hours": window_hours,
             "min_valid_hours": min_hours,
         })
 
-    rate_per_hour = total_burn / valid_hours
+    rate_per_hour = total_burn / usable_hours
     return _finish({
         "state": "ok", "reason": "", "rate_per_hour": rate_per_hour,
-        "valid_seconds": round(valid_sec), "valid_hours": round(valid_hours, 2),
+        "valid_seconds": round(usable_sec),
+        "valid_hours": round(usable_hours, 2),
         "observed_burn": round(total_burn, 6), "window_hours": window_hours,
         "min_valid_hours": min_hours,
     })
@@ -556,15 +866,20 @@ def simulate_pool(
     now: float,
     chart_end: float,
     rate: float,
+    unknown: Optional[Sequence[bool]] = None,
 ) -> Dict[str, Any]:
     """Single pooled simulation from ``now`` at ``rate`` win/h.
 
     Each item is ``(remaining, reset_at, blocked_until)``: ``blocked_until`` is
     None for an account that can run now, else the moment every restriction of
-    the account ends (``math.inf``: no reported end). Runnable accounts share
-    the pool burn, so demand continues when one account hits zero; a restricted
-    account keeps its share in the total and is not drained while restricted.
-    Each account refills to 1.0 at most once, at its next reported reset.
+    the account ends (``math.inf``: no reported end). ``unknown`` marks the
+    accounts whose availability is not known now (another limit that binds
+    them, or its scope, was not read): like a restricted account each keeps
+    its share in the total and is neither drained nor counted as usable, but
+    what is left on it is said apart (``unknown``) — a condition, never a
+    confirmed restriction. Runnable accounts share the pool burn, so demand
+    continues when one account hits zero. Each account refills to 1.0 at most
+    once, at its next reported reset.
 
     The simulation runs through every known event — each reported reset, each
     reported end of a restriction — and on to the depletion of what can still
@@ -573,30 +888,48 @@ def simulate_pool(
     listed for it in ``runs_out``). So the 24-hour and the 7-day charts read
     one and the same future.
 
-    A *stop* is a stretch with no usable (runnable) reserve, ``(start, locked,
-    resumes)``: ``locked`` is the total still on restricted accounts at its
-    start, ``resumes`` the first event after which runnable reserve is back
-    (None: no known event brings it back). Every event of one instant is
-    applied before a stop is recorded: capacity back at that same instant
-    (within SAME_INSTANT_SEC) is no stop; any positive break is one.
+    A *stop* is a stretch with no usable reserve, ``{"start", "locked",
+    "unknown", "resumes", "conditional"}``: what is left at its start on
+    restricted accounts and on accounts of unknown availability, and the first
+    event after which usable reserve is back (None: no known event brings it
+    back). Every event of one instant is applied before a stop is recorded:
+    capacity back at that same instant (within SAME_INSTANT_SEC) is no stop;
+    any positive break is one — a stop may start at a reset whose refill lands
+    only on accounts that cannot run, and what that instant leaves is what is
+    left at its start. A stop is ``conditional`` when an account of unknown
+    availability holds reserve at its start or refills before its known return:
+    that account may be able to run. ``stops`` lists every stop in order;
+    ``first_stop`` keeps the first as ``(start, locked + unknown, resumes)``.
+    Each ``runs_out`` entry says ``again`` when an earlier stop was simulated
+    before it, and ``unknown`` when its stop is conditional.
     """
+    unk = {i for i, flag in enumerate(unknown or ()) if flag}
     left = [max(0.0, min(1.0, float(rem))) for rem, _res, _blk in items]
     vertices: List[Tuple[float, float]] = [(now, sum(left))]
     refill_adds: Dict[int, float] = {}
     runs_out: List[Dict[str, Any]] = []
-    stops: List[Tuple[float, float, Optional[float]]] = []
+    stops: List[Dict[str, Any]] = []
 
     def runnable(at: float) -> List[int]:
-        return [i for i, (_r, _res, blk) in enumerate(items) if blk is None or blk <= at + 1e-9]
+        return [i for i, (_r, _res, blk) in enumerate(items)
+                if i not in unk and (blk is None or blk <= at + 1e-9)]
 
     def usable(at: float) -> float:
         return sum(left[i] for i in runnable(at))
 
+    def stop_from(start: float) -> Dict[str, Any]:
+        on_unknown = sum(left[i] for i in unk)
+        return {"start": start, "locked": max(0.0, sum(left) - on_unknown), "unknown": on_unknown,
+                "resumes": None, "conditional": on_unknown > qs.RATIO_EPS}
+
+    entry_of: Dict[int, Dict[str, Any]] = {}  # id(stop) -> its runs_out entry
+
     events = sorted(
         {res for _r, res, _b in items if res is not None and res > now}
-        | {blk for _r, _res, blk in items if blk is not None and math.isfinite(blk) and blk > now}
+        | {blk for i, (_r, _res, blk) in enumerate(items)
+           if i not in unk and blk is not None and math.isfinite(blk) and blk > now}
     )
-    open_stop: Optional[Tuple[float, float]] = (now, sum(left)) if usable(now) <= qs.RATIO_EPS else None
+    open_stop: Optional[Dict[str, Any]] = stop_from(now) if usable(now) <= qs.RATIO_EPS else None
     refilled_any = False
     t = now
     idx = 0
@@ -611,8 +944,7 @@ def simulate_pool(
             if rate <= qs.RATIO_EPS or open_stop is not None or rest <= qs.RATIO_EPS:
                 break
             at = t + rest / rate * 3600.0
-        zero_at: Optional[float] = None
-        locked = 0.0
+        zero: Optional[Dict[str, Any]] = None
         if at > t and open_stop is None and rate > qs.RATIO_EPS:
             run = runnable(t)
             run_total = sum(left[i] for i in run)
@@ -622,9 +954,9 @@ def simulate_pool(
                     zero_at = min(at, t + run_total / rate * 3600.0)
                     for i in run:
                         left[i] = 0.0
-                    locked = sum(left)
+                    zero = stop_from(zero_at)
                     if zero_at < at - 1e-9:
-                        vertices.append((zero_at, locked))
+                        vertices.append((zero_at, sum(left)))
                 else:
                     factor = max(0.0, 1.0 - work / run_total)
                     for i in run:
@@ -644,54 +976,72 @@ def simulate_pool(
                 vertices.append((at, after_step))
 
         back = usable(at) > qs.RATIO_EPS
-        if zero_at is not None and (not back or zero_at < at - SAME_INSTANT_SEC):
+        if zero is not None and zero["start"] >= at - SAME_INSTANT_SEC:
+            # Empty at this very event: the stop starts with what the instant leaves, a refill landing now on
+            # accounts that cannot (or may not) run included.
+            zero = stop_from(zero["start"])
+        if zero is not None and (not back or zero["start"] < at - SAME_INSTANT_SEC):
+            zero_at = zero["start"]
+            again = bool(stops)
             if back:
-                stops.append((zero_at, locked, at))
+                zero["resumes"] = at
+                stops.append(zero)
             else:
-                open_stop = (zero_at, locked)
+                open_stop = zero
             if now + 1e-9 < zero_at <= chart_end + 1e-9:
-                if locked > qs.RATIO_EPS:
-                    ahead = any((res is not None and res > zero_at)
-                                or (blk is not None and math.isfinite(blk) and blk > zero_at)
-                                for _r, res, blk in items)
-                    runs_out.append({"at": round(zero_at), "reset_reported": ahead,
-                                     "after_refill": refilled_before, "blocked_only": True})
-                else:
-                    ahead = any(res is not None and res > zero_at for _r, res, _b in items)
-                    runs_out.append({"at": round(zero_at), "reset_reported": ahead,
-                                     "after_refill": refilled_before})
+                restricted = zero["locked"] > qs.RATIO_EPS
+                ahead = any(res is not None and res > zero_at for _r, res, _b in items) or (
+                    restricted and any(blk is not None and math.isfinite(blk) and blk > zero_at
+                                       for i, (_r, _res, blk) in enumerate(items) if i not in unk))
+                entry: Dict[str, Any] = {"at": round(zero_at), "reset_reported": ahead,
+                                         "after_refill": refilled_before, "again": again}
+                if restricted:
+                    entry["blocked_only"] = True
+                if zero["conditional"]:
+                    entry["unknown"] = True
+                runs_out.append(entry)
+                entry_of[id(zero)] = entry
         elif open_stop is not None and back:
-            stops.append((open_stop[0], open_stop[1], at))
+            open_stop["resumes"] = at
+            stops.append(open_stop)
             open_stop = None
+        if open_stop is not None and not open_stop["conditional"] and any(i in unk for i in resetting):
+            # An account of unknown availability refills before the known return: from then on it may run, so the
+            # stop is a condition. What was left at its start is not changed.
+            open_stop["conditional"] = True
+            if id(open_stop) in entry_of:
+                entry_of[id(open_stop)]["unknown"] = True
         t = at
         if final:
             break
 
     if open_stop is not None:
-        stops.append((open_stop[0], open_stop[1], None))
+        stops.append(open_stop)
+    first = stops[0] if stops else None
     return {
-        "vertices": vertices, "refill_adds": refill_adds, "runs_out": runs_out,
-        "first_stop": stops[0] if stops else None,
+        "vertices": vertices, "refill_adds": refill_adds, "runs_out": runs_out, "stops": stops,
+        "first_stop": (first["start"], first["locked"] + first["unknown"], first["resumes"]) if first else None,
     }
 
 
 def _format_line(vertices: Sequence[Tuple[float, float]], now: float, end: float) -> List[List[float]]:
-    """Slice ``vertices`` to ``[now, end]`` using the chart's rounding rules."""
+    """Slice ``vertices`` to ``[now, end]`` using the chart's rounding rules (a
+    little reserve stays positive, see _kept)."""
     if not vertices:
         return []
     first = round(now)
-    out: List[List[float]] = [[first, round(vertices[0][1], 4)]]
+    out: List[List[float]] = [[first, _kept(vertices[0][1])]]
     for idx in range(1, len(vertices)):
         t, v = vertices[idx]
         if t > end + 1e-9:
             break
         at = round(end) if abs(t - end) <= 1e-9 else max(qs._instant(t), first)
-        rv = round(v, 4)
+        rv = _kept(v)
         if out[-1][0] == at and out[-1][1] == rv:
             continue
         out.append([at, rv])
     if out[-1][0] < round(end):
-        out.append([round(end), round(eval_polyline(vertices, end, right=True), 4)])
+        out.append([round(end), _kept(eval_polyline(vertices, end, right=True))])
     return out
 
 
@@ -706,6 +1056,32 @@ def _first_reset(
         return None, []
     first_at = min(future)
     return first_at, [i for i, (_rem, res, _blk) in enumerate(items) if res is not None and res == first_at]
+
+
+def _verdict_stops(
+    stops: Sequence[Dict[str, Any]], first_reset_at: Optional[float]
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """The stop a verdict speaks of and the earlier one it keeps, among the
+    stops that begin by the first reported reset (every stop when none is
+    reported).
+
+    The stop still on at the first reset — it reaches the reset, or begins
+    right at it because the refill lands only on accounts that cannot run —
+    decides whether reserve lasts to that reset; with none on there, the
+    longest (the first of equal ones). A short break before it never stands
+    in for it: the first stop before the one said is kept as ``earlier``."""
+    pre = [s for s in stops if first_reset_at is None or s["start"] <= first_reset_at + SAME_INSTANT_SEC]
+    if not pre:
+        return None, None
+    reaching = [s for s in pre if first_reset_at is not None
+                and (s["resumes"] is None or s["resumes"] >= first_reset_at - SAME_INSTANT_SEC)]
+    if reaching:
+        said = reaching[-1]
+    else:
+        said = max(pre, key=lambda s: (math.inf if s["resumes"] is None else s["resumes"] - s["start"],
+                                       -s["start"]))
+    earlier = next((s for s in pre if s["start"] < said["start"] - SAME_INSTANT_SEC), None)
+    return said, earlier
 
 
 def _make_verdict(
@@ -724,6 +1100,7 @@ def _make_verdict(
     held_reason: str = "",
     held_accounts: int = 0,
     blocked_accounts: int = 0,
+    unknown_accounts: int = 0,
     other_binding_labels: Sequence[str] = (),
     sim: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -731,11 +1108,17 @@ def _make_verdict(
     verdict without fake No-new-use numbers when ``sim is None``).
 
     Every figure is read off the one simulation: the totals just before and
-    just after the first reported reset (at that instant), and the first stop
-    that begins before it — when usable reserve runs out (``empty_at``), what
-    is still on restricted accounts then (``locked_at_empty``) and the first
-    event that brings runnable reserve back (``resumes_at``, ``gap_seconds``;
-    None: no known event does)."""
+    just after the first reported reset (at that instant), and the stop said
+    (_verdict_stops) — when usable reserve runs out (``empty_at``), what is
+    left then on restricted accounts (``locked_at_empty``) and on accounts of
+    unknown availability (``unknown_at_empty``), and the first event that
+    brings usable reserve back (``resumes_at``, ``gap_seconds``; None: no
+    known event does). An earlier, shorter stop is kept apart
+    (``earlier_empty_at``, ``earlier_resumes_at``, ``earlier_gap_seconds``,
+    ``earlier_unknown``). A conditional stop — an account of unknown
+    availability holds reserve at its start or refills before its known
+    return — is ``unknown_gap``, never a confirmed outage; ``unknown_at_empty``
+    is only what such accounts hold at its start."""
     current = sum(max(0.0, min(1.0, float(rem))) for rem, _res, _blk in items)
     first_reset_at, first_group = _first_reset(items, now)
     first_reset_in_horizon = bool(first_reset_at is not None and first_reset_at <= end)
@@ -747,6 +1130,9 @@ def _make_verdict(
     resumes_at: Optional[float] = None
     gap_seconds: Optional[int] = None
     locked: Optional[float] = None
+    on_unknown: Optional[float] = None
+    conditional = False
+    earlier: Optional[Dict[str, Any]] = None
 
     if sim is not None:
         vertices = sim["vertices"]
@@ -755,15 +1141,17 @@ def _make_verdict(
             before_first = eval_polyline(vertices, first_reset_at, right=False)
             after_first = eval_polyline(vertices, first_reset_at, right=True)
             first_adds = sum(refill_adds.get(i, 0.0) for i in first_group)
-        stop = sim["first_stop"]
-        if kind == "typical" and stop is not None and (
-                first_reset_at is None or stop[0] < first_reset_at - 1e-6):
-            empty_at, locked, resumes_at = stop
-            if resumes_at is not None:
-                # A stop is a positive break: never published as a zero length.
-                gap_seconds = max(1, round(resumes_at - empty_at))
+        if kind == "typical":
+            said, earlier = _verdict_stops(sim["stops"], first_reset_at)
+            if said is not None:
+                empty_at, locked, on_unknown, resumes_at = said["start"], said["locked"], said["unknown"], said["resumes"]
+                conditional = bool(said.get("conditional"))
+                if resumes_at is not None:
+                    # A stop is a positive break: never published as a zero length.
+                    gap_seconds = max(1, round(resumes_at - empty_at))
 
     has_locked = locked is not None and locked > qs.RATIO_EPS
+    has_unknown = on_unknown is not None and on_unknown > qs.RATIO_EPS
     # The stop ends at the first reported reset, and nothing is on restricted
     # accounts: "runs out before the reset" says it whole.
     ends_at_reset = (first_reset_at is not None and resumes_at is not None
@@ -777,7 +1165,10 @@ def _make_verdict(
     elif status in ("warming_up", "insufficient"):
         v_state = "insufficient"
     elif empty_at is not None:
-        if has_locked:
+        if conditional or has_unknown:
+            # Whether work stops depends on accounts whose availability is not known.
+            v_state = "unknown_gap"
+        elif has_locked:
             v_state = "blocked_gap"
         elif current <= qs.RATIO_EPS and (ends_at_reset or first_reset_at is None):
             v_state = "empty_now"
@@ -798,6 +1189,7 @@ def _make_verdict(
     else:
         v_state = "lasts_no_reset"
 
+    earlier_resumes = earlier["resumes"] if earlier is not None else None
     return {
         "state": v_state,
         "reason": reason,
@@ -812,6 +1204,12 @@ def _make_verdict(
         "resumes_at": qs._instant(resumes_at) if resumes_at is not None else None,
         "gap_seconds": gap_seconds,
         "locked_at_empty": _kept(locked) if has_locked else None,
+        "unknown_at_empty": _kept(on_unknown) if has_unknown else None,
+        "earlier_empty_at": round(earlier["start"]) if earlier is not None else None,
+        "earlier_resumes_at": qs._instant(earlier_resumes) if earlier_resumes is not None else None,
+        "earlier_gap_seconds": (max(1, round(earlier_resumes - earlier["start"]))
+                                if earlier is not None and earlier_resumes is not None else None),
+        "earlier_unknown": bool(earlier is not None and earlier.get("conditional")),
         "rate_per_hour": _kept(rate),
         "valid_seconds": int(valid_seconds),
         "valid_hours": round(float(valid_hours), 2),
@@ -820,6 +1218,7 @@ def _make_verdict(
         "held_reason": held_reason,
         "held_accounts": int(held_accounts),
         "blocked_accounts": int(blocked_accounts),
+        "unknown_accounts": int(unknown_accounts),
         "other_binding_labels": list(other_binding_labels),
     }
 
@@ -844,6 +1243,7 @@ def build_typical_scenario(
     typical_info: Dict[str, Any],
     *,
     blocked_until: Optional[Sequence[Optional[float]]] = None,
+    unknown: Optional[Sequence[bool]] = None,
     held_reason: str = "",
     other_binding_labels: Sequence[str] = (),
 ) -> Dict[str, Any]:
@@ -851,22 +1251,28 @@ def build_typical_scenario(
 
     ``blocked_until`` gives each member's restriction end (see simulate_pool):
     another spent binding limit, or the account's own known state
-    (Member.hold_until). When Typical is unknown (``warming_up``,
-    ``insufficient``, ``unavailable``, or ``held``), emits ``line = []``,
-    ``checkpoints = []``, ``schedule = []`` and no numeric
-    ``before_first_reset``/``after_first_reset`` so unknown Typical never
-    masquerades as No new use; ``reason`` carries the estimator's own word
-    (``all_observed_at_limit``: every account sat at its limit, so its use
-    could not be seen).
+    (Member.hold_until). ``unknown`` marks members whose availability is not
+    known (simulate_pool): counted apart (``unknown_accounts``), never as
+    restricted. When Typical is unknown (``warming_up``, ``insufficient``,
+    ``unavailable``, or ``held``: no member can run, by a known hold or an
+    unknown availability), emits ``line = []``, ``checkpoints = []``,
+    ``schedule = []`` and no numeric ``before_first_reset``/``after_first_reset``
+    so unknown Typical never masquerades as No new use; ``reason`` carries the
+    estimator's own word (``all_observed_at_limit``: every account sat at its
+    limit, so its use could not be seen).
     """
     blocks = list(blocked_until) if blocked_until is not None else [None] * len(members)
+    unknowns = [bool(flag) for flag in unknown] if unknown is not None else [False] * len(members)
     items: List[Tuple[float, Optional[float], Optional[float]]] = [
         (m.remaining, m.reading.resets_at if m.reading is not None else None, blk)
         for m, blk in zip(members, blocks)
     ]
-    perm_held = sum(1 for _rem, _res, blk in items if blk is not None and not math.isfinite(blk))
-    temp_blocked = sum(1 for _rem, _res, blk in items if blk is not None and math.isfinite(blk) and blk > now)
-    runnable_count = len(items) - perm_held
+    unknown_count = sum(1 for flag in unknowns if flag)
+    perm_held = sum(1 for (_rem, _res, blk), flag in zip(items, unknowns)
+                    if not flag and blk is not None and not math.isfinite(blk))
+    temp_blocked = sum(1 for (_rem, _res, blk), flag in zip(items, unknowns)
+                       if not flag and blk is not None and math.isfinite(blk) and blk > now)
+    runnable_count = len(items) - perm_held - unknown_count
 
     raw_state = str(typical_info.get("state") or "insufficient")
     raw_rate = typical_info.get("rate_per_hour")
@@ -907,6 +1313,7 @@ def build_typical_scenario(
         "window_hours": window_hours,
         "min_valid_hours": min_hours,
         "blocked_accounts": temp_blocked,
+        "unknown_accounts": unknown_count,
         "later": later_out,
     }
     verdict_args = dict(
@@ -914,7 +1321,8 @@ def build_typical_scenario(
         valid_seconds=valid_seconds, valid_hours=valid_hours,
         min_valid_hours=min_hours, window_hours=window_hours, reason=reason,
         held_reason=held_reason, held_accounts=perm_held,
-        blocked_accounts=temp_blocked, other_binding_labels=other_binding_labels,
+        blocked_accounts=temp_blocked, unknown_accounts=unknown_count,
+        other_binding_labels=other_binding_labels,
     )
 
     if status not in ("ok", "zero"):
@@ -926,7 +1334,7 @@ def build_typical_scenario(
         })
 
     eff_rate = float(raw_rate) if (status == "ok" and raw_rate is not None) else 0.0
-    sim = simulate_pool(items, now, end, eff_rate)
+    sim = simulate_pool(items, now, end, eff_rate, unknown=unknowns)
     vertices = sim["vertices"]
     refill_adds = sim["refill_adds"]
 
@@ -938,8 +1346,8 @@ def build_typical_scenario(
             "at": qs._instant(at),
             "last": qs._instant(last),
             "accounts": len(group),
-            "adds": round(sum(refill_adds.get(idx_by_id[id(m)], 0.0) for m in group), 4),
-            "total_after": round(eval_polyline(vertices, last, right=True), 4),
+            "adds": _kept(sum(refill_adds.get(idx_by_id[id(m)], 0.0) for m in group)),
+            "total_after": _kept(eval_polyline(vertices, last, right=True)),
         })
 
     checkpoints = []
@@ -949,14 +1357,14 @@ def build_typical_scenario(
             checkpoints.append({
                 "after_seconds": round(offset),
                 "at": moment,
-                "value": round(eval_polyline(vertices, moment, right=True), 4),
+                "value": _kept(eval_polyline(vertices, moment, right=True)),
             })
 
     active_drain = status == "ok"
     return dict(common, **{
         "line": _format_line(vertices, now, end),
         "at_pace": runnable_count if active_drain else 0,
-        "held": perm_held if active_drain else len(members),
+        "held": perm_held + unknown_count if active_drain else len(members),
         "zero_growth": len(members) if status == "zero" else 0,
         "held_reason": "",
         "schedule": schedule,

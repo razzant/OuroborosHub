@@ -2,11 +2,17 @@
 
 Covers:
 - Watch restart / stale cached observation after an outage vs re-confirmed baseline level.
-- Exhausted pool (100% used throughout observation, including when still empty now) vs genuine zero.
-- Historical cohort boundary splitting (single sighting and brief invalid window of a second account).
-- Multi-source disagreement across endpoints and crossing transitions vs agreeing sources.
-- 48-hour lookback boundary control across distinct 0-24h, 24-48h, and >48h burn bands.
-- Rate and coverage on a 22-account 48h synthetic pool.
+- Exhaustion censoring (full-pool 100% excluded from denominator; all_observed_at_limit
+  only at 0h reserve; mixed positive hours <12h returns insufficient/few_hours).
+- Historical cohort boundary splitting (single sighting and brief invalid window).
+- Same-timestamp provider corrections (persisted & uncollected refresh == clean control,
+  gapped correction retracts without bridging, plan/cycle change, genuine later restore,
+  multi-obs plateau with retracted end never extrapolates hidden timestamps).
+- Multi-source agreement without linear chords or artificial padding: 0.4pp offset,
+  decimal vs integer rounding, bursty 5m vs 30m, frozen n_obs==1 cached feeds (including
+  first sighted after old timestamp / outside watch), live refresh across all fresh
+  recordable sources (rejecting expired/junk), and real/3-source/reset conflicts.
+- 80% coverage non-extrapolation and 22-account 48h synthetic pool.
 """
 import math
 
@@ -21,21 +27,35 @@ NOW = 1_795_700_000.0
 PLAN = '["plus","plus"]'
 
 
-def _snap(sid, used_ratio, reset_at, *, observed_at, source="app", plan="plus"):
+def _snap(sid, used_ratio, reset_at, *, observed_at, source="app", plan="plus", freshness="fresh"):
     return {
         "subject": {"harness": "codex", "subject_id": sid, "plan_label": plan},
         "constraints": [{
             "id": "primary",
             "label": "Weekly",
-            "used_ratio": round(max(0.0, min(1.0, used_ratio)), 6),
+            "used_ratio": round(max(0.0, min(1.0, used_ratio)), 6) if isinstance(used_ratio, (int, float)) and 0.0 <= used_ratio <= 1.0 else used_ratio,
             "window_seconds": WEEK,
             "resets_at": qs.iso(reset_at) if reset_at is not None else None,
         }],
         "availability": {"state": "available"},
         "observed_at": qs.iso(observed_at),
-        "freshness": "fresh",
+        "freshness": freshness,
         "source": source,
     }
+
+
+def _persist_typical(path, sweep_fn, times, *, sids=("a",), live_snaps=None, now=NOW):
+    """Persist synthetic sweeps into SQLite and return the Typical scenario from reserve_view."""
+    store = quota_history.HistoryStore(path)
+    profs = [profile("codex", sid) for sid in sids]
+    last_st = None
+    for idx, t in enumerate(times):
+        st = payload(sweep_fn(idx, t), profs, harnesses=("codex",))
+        plugin.persist_sweep(store, st, "", t)
+        last_st = st
+    status = payload(live_snaps, profs, harnesses=("codex",)) if live_snaps is not None else last_st
+    rv = plugin.reserve_view(store, status, now, now, harness="codex", horizon="7d", name_accounts=True)
+    return rv["chart"]["scenarios"]["typical"], store, status
 
 
 def _state_from_runs(
@@ -158,7 +178,8 @@ def test_exhausted_pool_never_proves_zero_pace_even_when_still_empty():
     assert res_empty["state"] == "insufficient"
     assert res_empty["reason"] == "all_observed_at_limit"
     assert res_empty["rate_per_hour"] is None
-    assert res_empty["valid_hours"] == 24.0
+    assert res_empty["valid_seconds"] == 0
+    assert res_empty["valid_hours"] == 0.0
 
     # Refilled just now (positive remaining, but all 24h observed were pinned at 100%)
     calc_refilled, state_refilled = _state_from_runs(
@@ -169,6 +190,7 @@ def test_exhausted_pool_never_proves_zero_pace_even_when_still_empty():
     assert res_refilled["state"] == "insufficient"
     assert res_refilled["reason"] == "all_observed_at_limit"
     assert res_refilled["rate_per_hour"] is None
+    assert res_refilled["valid_hours"] == 0.0
 
     # Genuine measured zero with >=12h of available capacity -> state="zero"
     run_avail = qs.Run("app", 0.35, reset_at, PLAN, NOW - 16 * H, NOW, 193, NOW - 16 * H, NOW)
@@ -285,3 +307,534 @@ def test_staggered_readings_of_22_accounts_cover_the_same_48_hours():
     assert res["state"] == "ok"
     assert res["valid_hours"] >= 47.5
     assert math.isclose(res["rate_per_hour"], 22 * 0.012, abs_tol=0.005)
+
+
+def test_same_timestamp_correction_matches_clean_control_persisted_and_live(tmp_path):
+    """Unbroken 20->90% corrected to 21% at the same observed_at counts the exact same
+    20->21 change as a clean 21% control (both persisted in SQLite and on uncollected
+    refresh); gapped corrections retract 90% without bridging; plan/cycle changes stay
+    excluded; genuine later restores keep 20->90%; multi-obs retracted-end plateaus do
+    not extrapolate hidden timestamps."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 16 * H
+    t_corr = NOW - 8 * H
+    times = [t0 + k * 300.0 for k in range(16 * 12 + 1)]
+
+    # 1a. Persisted SQLite: unbroken 20->90->21 vs clean 21% control -> identical estimate.
+    def _persisted_corr(_i, t):
+        if t < t_corr - 1:
+            return [_snap("a", 0.20, reset_at, observed_at=t)]
+        if abs(t - t_corr) < 1:
+            return [_snap("a", 0.90, reset_at, observed_at=t_corr)]
+        if abs(t - (t_corr + 300.0)) < 1:
+            return [_snap("a", 0.21, reset_at, observed_at=t_corr)]
+        return [_snap("a", 0.21, reset_at, observed_at=t)]
+
+    def _persisted_clean(_i, t):
+        if t < t_corr - 1:
+            return [_snap("a", 0.20, reset_at, observed_at=t)]
+        obs = t_corr if abs(t - (t_corr + 300.0)) < 1 else t
+        return [_snap("a", 0.21, reset_at, observed_at=obs)]
+
+    typ_corr, store_corr, st_corr = _persist_typical(tmp_path / "p_corr", _persisted_corr, times)
+    typ_clean, store_clean, st_clean = _persist_typical(tmp_path / "p_clean", _persisted_clean, times)
+    assert typ_corr["status"] == typ_clean["status"] == "ok"
+    assert typ_corr["valid_seconds"] == typ_clean["valid_seconds"] == round(16 * H)
+    assert typ_corr["valid_hours"] == typ_clean["valid_hours"] == 16.0
+    assert typ_corr["rate_per_hour"] == typ_clean["rate_per_hour"]
+    assert math.isclose(typ_corr["rate_per_hour"], 0.01 / 16.0, abs_tol=1e-4)
+    # Also confirm exact unrounded estimator agreement (0.01 burn / 16.0h = 0.000625/h).
+    key = qs.group_key("codex", "primary", WEEK, ())
+    s_corr = qs.compute(st_corr, store_corr.read(lambda s: {(qs.pseudo_id(s, "codex", "a"), key): NOW - 48 * H}, NOW), NOW)
+    s_clean = qs.compute(st_clean, store_clean.read(lambda s: {(qs.pseudo_id(s, "codex", "a"), key): NOW - 48 * H}, NOW), NOW)
+    est_corr = qf.estimate_typical_pace(s_corr.groups[0], s_corr)
+    est_clean = qf.estimate_typical_pace(s_clean.groups[0], s_clean)
+    assert est_corr == est_clean
+    assert math.isclose(est_corr["observed_burn"], 0.01, abs_tol=1e-6)
+    assert math.isclose(est_corr["rate_per_hour"], 0.01 / 16.0, abs_tol=1e-6)
+
+    # 1b. Not-yet-collected refresh: 20->90 persisted up to NOW-300, live 21 at same obs vs clean control.
+    t_last = NOW - 300.0
+    pre_times = [t0 + k * 300.0 for k in range(16 * 12)]  # ends at t_last
+    typ_live_corr, store_lc, st_lc = _persist_typical(
+        tmp_path / "live_corr",
+        lambda _i, t: [_snap("a", 0.90 if abs(t - t_last) < 1 else 0.20, reset_at, observed_at=t)],
+        pre_times,
+        live_snaps=[_snap("a", 0.21, reset_at, observed_at=t_last)],
+    )
+    typ_live_clean, store_lcl, st_lcl = _persist_typical(
+        tmp_path / "live_clean",
+        lambda _i, t: [_snap("a", 0.21 if abs(t - t_last) < 1 else 0.20, reset_at, observed_at=t)],
+        pre_times,
+        live_snaps=[_snap("a", 0.21, reset_at, observed_at=t_last)],
+    )
+    assert typ_live_corr["status"] == typ_live_clean["status"] == "ok"
+    assert typ_live_corr["valid_seconds"] == typ_live_clean["valid_seconds"] == round(16 * H - 300.0)
+    assert typ_live_corr["rate_per_hour"] == typ_live_clean["rate_per_hour"]
+    s_lc = qs.compute(st_lc, store_lc.read(lambda s: {(qs.pseudo_id(s, "codex", "a"), key): NOW - 48 * H}, NOW), NOW)
+    s_lcl = qs.compute(st_lcl, store_lcl.read(lambda s: {(qs.pseudo_id(s, "codex", "a"), key): NOW - 48 * H}, NOW), NOW)
+    est_lc = qf.estimate_typical_pace(s_lc.groups[0], s_lc)
+    est_lcl = qf.estimate_typical_pace(s_lcl.groups[0], s_lcl)
+    assert est_lc == est_lcl
+    assert math.isclose(est_lc["observed_burn"], 0.01, abs_tol=1e-6)
+    assert math.isclose(est_lc["rate_per_hour"], 0.01 / (16.0 - 5 / 60), abs_tol=1e-6)
+
+    # 1c. Gapped correction (persisted & live refresh) retracts 90% without bridging the gap.
+    gapped_times = [t for t in times if not (t_corr < t < t_corr + 1800.0)]
+    typ_gap, _, _ = _persist_typical(
+        tmp_path / "p_gap",
+        lambda _i, t: [_snap(
+            "a",
+            0.20 if t < t_corr - 1 else (0.90 if abs(t - t_corr) < 1 else 0.21),
+            reset_at,
+            observed_at=t_corr if abs(t - (t_corr + 1800.0)) < 1 else t,
+        )],
+        gapped_times,
+    )
+    assert typ_gap["status"] == "zero" and typ_gap["rate_per_hour"] == 0.0
+    assert math.isclose(typ_gap["valid_hours"], 15.42, abs_tol=0.05)
+
+    t_gap_last = NOW - 1800.0
+    pre_gap_times = [t0 + k * 300.0 for k in range(15 * 12 + 7)]  # ends at NOW - 1800
+    typ_live_gap, _, _ = _persist_typical(
+        tmp_path / "live_gap",
+        lambda _i, t: [_snap("a", 0.90 if abs(t - t_gap_last) < 1 else 0.20, reset_at, observed_at=t)],
+        pre_gap_times,
+        live_snaps=[_snap("a", 0.21, reset_at, observed_at=t_gap_last)],
+    )
+    assert typ_live_gap["status"] == "zero" and typ_live_gap["rate_per_hour"] == 0.0
+
+    # Retracted 90% on s1 (even after a gap) neither counts burn nor vetoes clean s2 (20->21%).
+    view = qs.HistoryView(state="ok", salt="a" * 32)
+    dual_retract = [
+        qs.Run("s1", 0.20, reset_at, PLAN, t0, t_corr - 300, 96, t0, t_corr - 300),
+        qs.Run("s1", 0.90, reset_at, PLAN, t_corr, t_corr, 1, t_corr, t_corr),
+        qs.Run("s1", 0.21, reset_at, PLAN, t_corr, NOW, 91, t_corr + 1800, NOW, after_gap=True),
+        qs.Run("s2", 0.20, reset_at, PLAN, t0, t_corr - 300, 96, t0, t_corr - 300),
+        qs.Run("s2", 0.21, reset_at, PLAN, t_corr, NOW, 97, t_corr, NOW),
+    ]
+    segs_dual = qf._account_segments(dual_retract, NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_dual), 16 * H, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_dual), 0.01, abs_tol=1e-5)
+
+    # 1d. Unbroken correction with a plan change retracts 90% and does NOT bridge across plan change.
+    typ_plan, _, _ = _persist_typical(
+        tmp_path / "plan_corr",
+        lambda _i, t: [_snap(
+            "a",
+            0.20 if t < t_corr - 1 else (0.90 if abs(t - t_corr) < 1 else 0.21),
+            reset_at,
+            observed_at=t_corr if abs(t - (t_corr + 300.0)) < 1 else t,
+            plan="plus" if t <= t_corr + 1 else "pro",
+        )],
+        times,
+    )
+    assert typ_plan["status"] == "zero" and typ_plan["rate_per_hour"] == 0.0
+
+    # 1e. Genuine 20->90% at t_corr followed by restore to 21% at LATER observed_at keeps 0.70 burn.
+    typ_gen, _, _ = _persist_typical(
+        tmp_path / "genuine",
+        lambda _i, t: [_snap("a", 0.20 if t < t_corr - 1 else (0.90 if abs(t - t_corr) < 1 else 0.21), reset_at, observed_at=t)],
+        times,
+    )
+    assert typ_gen["status"] == "ok"
+    assert math.isclose(typ_gen["valid_hours"], 15 + 55 / 60, abs_tol=0.02)
+    assert math.isclose(typ_gen["rate_per_hour"], 0.70 / (15 + 55 / 60), abs_tol=5e-4)
+
+    # 1f. Multi-obs plateau whose terminal last_obs was corrected never extrapolates hidden timestamps.
+    multi_end_corr = [
+        qs.Run("app", 0.20, reset_at, PLAN, t0, t_corr, 97, t0, t_corr),
+        qs.Run("app", 0.25, reset_at, PLAN, t_corr, NOW, 96, t_corr + 300, NOW, after_correction=True),
+    ]
+    segs_multi = qf._source_segments(multi_end_corr, NOW - 48 * H, NOW, view, [])
+    assert len(segs_multi) == 1
+    assert math.isclose(segs_multi[0][0], t_corr, abs_tol=1e-6)
+    assert math.isclose(segs_multi[0][1], NOW, abs_tol=1e-6)
+    assert segs_multi[0][2] == 0.0
+
+
+def test_multisource_offset_bursty_and_frozen_cached_feeds(tmp_path):
+    """Steady 0.4pp offset, decimal vs integer rounding, bursty 5m vs 30m, and frozen
+    n_obs==1 cached feeds (including first sighted after old timestamp / outside watch)
+    all count once without chord interpolation; real conflicts stay excluded."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 16 * H
+    t_mid = NOW - 8 * H
+    times = [t0 + k * 300.0 for k in range(16 * 12 + 1)]
+    view = qs.HistoryView(state="ok", salt="a" * 32)
+
+    # 1. Steady 0.4pp offset across 16h plateaus (20->25% vs 20.4->25.4%) -> counted once.
+    typ_off, _, _ = _persist_typical(
+        tmp_path / "offset",
+        lambda _i, t: [
+            _snap("a", 0.20 if t < t_mid else 0.25, reset_at, observed_at=t, source="s1"),
+            _snap("a", (0.20 if t < t_mid else 0.25) + 0.004, reset_at, observed_at=t, source="s2"),
+        ],
+        times,
+    )
+    assert typ_off["status"] == "ok" and typ_off["valid_hours"] == 16.0
+    assert math.isclose(typ_off["rate_per_hour"], 0.05 / 16.0, abs_tol=1e-4)
+
+    # Decimal (+0.004/5m = 0.048/h) vs integer-percent rounded feed stays consistent.
+    dec_runs = [qs.Run("dec", round(0.10 + 0.004 * k, 6), reset_at, PLAN, t, t, 1, t, t) for k, t in enumerate(times)]
+    pct_runs = []
+    for k, t in enumerate(times):
+        u_int = round(0.10 + 0.004 * k, 2)
+        if pct_runs and abs(pct_runs[-1].ratio - u_int) <= qs.RATIO_EPS:
+            p = pct_runs[-1]
+            pct_runs[-1] = qs.Run("pct", p.ratio, reset_at, PLAN, p.first_obs, t, p.n_obs + 1, p.first_seen, t)
+        else:
+            pct_runs.append(qs.Run("pct", u_int, reset_at, PLAN, t, t, 1, t, t))
+    segs_dec = qf._account_segments(dec_runs + pct_runs, NOW - 48 * H, NOW, view, [])
+    tot_h = sum(v - u for u, v, _, _ in segs_dec) / H
+    assert math.isclose(tot_h, 16.0, abs_tol=1e-4)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_dec) / tot_h, 0.048, abs_tol=0.001)
+
+    # Negative control: 1.5pp (> VALUE_TOLERANCE) offset across 16h plateaus -> excluded.
+    assert qf._account_segments([
+        qs.Run("s1", 0.200, reset_at, PLAN, t0, NOW, len(times), t0, NOW),
+        qs.Run("s2", 0.215, reset_at, PLAN, t0, NOW, len(times), t0, NOW),
+    ], NOW - 48 * H, NOW, view, []) == []
+
+    # 2. Bursty 5m vs 30m agreeing (0.60 burn / 16h = 0.0375/h) counted once.
+    burst_starts = {t0 + 2 * H, t0 + 7 * H, t0 + 12 * H}
+    state_b = {"u": 0.10, "ru": 0.10, "robs": t0}
+
+    def _burst_sweep(idx, t):
+        if any(abs(t - (bs + 300.0)) < 1 for bs in burst_starts):
+            state_b["u"] = round(state_b["u"] + 0.20, 6)
+        if idx % 6 == 0:
+            state_b["ru"], state_b["robs"] = state_b["u"], t
+        return [
+            _snap("a", state_b["u"], reset_at, observed_at=t, source="codex_app_server"),
+            _snap("a", state_b["ru"], reset_at, observed_at=state_b["robs"], source="rollout_log"),
+        ]
+
+    typ_burst, _, _ = _persist_typical(tmp_path / "bursty", _burst_sweep, times)
+    assert typ_burst["status"] == "ok" and typ_burst["valid_hours"] == 16.0
+    assert math.isclose(typ_burst["rate_per_hour"], 0.60 / 16.0, abs_tol=1e-4)
+
+    # Negative control: non-monotonic 5m jump (0.50) exceeding 30m endpoint (0.30) -> excluded.
+    assert qf._account_segments([
+        qs.Run("fast", 0.10, reset_at, PLAN, t0, t0, 1, t0, t0),
+        qs.Run("fast", 0.50, reset_at, PLAN, t0 + 300, t0 + 1800, 6, t0 + 300, t0 + 1800),
+        qs.Run("slow", 0.10, reset_at, PLAN, t0, t0, 1, t0, t0 + 1500),
+        qs.Run("slow", 0.30, reset_at, PLAN, t0 + 1800, t0 + 1800, 1, t0 + 1800, t0 + 1800),
+    ], NOW - 48 * H, NOW, view, []) == []
+
+    # 3. Frozen n_obs==1 old cached feed (at t0 AND first sighted AFTER its old timestamp / outside watch).
+    typ_frozen, _, _ = _persist_typical(
+        tmp_path / "frozen_old",
+        lambda _i, t: (
+            [_snap("a", 0.10 + 0.03 * ((t - t0) / H), reset_at, observed_at=t, source="codex_app_server")]
+            + ([_snap("a", 0.05, reset_at, observed_at=t0 - 3 * H, source="rollout_log")] if t >= t0 + 4 * H else [])
+        ),
+        times,
+    )
+    assert typ_frozen["status"] == "ok" and typ_frozen["valid_hours"] == 16.0
+    assert math.isclose(typ_frozen["rate_per_hour"], 0.03, abs_tol=2e-4)
+
+    app_runs = [
+        qs.Run("codex_app_server", round(0.10 + 0.03 * ((t - t0) / H), 6), reset_at, PLAN, t, t, 1, t, t)
+        for t in times
+    ]
+    # Cached at t0 (matching 0.10) first sighted 4h later -> does not veto fresh observations.
+    segs_late_sight = qf._account_segments(
+        app_runs + [qs.Run("rollout_log", 0.10, reset_at, PLAN, t0, t0, 1, t0 + 4 * H, NOW)],
+        NOW - 48 * H, NOW, view, [],
+    )
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_late_sight), 16 * H, abs_tol=1.0)
+    # Negative controls: frozen reset conflict vetoes span; same-instant conflict vetoes touching step.
+    assert qf._account_segments(
+        app_runs + [qs.Run("rollout_log", 0.10, reset_at + 600.0, PLAN, t0, t0, 1, t0, NOW)],
+        NOW - 48 * H, NOW, view, [],
+    ) == []
+    segs_bad_t0 = qf._account_segments(
+        app_runs + [qs.Run("rollout_log", 0.50, reset_at, PLAN, t0, t0, 1, t0, NOW)],
+        NOW - 48 * H, NOW, view, [],
+    )
+    assert segs_bad_t0 and segs_bad_t0[0][0] >= t0 + 300.0 - 1e-6
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_bad_t0), 16 * H - 300.0, abs_tol=1.0)
+
+
+def test_live_refresh_attaches_all_fresh_sources_and_rejects_expired_or_junk(tmp_path):
+    """On live refresh (now > last_sweep_at), all fresh recordable sources are attached via
+    _with_live while expired, stale, or malformed readings remain rejected."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 16 * H
+    pre_times = [t0 + k * 300.0 for k in range(16 * 12)]  # ends at NOW - 300s
+
+    # 1. Both feeds report +0.15 at NOW -> counted once over 16h.
+    typ_both, store, _ = _persist_typical(
+        tmp_path / "refresh",
+        lambda _i, t: [
+            _snap("a", 0.10, reset_at, observed_at=t, source="codex_app_server"),
+            _snap("a", 0.10, reset_at, observed_at=t, source="rollout_log"),
+        ],
+        pre_times,
+        live_snaps=[
+            _snap("a", 0.25, reset_at, observed_at=NOW, source="codex_app_server"),
+            _snap("a", 0.25, reset_at, observed_at=NOW, source="rollout_log"),
+        ],
+    )
+    assert typ_both["status"] == "ok" and typ_both["valid_hours"] == 16.0
+    assert math.isclose(typ_both["rate_per_hour"], 0.15 / 16.0, abs_tol=1e-4)
+
+    # 2. Only codex_app_server updated at NOW; rollout_log stays cached -> counted.
+    profs = [profile("codex", "a")]
+    rv_one = plugin.reserve_view(
+        store,
+        payload([
+            _snap("a", 0.25, reset_at, observed_at=NOW, source="codex_app_server"),
+            _snap("a", 0.10, reset_at, observed_at=NOW - 300.0, source="rollout_log"),
+        ], profs, harnesses=("codex",)),
+        NOW, NOW, harness="codex", horizon="7d", name_accounts=True,
+    )
+    typ_one = rv_one["chart"]["scenarios"]["typical"]
+    assert typ_one["status"] == "ok" and typ_one["valid_hours"] == 16.0
+    assert math.isclose(typ_one["rate_per_hour"], 0.15 / 16.0, abs_tol=1e-4)
+
+    # 3. Expired (resets_at <= NOW) or malformed/stale live second feed is ignored cleanly.
+    rv_junk = plugin.reserve_view(
+        store,
+        payload([
+            _snap("a", 0.25, reset_at, observed_at=NOW, source="codex_app_server"),
+            _snap("a", 0.90, NOW - 60.0, observed_at=NOW, source="expired_src"),
+            _snap("a", 1.50, reset_at, observed_at=NOW, source="junk_src"),
+            _snap("a", 0.90, reset_at, observed_at=NOW, source="stale_src", freshness="stale"),
+        ], profs, harnesses=("codex",)),
+        NOW, NOW, harness="codex", horizon="7d", name_accounts=True,
+    )
+    typ_junk = rv_junk["chart"]["scenarios"]["typical"]
+    assert typ_junk["status"] == "ok" and typ_junk["valid_hours"] == 16.0
+    assert math.isclose(typ_junk["rate_per_hour"], 0.15 / 16.0, abs_tol=1e-4)
+
+    # 4. Real same-instant live conflict at NOW (0.25 vs 0.10) excludes only the live tail.
+    live_conflict = payload([
+        _snap("a", 0.25, reset_at, observed_at=NOW, source="codex_app_server"),
+        _snap("a", 0.10, reset_at, observed_at=NOW, source="rollout_log"),
+    ], profs, harnesses=("codex",))
+    key = qs.group_key("codex", "primary", WEEK, ())
+    st_conf = qs.compute(live_conflict, store.read(
+        lambda salt: {(qs.pseudo_id(salt, "codex", "a"), key): NOW - 48 * H}, NOW,
+    ), NOW)
+    sub = qs.pseudo_id(st_conf.view.salt, "codex", "a")
+    by_s = {}
+    for r in st_conf.view.runs[(sub, key)]:
+        by_s.setdefault(r.source, []).append(r)
+    for rd in qs.recordable(st_conf.norm, NOW):
+        by_s[rd.source] = qs._with_live(by_s.get(rd.source, []), rd, NOW, st_conf.view)
+    segs_conf = qf._account_segments([r for rs in by_s.values() for r in rs], NOW - 48 * H, NOW, st_conf.view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_conf), 16 * H - 300.0, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_conf), 0.0, abs_tol=1e-6)
+
+
+def test_multisource_conflicts_three_source_no_majority_and_reset_rollover():
+    """Staggered incompatible feeds, exact plateau conflict carving vs standalone point
+    veto (no artificial padding), 3-source no-majority exclusion, and exact reset rollover."""
+    reset_at = NOW + 48 * H
+    view = qs.HistoryView(state="ok", salt="a" * 32)
+    t0 = NOW - 16 * H
+
+    # 1. Staggered incompatible transitions -> excluded.
+    assert qf._account_segments([
+        qs.Run("s1", 0.10, reset_at, PLAN, NOW - 900, NOW - 900, 1, NOW - 900, NOW - 900),
+        qs.Run("s1", 0.50, reset_at, PLAN, NOW - 300, NOW - 300, 1, NOW - 300, NOW - 300),
+        qs.Run("s2", 0.60, reset_at, PLAN, NOW - 600, NOW - 600, 1, NOW - 600, NOW - 600),
+        qs.Run("s2", 0.70, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+    ], NOW - 48 * H, NOW, view, []) == []
+
+    # 2. Brief 1h conflicting segment carves out exact 1h (15h kept); standalone point drops plateau.
+    plat_16h = qs.Run("s1", 0.20, reset_at, PLAN, t0, NOW, 193, t0, NOW)
+    segs_brief = qf._account_segments([
+        plat_16h,
+        qs.Run("s2", 0.50, reset_at, PLAN, t0 + 7 * H, t0 + 8 * H, 13, t0 + 7 * H, t0 + 8 * H),
+    ], NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_brief), 15 * H, abs_tol=1.0)
+    assert qf._account_segments([
+        plat_16h,
+        qs.Run("s2", 0.50, reset_at, PLAN, t0 + 8 * H, t0 + 8 * H, 1, t0 + 8 * H, t0 + 8 * H),
+    ], NOW - 48 * H, NOW, view, []) == []
+
+    # 3. Three sources (2 agree, 1 disagrees) -> no majority vote.
+    assert qf._account_segments([
+        qs.Run("s1", 0.20, reset_at, PLAN, NOW - 300, NOW - 300, 1, NOW - 300, NOW - 300),
+        qs.Run("s1", 0.30, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+        qs.Run("s2", 0.20, reset_at, PLAN, NOW - 300, NOW - 300, 1, NOW - 300, NOW - 300),
+        qs.Run("s2", 0.30, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+        qs.Run("s3", 0.20, reset_at, PLAN, NOW - 300, NOW - 300, 1, NOW - 300, NOW - 300),
+        qs.Run("s3", 0.60, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+    ], NOW - 48 * H, NOW, view, []) == []
+
+    # 4. Exact reset rollover: ended cycle at r_mid never vetoes running cycle starting at r_mid.
+    r_mid = NOW - 8 * H
+    segs_roll = qf._account_segments([
+        qs.Run("s1", 0.50, r_mid, PLAN, t0, r_mid, 97, t0, r_mid),
+        qs.Run("s2", 0.00, r_mid + WEEK, PLAN, r_mid, NOW, 97, r_mid, NOW),
+    ], NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_roll), 16 * H, abs_tol=1.0)
+
+
+def test_exhaustion_censoring_and_mixed_below_threshold_reason(tmp_path):
+    """Full-pool 100% hours are excluded from valid_hours and rate denominator; mixed
+    positive reserve hours below 12h return insufficient/few_hours (not all_observed_at_limit)."""
+    reset_at = NOW + 48 * H
+    t_start = NOW - 48 * H
+    times_48 = [t_start + k * 300.0 for k in range(48 * 12 + 1)]
+
+    # 1. Mixed 28h @ 0.05/h (across a reset) + 20h @ 100% -> 0.05/h over 28h (no dilution).
+    reset_mid = t_start + 20 * H
+    typ_mix, _, _ = _persist_typical(
+        tmp_path / "mix_28_20",
+        lambda _i, t: [_snap(
+            "a",
+            min(1.0, 0.20 + 0.05 * ((t - t_start) / H)) if t < reset_mid else min(1.0, 0.40 + 0.05 * ((t - reset_mid) / H)),
+            reset_mid if t < reset_mid else reset_at,
+            observed_at=t,
+        )],
+        times_48,
+    )
+    assert typ_mix["status"] == "ok"
+    assert math.isclose(typ_mix["valid_hours"], 28.0, abs_tol=0.1)
+    assert math.isclose(typ_mix["rate_per_hour"], 0.05, abs_tol=5e-4)
+
+    # 2. Mostly exhausted: 40h @ 100% + 8h @ 0.10/h (2 accts, covered=48h >= 12h, usable=8h < 12h) ->
+    #    insufficient / few_hours reporting 8.0h and no rate (never misleading all_observed_at_limit).
+    reset_8h = NOW - 8 * H
+    typ_mostly, _, _ = _persist_typical(
+        tmp_path / "mostly_40_8",
+        lambda _i, t: [
+            _snap("a", 1.0 if t < reset_8h else min(1.0, 0.05 * ((t - reset_8h) / H)), reset_8h if t < reset_8h else reset_at, observed_at=t),
+            _snap("b", 1.0 if t < reset_8h else min(1.0, 0.05 * ((t - reset_8h) / H)), reset_8h if t < reset_8h else reset_at, observed_at=t),
+        ],
+        times_48,
+        sids=("a", "b"),
+    )
+    assert typ_mostly["status"] == "insufficient"
+    assert typ_mostly["reason"] == "few_hours"
+    assert typ_mostly["rate_per_hour"] is None
+    assert math.isclose(typ_mostly["valid_hours"], 8.0, abs_tol=0.1)
+    assert typ_mostly["line"] == []
+
+    # 3. 20h @ 100% + 16h genuinely quiet with capacity -> state="zero", valid_hours=16.0.
+    r_split = NOW - 16 * H
+    calc_q, state_q = _state_from_runs({
+        "a": [
+            qs.Run("app", 1.0, r_split, PLAN, NOW - 36 * H, r_split - 60, 240, NOW - 36 * H, r_split - 60),
+            qs.Run("app", 0.30, reset_at, PLAN, r_split, NOW, 193, r_split, NOW),
+        ],
+    }, [("a", 0.30, NOW, reset_at, "app")])
+    res_q = qf.estimate_typical_pace(calc_q, state_q)
+    assert res_q["state"] == "zero" and res_q["rate_per_hour"] == 0.0 and res_q["valid_hours"] == 16.0
+
+    # 4. Partial exhaustion (a at 100%, b burning 0.04/h for 16h) -> pool has capacity, 16h @ 0.04/h.
+    t16 = NOW - 16 * H
+    calc_p, state_p = _state_from_runs({
+        "a": [qs.Run("app", 1.0, reset_at, PLAN, t16, NOW, 193, t16, NOW)],
+        "b": [
+            qs.Run("app", round(0.10 + 0.04 * (k / 12.0), 6), reset_at, PLAN,
+                   t16 + k * 300.0, t16 + k * 300.0, 1, t16 + k * 300.0, t16 + k * 300.0)
+            for k in range(16 * 12 + 1)
+        ],
+    }, [("a", 1.0, NOW, reset_at, "app"), ("b", 0.74, NOW, reset_at, "app")])
+    res_p = qf.estimate_typical_pace(calc_p, state_p)
+    assert res_p["state"] == "ok" and res_p["valid_hours"] == 16.0
+    assert math.isclose(res_p["rate_per_hour"], 0.04, abs_tol=2e-4)
+
+    # 5. Fewer than 12h covered overall (6h@100% + 4h@0.10/h) -> warming_up/few_hours, valid_hours=4.0.
+    r_4h = NOW - 4 * H
+    calc_s, state_s = _state_from_runs({
+        "a": [qs.Run("app", 1.0, r_4h, PLAN, NOW - 10 * H, r_4h - 60, 72, NOW - 10 * H, r_4h - 60)] + [
+            qs.Run("app", round(0.10 * (k / 12.0), 6), reset_at, PLAN,
+                   r_4h + k * 300.0, r_4h + k * 300.0, 1, r_4h + k * 300.0, r_4h + k * 300.0)
+            for k in range(4 * 12 + 1)
+        ],
+    }, [("a", 0.40, NOW, reset_at, "app")], collecting_since=NOW - 10 * H)
+    res_s = qf.estimate_typical_pace(calc_s, state_s)
+    assert res_s["state"] == "warming_up" and res_s["reason"] == "few_hours" and res_s["valid_hours"] == 4.0
+
+
+def test_eighty_percent_coverage_does_not_extrapolate_over_missing_account_gap():
+    """Under 80% coverage (4 of 5 accounts), an unread 5th account's reading gap is neither
+    bridged nor extrapolated: only observed comparable segments contribute burn."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 24 * H
+    sweeps = [t0 + k * 300.0 for k in range(24 * 12 + 1)]
+    by_sub, measured = {}, []
+    for i in range(4):
+        sid = f"acct-{i}"
+        runs = [qs.Run("app", round(0.10 + 0.01 * (k / 12.0), 6), reset_at, PLAN, t, t, 1, t, t) for k, t in enumerate(sweeps)]
+        by_sub[sid] = runs
+        measured.append((sid, runs[-1].ratio, runs[-1].last_obs, reset_at, "app"))
+    by_sub["acct-4"] = [
+        qs.Run("app", 0.10, reset_at, PLAN, t0, t0 + 9 * H, 109, t0, t0 + 9 * H),
+        qs.Run("app", 0.22, reset_at, PLAN, t0 + 15 * H, NOW, 109, t0 + 15 * H, NOW, after_gap=True),
+    ]
+    measured.append(("acct-4", 0.22, NOW, reset_at, "app"))
+
+    calc, state = _state_from_runs(by_sub, measured, sweeps=sweeps, sweep_ok=[True] * len(sweeps))
+    res = qf.estimate_typical_pace(calc, state)
+    assert res["state"] == "ok" and res["valid_hours"] == 24.0
+    assert math.isclose(res["observed_burn"], 0.96, abs_tol=1e-4)
+    assert math.isclose(res["rate_per_hour"], 0.04, abs_tol=2e-4)
+
+
+def test_late_sighted_differing_stale_cache_does_not_veto_watched_series(tmp_path):
+    """A late-sighted n_obs==1 cached reading whose observed_at precedes that source's
+    unbroken watch must not veto a continuous series even when its cached ratio differs;
+    reset conflicts over its sighting span and fresh in-watch conflicts remain enforced."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 16 * H
+    t_jump = t0 + 1 * H
+    t_late = t0 + 12 * H
+    times = [t0 + k * 300.0 for k in range(16 * 12 + 1)]
+    key = qs.group_key("codex", "primary", WEEK, ())
+
+    # 1. Exact repro: app goes 0.10->0.25 at hour 1 and stays 0.25; second source first
+    #    appears at hour 12 with n_obs=1, obs_at=hour 1, ratio=0.10, same reset -> 0.15/16h.
+    typ, store, st = _persist_typical(
+        tmp_path / "late_diff_same_reset",
+        lambda _i, t: (
+            [_snap("a", 0.10 if t < t_jump - 1 else 0.25, reset_at, observed_at=t, source="app")]
+            + ([_snap("a", 0.10, reset_at, observed_at=t_jump, source="rollout_log")] if t >= t_late - 1 else [])
+        ),
+        times,
+    )
+    assert typ["status"] == "ok" and typ["valid_hours"] == 16.0
+    assert math.isclose(typ["rate_per_hour"], 0.15 / 16.0, abs_tol=1e-4)
+    state = qs.compute(st, store.read(lambda s: {(qs.pseudo_id(s, "codex", "a"), key): NOW - 48 * H}, NOW), NOW)
+    est = qf.estimate_typical_pace(state.groups[0], state)
+    assert est["state"] == "ok" and est["valid_hours"] == 16.0
+    assert math.isclose(est["observed_burn"], 0.15, abs_tol=1e-6)
+    assert math.isclose(est["rate_per_hour"], 0.15 / 16.0, abs_tol=1e-6)
+
+    # 2. Same late-sighted stale cache with a DIFFERENT reported reset still conflicts on
+    #    its sighting span [hour 12, hour 16], leaving the clean 12h + 0.15 burn intact.
+    app_runs = [
+        qs.Run("app", 0.10, reset_at, PLAN, t0, t_jump - 300.0, 12, t0, t_jump - 300.0),
+        qs.Run("app", 0.25, reset_at, PLAN, t_jump, NOW, 181, t_jump, NOW),
+    ]
+    view = qs.HistoryView(state="ok", salt="a" * 32)
+    segs_bad_reset = qf._account_segments(
+        app_runs + [qs.Run("rollout_log", 0.10, reset_at + 600.0, PLAN, t_jump, t_jump, 1, t_late, NOW)],
+        NOW - 48 * H, NOW, view, [],
+    )
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_bad_reset), 12 * H, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_bad_reset), 0.15, abs_tol=1e-6)
+
+    # 3. Fresh in-watch same-time endpoint conflict (observed 10s before sighting) still vetoes.
+    segs_fresh_conflict = qf._account_segments(
+        app_runs + [qs.Run("rollout_log", 0.10, reset_at, PLAN, t_jump, t_jump, 1, t_jump + 10.0, NOW)],
+        NOW - 48 * H, NOW, view, [],
+    )
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_fresh_conflict), 55 * 60.0, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_fresh_conflict), 0.0, abs_tol=1e-6)
+
+    # 4. Multi-obs run whose first_obs is pre-watch and last_obs is in-watch ignores pre-watch
+    #    first_obs (no fabricated timestamp) while still enforcing the in-watch conflict.
+    segs_reconf = qf._account_segments(
+        app_runs + [qs.Run("rollout_log", 0.10, reset_at, PLAN, t_jump, t_late + 300.0, 2, t_late, t_late + 300.0)],
+        NOW - 48 * H, NOW, view, [],
+    )
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_reconf), 16 * H - 300.0, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_reconf), 0.15, abs_tol=1e-6)

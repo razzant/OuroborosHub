@@ -548,6 +548,13 @@ class Normalized:
     cached: Dict[str, float] = field(default_factory=dict)
     # account -> resolved shared limits that are spent, including groups not shown.
     spent: Dict[Tuple[str, str], Dict[str, Reading]] = field(default_factory=dict)
+    # Every cooldown and live model exhaustion above as reported, per account:
+    # (``cooldown`` | ``exhaustion``, hold scope, its scope as sent, its own end;
+    # None: no end reported or readable). An account is held until the last one
+    # that binds it has ended, never the earliest, and a model's hold binds that
+    # model's requests where no window of that model is read (quota_analytics).
+    holds: Dict[Tuple[str, str], List[Tuple[str, str, Optional[quota_scope.Scope], Optional[float]]]] = \
+        field(default_factory=dict)
 
     @property
     def accounts_cached(self) -> bool:
@@ -1074,6 +1081,7 @@ def normalize(payload: Any, now: float,
     readings: List[Reading] = []
     cooldown_ends: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
     exhaustion_ends: Dict[Tuple[str, str], Dict[str, float]] = {}
+    holds: Dict[Tuple[str, str], List[Tuple[str, str, Optional[quota_scope.Scope], Optional[float]]]] = {}
 
     for hid, sid, row in attributed.rows:
         if hid not in harness_order:
@@ -1089,6 +1097,7 @@ def normalize(payload: Any, now: float,
             previous = ends.setdefault(cooldown.scope, cooldown.until)
             if cooldown.until is not None and (previous is None or cooldown.until < previous):
                 ends[cooldown.scope] = cooldown.until
+            holds.setdefault((hid, sid), []).append(("cooldown", cooldown.scope, cooldown.desc, cooldown.until))
         for exhaustion in exhaustions_of(row, hid, sid, now):
             # A model's limit, never the account: one that names no model
             # cannot hold any window.
@@ -1096,6 +1105,7 @@ def normalize(payload: Any, now: float,
                 ends = exhaustion_ends.setdefault((hid, sid), {})
                 at = exhaustion.resets_at
                 ends[exhaustion.scope] = min(ends.get(exhaustion.scope, at), at)
+                holds.setdefault((hid, sid), []).append(("exhaustion", exhaustion.scope, exhaustion.desc, at))
         constraints = row.get("constraints")
         for constraint in (constraints if isinstance(constraints, list) else [])[:MAX_CONSTRAINTS]:
             if not isinstance(constraint, dict):
@@ -1111,7 +1121,7 @@ def normalize(payload: Any, now: float,
         reads=reads, unified=attributed.unified, harness_order=harness_order,
         families=families, accounts=accounts, accounts_known=attributed.accounts_known,
         quota_known=attributed.quota_known, readings=readings, cooldown_ends=cooldown_ends,
-        exhaustion_ends=exhaustion_ends,
+        exhaustion_ends=exhaustion_ends, holds=holds,
         unattributed=attributed.unattributed,
         superseded=attributed.superseded, malformed=malformed,
         cached={k: float(v) for k, v in (cached or {}).items() if k in FACETS},
@@ -1523,11 +1533,14 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
     member.restriction_boundary = min((end for end in boundaries if end is not None), default=None)
     member.flags = tuple(flags)
     # The holds known now and when each ends (None: no reported end). A failed
-    # check alone, or an account state that was not read, is no hold.
+    # check alone, or an account state that was not read, is no hold. Each
+    # reported hold counts to its own end: of two cooldowns of one scope the
+    # later end holds (``ends`` keeps the earliest, for the validity bound).
+    facts = norm.holds.get(subject, [])
     holds: List[Optional[float]] = [None] if ("disabled" in flags or "signed_out" in flags) else []
-    holds.extend(ends[held] for held in {"-", scope} if held in ends)
+    holds.extend(end for kind, held, _desc, end in facts if kind == "cooldown" and held in ("-", scope))
     if scoped_end is not None:
-        holds.append(scoped_end)
+        holds.extend(end for kind, held, _desc, end in facts if kind == "exhaustion" and held == scope)
     holds.extend(other.resets_at for other in blockers)
     member.hold_until = (None if not holds else math.inf if any(end is None for end in holds)
                          else max(holds))
@@ -3226,12 +3239,15 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
             "future use only fresh readings; carry never enters measured pace.",
             history["membership_note"],
             "Typical: continues the 48-hour observed pooled hourly burn rate "
-            "(total comparable burn of this limit over the preceding 48 hours "
-            "divided by valid measured time, requiring at least 12 valid hours "
-            "and pool coverage) across the current accounts, with each account "
-            "refilling to a full window once at its next reported reset. When history is "
-            "insufficient, unavailable or held, no Typical line is drawn. "
-            "A conditional scenario, not a dispatch guarantee.",
+            "(this limit's comparable burn over the preceding 48 hours divided "
+            "by its valid hours: watched time when the limit had reserve, a "
+            "measured zero burn included, at least 12 of them; they say nothing "
+            "of other limits then) across the current accounts, with each account "
+            "refilling to a full window once at its next reported reset. An account "
+            "that cannot run now keeps its share, not drawn on until it can; one "
+            "whose other limit is not known now is counted apart, as a condition. "
+            "When history is insufficient, unavailable or held, no Typical line is "
+            "drawn. A conditional scenario, not a dispatch guarantee.",
             "No new use: each account keeps its current reading and refills to "
             "a full window only at its own next reported reset.",
             "The scenarios assume no additional unreported resets: only each "

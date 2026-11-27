@@ -96,11 +96,16 @@ def test_capacity_back_at_the_same_instant_is_no_stop_and_a_one_minute_break_is(
     assert v["state"] == "runs_out_no_reset" and v["empty_at"] == NOW + 10 * H and v["locked_at_empty"] is None, v
     assert [r["at"] for r in sc["runs_out"]] == [NOW + 10 * H], sc["runs_out"]
     assert not any(r.get("blocked_only") for r in sc["runs_out"])
-    # B a minute later: a real one-minute stop, short (under the bad-tone threshold) but a stop.
+    # B a minute later: a real one-minute stop, short (under the bad-tone threshold) but a stop. It is kept as the
+    # earlier stop; the verdict says the pool running out with no reset reported, which that minute never hides.
     sc = qf.build_typical_scenario([a, b], NOW, NOW + 86400, "24h", OK, blocked_until=[None, NOW + 2 * H + 60])
     v = sc["verdict"]
-    assert v["state"] == "blocked_gap" and v["empty_at"] == NOW + 2 * H and v["resumes_at"] == NOW + 2 * H + 60, v
-    assert v["gap_seconds"] == 60 < qf.VERDICT_GAP_BAD_SEC and v["locked_at_empty"] == 0.8, v
+    assert v["earlier_empty_at"] == NOW + 2 * H and v["earlier_resumes_at"] == NOW + 2 * H + 60, v
+    assert v["earlier_gap_seconds"] == 60 < qf.VERDICT_GAP_BAD_SEC, v
+    assert v["state"] == "runs_out_no_reset" and v["empty_at"] == NOW + 10 * H + 60 and v["resumes_at"] is None, v
+    sim = qf.simulate_pool([(0.20, None, None), (0.80, None, NOW + 2 * H + 60)], NOW, NOW + 86400, 0.10)
+    assert sim["first_stop"] == (NOW + 2 * H, 0.8, NOW + 2 * H + 60), sim["first_stop"]
+    assert [(s["locked"], s["resumes"]) for s in sim["stops"]] == [(0.8, NOW + 2 * H + 60), (0.0, None)]
     # Reaching zero at the very instant of the own reset: no stop, the margin is zero — "tight", not "runs out".
     sc = qf.build_typical_scenario([_member(0.10, NOW + H)], NOW, NOW + 86400, "24h", OK)
     v = sc["verdict"]
@@ -213,17 +218,24 @@ def _two_accounts(a_profile=None, a_availability=None, accounts_read="ok", model
 
 
 def test_with_every_account_able_to_run_the_pool_runs_out_then_waits_for_the_other_limit():
+    """A runs out at +4h while B's other limit holds B until +5h: a one-hour stop. B then runs 0.40 at 0.05/h and
+    the pool is out from +13h to the reset at +60h. The verdict says the stop still on at the first reset; the
+    earlier hour is kept beside it, never in its place."""
     for sc in _typical_both_ways(_two_accounts()):
         v = sc["verdict"]
-        assert sc["status"] == "ok" and v["state"] == "blocked_gap", v
-        assert v["empty_at"] == NOW + 4 * H and v["resumes_at"] == NOW + 5 * H and v["locked_at_empty"] == 0.4, v
-        assert v["blocked_accounts"] == 1 and v["held_accounts"] == 0, v
+        assert sc["status"] == "ok" and v["state"] == "runs_out", v
+        assert v["empty_at"] == NOW + 13 * H and v["resumes_at"] == NOW + 60 * H and v["locked_at_empty"] is None, v
+        assert v["earlier_empty_at"] == NOW + 4 * H and v["earlier_resumes_at"] == NOW + 5 * H, v
+        assert v["earlier_gap_seconds"] == 3600 and v["before_first_reset"] == 0.0, v
+        assert v["blocked_accounts"] == 1 and v["held_accounts"] == 0 and v["unknown_accounts"] == 0, v
 
 
 @pytest.mark.parametrize("case", ["disabled", "signed_out", "cooling", "model_exhausted"])
 def test_an_account_that_cannot_run_now_is_held_apart_from_its_share(case):
     """A cannot run now: no usable reserve from now until B's other limit lets B run at +5h — never "4 h of work
-    left" on A's 0.20. The balance still counts A's share (0.20 + 0.40 = 0.60, on restricted accounts)."""
+    left" on A's 0.20. The balance still counts A's share (0.20 + 0.40 = 0.60). That stop from now is kept as the
+    earlier one; the verdict says the stop still on at the reset (+60h): A held for good, B spent from +13h; A
+    back (+8h, +6h) and both spent from +17h."""
     models = ["m1"] if case == "model_exhausted" else None
     data = _two_accounts(
         a_profile=(_profile("a", enabled=False) if case == "disabled"
@@ -234,20 +246,31 @@ def test_an_account_that_cannot_run_now_is_held_apart_from_its_share(case):
                             {"constraint_id": "primary", "applies_to_models": models,
                              "resets_at": qs.iso(NOW + 6 * H)}]} if case == "model_exhausted" else None),
         models=models)
+    held_for_good = case in ("disabled", "signed_out")
     for sc in _typical_both_ways(data, models):
         v = sc["verdict"]
-        assert sc["status"] == "ok" and v["state"] == "blocked_gap", (case, v)
-        assert v["empty_at"] == round(NOW) and v["resumes_at"] == NOW + 5 * H, (case, v)
-        assert v["locked_at_empty"] == 0.6 and v["current"] == 0.6, (case, v)
-        held_for_good = case in ("disabled", "signed_out")
+        assert v["earlier_empty_at"] == round(NOW) and v["earlier_resumes_at"] == NOW + 5 * H, (case, v)
+        assert v["current"] == 0.6 and v["resumes_at"] == NOW + 60 * H, (case, v)
+        if held_for_good:
+            assert sc["status"] == "ok" and v["state"] == "blocked_gap", (case, v)
+            assert v["empty_at"] == NOW + 13 * H and v["locked_at_empty"] == 0.2, (case, v)
+        else:
+            assert sc["status"] == "ok" and v["state"] == "runs_out", (case, v)
+            assert v["empty_at"] == NOW + 17 * H and v["locked_at_empty"] is None, (case, v)
         assert (v["held_accounts"], v["blocked_accounts"]) == ((1, 1) if held_for_good else (0, 2)), (case, v)
+        sim = qf.simulate_pool([(0.20, NOW + 60 * H, math.inf if held_for_good else
+                                 NOW + (8 if case == "cooling" else 6) * H),
+                                (0.40, NOW + 60 * H, NOW + 5 * H)], NOW, NOW + 86400, 0.05)
+        start, locked, resumes = sim["first_stop"]
+        assert (start, resumes) == (round(NOW), NOW + 5 * H) and math.isclose(locked, 0.6), (case, sim["first_stop"])
 
 
 def test_an_account_state_that_was_not_read_holds_nothing():
     data = _two_accounts(a_profile=_profile("a", enabled=False), accounts_read="failed")
     for sc in _typical_both_ways(data):
         v = sc["verdict"]
-        assert v["state"] == "blocked_gap" and v["empty_at"] == NOW + 4 * H and v["resumes_at"] == NOW + 5 * H, v
+        assert v["earlier_empty_at"] == NOW + 4 * H and v["earlier_resumes_at"] == NOW + 5 * H, v
+        assert v["state"] == "runs_out" and v["empty_at"] == NOW + 13 * H and v["resumes_at"] == NOW + 60 * H, v
         assert v["held_accounts"] == 0, v
 
 
@@ -264,7 +287,8 @@ def test_every_account_restricted_with_no_reported_end_is_held_for_that_reason()
 def test_a_model_reported_out_on_its_own_window_stops_that_models_use_of_the_shared_week():
     """One account: the shared week has 0.30 left, the model-a week 0.60, and model-a is reported out until +24h.
     For a model-a request the shared week cannot be used before +24h (a known hold of another window that binds the
-    request); with no model chosen the shared week runs out at its own pace, as before (0.30 at 0.10/h: +3h)."""
+    request), and then it runs out at +27h, before the reset at +60h; with no model chosen the shared week runs out at
+    its own pace, as before (0.30 at 0.10/h: +3h)."""
     models = ["model-a"]
     data = _payload([_snap("a", [
         _con("seven_day", 0.70, WEEK, NOW + 60 * H, "7 day"),
@@ -282,9 +306,12 @@ def test_a_model_reported_out_on_its_own_window_stops_that_models_use_of_the_sha
     def verdict(calc, model):
         return qa.build(state, calc, "24h", model=model)["window"]["scenarios"]["typical"]["verdict"]
 
-    for calc in (shared, scoped):
-        v = verdict(calc, "model-a")
-        assert v["state"] == "blocked_gap" and v["empty_at"] == round(NOW) and v["resumes_at"] == NOW + 24 * H, (calc.key, v)
+    v = verdict(shared, "model-a")
+    assert v["earlier_empty_at"] == round(NOW) and v["earlier_resumes_at"] == NOW + 24 * H, v
+    assert v["state"] == "runs_out" and v["empty_at"] == NOW + 27 * H and v["resumes_at"] == NOW + 60 * H, v
+    v = verdict(scoped, "model-a")
+    assert v["earlier_empty_at"] == round(NOW) and v["earlier_resumes_at"] == NOW + 24 * H, v
+    assert v["state"] == "runs_out" and v["resumes_at"] == NOW + 60 * H, v
     v = verdict(shared, None)
     assert v["state"] == "runs_out" and v["empty_at"] == NOW + 3 * H, v
     # The shared week's own summary and plain chart keep its own state: no model, no hold.

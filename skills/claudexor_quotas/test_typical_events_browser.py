@@ -10,7 +10,8 @@ What is held here:
 - while the answer for a newly chosen model is read, the previous verdict is neither shown nor spoken;
 - accounts at their limit (the estimator's ``all_observed_at_limit``), the pool empty now too, have an explanation of
   their own, not a count of watched hours;
-- an account that cannot run now: "No usable … until ~…", its share said to be on restricted accounts;
+- an account that cannot run now: the stop still on at the first reset is said ("No usable … from ~… to ~…"), what
+  is on restricted accounts then, the reset's own figures, and the stop from now in a few words ("earlier stop now");
 - a translation pinned for the older per-account "runs out" sentences never stands in for the pool's (no "{n}").
 The 48-hour rate is given (quota_forecast.estimate_typical_pace is replaced for the test; the estimator is tested
 elsewhere); a short synthetic record keeps the chart real.
@@ -223,7 +224,9 @@ def test_accounts_at_their_limit_have_an_explanation_of_their_own(browser, tmp_p
 
 @pytest.mark.parametrize("width", [1120, 360])
 def test_an_account_that_cannot_run_now_is_said_so(browser, tmp_path, monkeypatch, width):
-    """A is disabled with 0.20 left; B (0.40 left) has its 5-hour window spent until +5h: no usable reserve now."""
+    """A is disabled with 0.20 left; B (0.40 left) has its 5-hour window spent until +5h: no usable reserve now.
+    B then runs out at +13h and nothing usable is left until the reset at +60h: that stop is said, A's 0.20 on a
+    restricted account, and the one from now is kept as the earlier stop."""
     def accounts(t, now):
         return [
             _snap("acct-a", [_con("primary", 0.80, WEEK, now + 60 * H, "Weekly"),
@@ -236,9 +239,9 @@ def test_an_account_that_cannot_run_now_is_said_so(browser, tmp_path, monkeypatc
     page, errors = _open(browser, views, width=width)
     try:
         got = page.evaluate(READ)
-        assert got["head"].startswith("No usable ") and " until ~" in got["head"], got
-        assert "0.60 win is on restricted accounts" in got["text"], got
-        assert any(f.startswith("Restricted") for f in got["figs"]) and any(f.startswith("Resumes") for f in got["figs"]), got
+        assert got["head"].startswith("No usable ") and " from ~" in got["head"] and " to ~" in got["head"], got
+        assert "0.20 win is on restricted accounts" in got["text"] and "earlier stop now to ~" in got["text"], got
+        assert [f.split("~")[0].split(" ")[0] for f in got["figs"]] == ["Usable", "Resumes", "Before"], got
         assert "1 account is restricted with no reported end" in got["text"], got
         assert not got["overflow"], f"horizontal overflow at {width}px"
         assert not errors, errors

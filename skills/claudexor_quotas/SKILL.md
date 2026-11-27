@@ -90,10 +90,13 @@ it (`api.get_state_dir()`):
   timeline's Future control offers exactly two choices: **Typical** (`typical`,
   default) and **No new use** (`no_new_use`). Typical lives in its own module
   (`quota_forecast.py`) and computes the selected limit pool's observed
-  48-hour burn rate: total comparable positive burn over the preceding 48 hours
-  divided by valid measured pool time (requiring at least 12 valid hours where
-  both the current pool and active historical cohort meet 80% coverage, i.e.
-  100% for 1–4 accounts and >=80% for 5+ accounts, with no 5-account minimum).
+  48-hour burn rate: its comparable positive burn over the preceding 48 hours
+  divided by its valid hours (`valid_seconds`, `valid_hours`): comparable
+  watched time when the selected limit had reserve, a measured zero burn
+  included, where the current pool and the active historical cohort both meet
+  80% coverage (100% for 1–4 accounts, >=80% for 5+, no 5-account minimum).
+  At least 12 such hours are needed; fewer is no evidence of no use, and those
+  hours say nothing about other binding limits at the time.
   Comparable transitions require the same account, source, plan and reset cycle
   (tolerating reset jitter within `RESET_TOLERANCE_SEC` without counting real
   resets, plan changes, ratio drops, corrections, gaps, failed sweeps, frozen
@@ -113,9 +116,24 @@ it (`api.get_state_dir()`):
   now (another spent limit, or its own known state: disabled, signed out,
   cooling down, the selected model reported out; a state not read holds
   nothing) keeps its share in the total but is neither drained nor counted as
-  usable until that ends. When usable reserve runs out, the strip says from
-  when to when (the end is the first known event that brings it back, the
-  same on both spans) and marks the point on the drawn line. When
+  usable until every known hold of the request has ended: the latest of them,
+  a cooldown or a model reported out included whose scope governs the request
+  where no window of that scope is read. An account another binding window of
+  which (or its scope) is not known now is of unknown availability: counted
+  apart (`unknown_accounts`), never as restricted; a stop during which such an
+  account holds reserve (at its start, or refilled before the known return) is
+  a condition (`unknown_gap`, a warning; `unknown_at_empty` is what they hold at
+  its start, after that instant's refills), said so also as an earlier stop and
+  in Details, and Typical is held only when no account is known able to run. The strip says
+  the stop still on at the first reported reset (one that begins right at it,
+  because that refill lands only on accounts that cannot run, included), else
+  the longest: from when to when (the end is the first known event that brings
+  usable reserve back, the same on both spans), the reset's time and what is
+  left before it, an earlier stop in a few words (`earlier_empty_at`,
+  `earlier_resumes_at`), and its point marked on the drawn line. Details says
+  each stop once; only one after an earlier stop is "again". The selected
+  limit's No new use marks that limit's own resets only, and Combined names the
+  next known reset even past a 24 h span. When
   Typical is unknown (fewer than 12 valid hours, history unavailable, or held)
   or when **Combined** (`joint`) is active, Typical draws **no** numeric future
   line, checkpoints or schedule under Typical's name and explains why, while
@@ -1076,9 +1094,9 @@ fitted to the lines.
   figure (`current_windows`), restricted ones included (measured quota is not
   a dispatch verdict), drawn from now to the horizon:
   - *typical* (`typical`, the default) — continues the selected limit pool's
-    48-hour observed pooled hourly burn rate (total comparable positive burn
-    over the preceding 48 hours divided by valid measured pool time, requiring
-    at least 12 valid hours and 80% pool coverage — 100% for 1–4 accounts)
+    48-hour observed pooled hourly burn rate (comparable positive burn over the
+    preceding 48 hours divided by the valid hours when the limit had reserve,
+    at least 12 of them, with 80% pool coverage — 100% for 1–4 accounts)
     across the currently measured accounts so pooled demand shifts onto
     remaining accounts when one hits zero, refilling each account once at its
     next reported reset. When fewer than 12 valid hours exist, accounts sat at
@@ -1114,7 +1132,11 @@ fitted to the lines.
   hour, 6 and 12 hours and a day ahead; a day, 3 days and a week on the
   7-day span) and, at a pace, `runs_out` (when the reserve that can run
   reaches zero inside the span, Typical's pool or each recent-pace account:
-  before a reported reset, with none reported, or again after a refill).
+  before a reported reset, with none reported, or after a refill; Typical's
+  entries say what holds the rest, `blocked_only` or `unknown`, and `again`
+  only after an earlier stop). A selected limit's own future (the window view)
+  schedules that limit's resets only; another binding window's refill is no
+  reset of it.
   Every one of them is read off the same functions the line is drawn from;
   a reset exactly at the horizon is drawn with its refill. The horizon is one
   instant: the whole second published as `end` (now plus the span, rounded to
@@ -1153,8 +1175,10 @@ read-out of the historical total and its membership at that moment, carried
 counts and age/source, plus the separate fresh-only scenario. Above the chart
 the verdict strip reads the chosen future up to the first reported reset: for
 *Typical* whether the pool lasts to it, what is left just before and after it,
-and from when to when no usable reserve is left (a stop is said as one, never
-as "almost"), or why no line is drawn; for *No new use* what is left before
+and from when to when no usable reserve is left: the stop still on at the
+reset, else the longest, an earlier one in short (a stop is said as one, never
+as "almost"; one that depends on accounts of unknown availability is a
+condition), or why no line is drawn; for *No new use* what is left before
 the reset if nothing more is used. It is not shown while the answer for a newly
 chosen model or request kind is read. Under the chart one compact legend
 explains solid/dashed history and the line drawn; "Details, notes and data"

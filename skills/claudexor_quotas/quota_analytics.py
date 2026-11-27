@@ -431,7 +431,14 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
     says why each account that is not drained is not: ``zero`` (a measured
     pace with no growth), ``held`` (a measured positive pace held by a limit
     or a scope) or ``unknown`` (no measured pace). ``held`` stays the count
-    of every account not drained, as before; these three split it."""
+    of every account not drained, as before; these three split it.
+
+    A selected window's future (not ``joint``) lists the resets of that window
+    alone: another window of the account still binds what is drained, but its
+    refill gives this window nothing and is no reset of it."""
+    def told(wins: Sequence[qj.Win]) -> Sequence[qj.Win]:
+        return wins if joint else wins[:1]
+
     line = qj.total_line(trajs, now, end, joint)
     def values(t, right):
         return [qj.contribution(tr, w, t, right, joint) for tr, w in trajs]
@@ -442,7 +449,8 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
 
     def rounded(value):
         return round(value, 4) if value is not None else None
-    jumps = sorted(((j.t, i) for i, (tr, _w) in enumerate(trajs) for j in tr.jumps), key=lambda p: p[0])
+    jumps = sorted(((j.t, i) for i, (tr, w) in enumerate(trajs) for j in tr.jumps
+                    if joint or j.key == w[0].key), key=lambda p: p[0])
     schedule: List[Dict[str, Any]] = []
     events: List[List[Tuple[float, int]]] = []
     for at, i in jumps:
@@ -460,7 +468,7 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
                          "adds": rounded(adds), "total_after": rounded(total(last, True)),
                          "known_after": sum(v is not None for v in values(last, True)),
                          "unknown_after": sum(v is None for v in values(last, True))})
-    later_times = sorted(w.reset for _tr, ws in trajs for w in ws if w.reset is not None and w.reset > end)
+    later_times = sorted(w.reset for _tr, ws in trajs for w in told(ws) if w.reset is not None and w.reset > end)
     later = None
     if later_times:
         first = later_times[0]
@@ -488,7 +496,7 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
                       "unknown": sum(v is None for v in values(t, True))} for t in sorted({t for t, _v in line})],
         "at_pace": sum(1 for tr, _w in trajs if tr.paced), "held": held + sum(1 for tr, _w in trajs if not tr.paced),
         "zero_growth": 0,
-        "no_reset": sum(1 for _tr, ws in trajs if not any(w.reset is not None for w in ws)),
+        "no_reset": sum(1 for _tr, ws in trajs if not any(w.reset is not None for w in told(ws))),
         "schedule": schedule,
         "later": later,
         "checkpoints": checkpoints, "runs_out": runs_out,
@@ -608,7 +616,7 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     keys = [g.key for g in wins]
     # --- the selected window alone, coupled to its account's binding windows
     out["window"] = None if light else _window_view(state, chart, wins, by_key, now, end, horizon,
-                                                  unknown=unknown)
+                                                  unknown=unknown, model=model, kind=kind)
     if len(keys) < 2:
         out["joint"] = {"available": False, "reason": "scope_unknown" if unreadable else "one_window" if keys else "no_window",
                         "note": "only one window governs this scope: the window's own graph is the "
@@ -661,9 +669,29 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     return out
 
 
+def _request_hold(state: "qs.SummaryState", subject: Tuple[str, str], covered: Set[str],
+                  model: Optional[str], kind: str) -> Optional[float]:
+    """When every hold the account reports apart from its windows that binds
+    this request ends (``math.inf``: one has no reported end; None: none
+    binds): a cooldown or a model reported out whose scope governs the
+    request (quota_scope.applies) though no window of the account has that
+    scope. A hold of a scope one of its windows has (``covered``) is that
+    window's own (Member.hold_until), by that window's rules."""
+    ends = [math.inf if end is None else end
+            for _kind, held, desc, end in state.norm.holds.get(subject, [])
+            if held not in covered and desc is not None and quota_scope.applies(desc, model, kind) is True]
+    return max(ends) if ends else None
+
+
+def _hold_scope(calc: "qs.GroupCalc") -> str:
+    """The hold scope of a window (quota_scope.hold_key), as its members were decorated with."""
+    return quota_scope.hold_key(calc.scope_info) if calc.scope_info is not None else calc.scope
+
+
 def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence["qs.GroupCalc"],
                  by_key: Dict[str, "qs.GroupCalc"], now: float, end: float, horizon: str,
-                 unknown: Sequence["qs.GroupCalc"] = ()) -> Optional[Dict[str, Any]]:
+                 unknown: Sequence["qs.GroupCalc"] = (), model: Optional[str] = None,
+                 kind: str = "text") -> Optional[Dict[str, Any]]:
     """The selected window's own conditional futures. Each of its current
     accounts is held to the other binding windows it reports as well, so the
     window is never drained while the account could not run.
@@ -678,7 +706,16 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     selected window or of another window it has cannot be read, or when
     another window it has is not known now (stale, unknown, history only).
     A known exhausted window it has stops its work until that window's
-    reported reset, as before."""
+    reported reset, as before.
+
+    Typical holds an account until every known hold of the request ends, the
+    latest of them: its own state, a spent window it has, and a cooldown or a
+    model reported out whose scope governs the request even with no window of
+    that scope (_request_hold). An account whose other window, or that
+    window's scope, is not known now is of unknown availability: its share is
+    neither drained nor counted as usable, and it is counted apart, never as
+    a restriction with no end. Only the selected window's own scope (unknown,
+    or not governing the request) holds the whole pool."""
     members = chart.measured
     if not members:
         return None
@@ -700,9 +737,13 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     holds: Counter = Counter()
     pooled_members: List[qs.Member] = []
     pooled_blocks: List[Optional[float]] = []
-    # Why each pooled account is held with no known end (Typical's own count;
-    # ``holds`` above stays the legacy scenarios' count).
+    pooled_unknown: List[bool] = []
+    # Why each pooled account is held with no known end, and why each is of
+    # unknown availability (Typical's own counts; ``holds`` above stays the
+    # legacy scenarios' count).
     pooled_held: Counter = Counter()
+    pooled_unsure: Counter = Counter()
+    whole_pool = own_unknown or not scope_applies
     for acct in accounts:
         bound = [key for key in keys if key == chart.key or acct.members.get(key) is not None]
         w = acct.wins(bound, recent=True)
@@ -714,11 +755,14 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
         if why:
             # The account's future cannot be judged against that window: it
             # is held at its own share of this window (no pace, nothing
-            # drained).
+            # drained). The selected window's own scope holds the whole pool;
+            # another window of this account not known now leaves the account
+            # of unknown availability (below).
             own = w[0]
             w = [qj.Win(own.key, own.remaining, own.reset, None, own.k, own.unit)]
             holds[why] += 1
-            blk = math.inf
+            if whole_pool:
+                blk = math.inf
         else:
             # Respect any other binding window of this account that is already
             # exhausted now: the account cannot burn until that window resets
@@ -742,12 +786,22 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
             binding = [own_member] + [
                 m for key in bound if key != chart.key
                 for m in (acct.members.get(key),) if m is not None and m.status == "measured"]
-            blk = qf.later_of(blk, *(m.hold_until for m in binding))
+            covered = {_hold_scope(groups[key]) for key in bound} | {"-"}
+            request_end = _request_hold(state, acct.subject, covered, model, kind)
+            blk = qf.later_of(blk, request_end, *(m.hold_until for m in binding))
+            unsure = bool(why) and not whole_pool
             if blk is not None and not math.isfinite(blk):
+                # Held for good by what is known, whatever else is not known.
                 endless = [m for m in binding if m.hold_until is not None and not math.isfinite(m.hold_until)]
-                pooled_held[why or (qf.held_why(endless[0]) if endless else "other_limit_spent")] += 1
+                unsure = False
+                pooled_held[why if whole_pool else qf.held_why(endless[0]) if endless
+                            else "restricted" if request_end is not None and not math.isfinite(request_end)
+                            else "other_limit_spent"] += 1
+            elif unsure:
+                pooled_unsure[why] += 1
             pooled_members.append(own_member)
-            pooled_blocks.append(blk)
+            pooled_blocks.append(None if unsure else blk)
+            pooled_unknown.append(unsure)
         rows.append((w, _own_pace(own_member)))
     futures: Dict[str, Any] = {}
     for name, pace in (("no_new_use", False), ("recent_pace", True)):
@@ -759,9 +813,10 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
         futures[name] = _scenario([(t, w) for t, w, _own in trajs], 0, False, now, end, horizon, classes)
     if pooled_members:
         futures["no_new_use"]["verdict"] = qf.build_no_new_use_verdict(pooled_members, now, end)
+        either = pooled_held + pooled_unsure
         held_reason = ("scope_unknown" if own_unknown
                        else "scope_not" if not scope_applies
-                       else (pooled_held.most_common(1)[0][0] if pooled_held else "other_limit_spent"))
+                       else (either.most_common(1)[0][0] if either else "other_limit_spent"))
         other_labels: List[str] = []
         for k in keys:
             if k == chart.key:
@@ -773,7 +828,7 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
         typical_info = qf.estimate_typical_pace(chart, state)
         futures["typical"] = qf.build_typical_scenario(
             pooled_members, now, end, horizon, typical_info,
-            blocked_until=pooled_blocks, held_reason=held_reason,
+            blocked_until=pooled_blocks, unknown=pooled_unknown, held_reason=held_reason,
             other_binding_labels=other_labels)
     return {"key": chart.key, "scenarios": futures, "table": future_table(futures, now),
             "held_to_other_windows": sum(holds.values()),

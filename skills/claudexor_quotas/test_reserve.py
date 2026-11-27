@@ -1806,7 +1806,7 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(text, /Only each account’s next reported reset is applied/);
   // The notes describe the futures drawn, never the older cohort line that
   // stopped at the first reset (kept apart, by field, and not shown).
-  assert.match(text, /Typical divides total observed comparable burn of this limit over the preceding 48 hours/);
+  assert.match(text, /Typical divides this limit’s comparable burn over the preceding 48 hours by its valid hours/);
   assert.doesNotMatch(text, /stops at the first reported reset|Refill scenario|\(mixed\)/);
   assert.ok(!details.open);
   details.open = true;
