@@ -1,7 +1,7 @@
 ---
 name: office_reader
 description: Read Word, PowerPoint, Excel, legacy XLS, CSV, HTML and Outlook MSG files as one Markdown text, and create new XLSX workbooks.
-version: 0.1.0
+version: 0.1.1
 type: extension
 runtime: python3
 entry: plugin.py
@@ -12,6 +12,8 @@ timeout_sec: 120
 install_specs:
   - kind: pip
     package: "markitdown[docx,pptx,xlsx,xls,outlook]>=0.1.8,<0.2"
+  - kind: pip
+    package: "lxml<6.2"
   - kind: pip
     package: "openpyxl>=3.1.5,<3.2"
 ---
@@ -239,7 +241,9 @@ a spreadsheet application.
 ## Dependencies
 
 Tested with markitdown 0.1.8 and openpyxl 3.1.5 on Python 3.10 (the desktop
-app's embedded version) and 3.11 (CI), on macOS arm64. The code calls
+app's embedded version) and 3.11 (CI), on macOS arm64. lxml stays below 6.2:
+under lxml 6.2.0 python-docx 1.2.0 cannot find a .docx body ("Could not find
+the body element"), so every .docx read fails; the bound lifts once that is fixed. The code calls
 markitdown's converter classes and `StreamInfo` directly, so the bounds stop
 before the next minor release. Prebuilt wheels exist for every dependency on
 macOS (arm64, x86_64), Linux (x86_64, aarch64) and Windows (x86_64), so the
