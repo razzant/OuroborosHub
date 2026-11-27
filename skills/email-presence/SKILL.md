@@ -248,7 +248,8 @@ remain unchanged and delivery additionally checks their emitted scope.
    attempt, until it answers. A mail whose sending began and whose outcome is unknown
    is never sent a second time: its own mailbox is searched for it by Message-ID;
    found in that mailbox's Sent, it is recorded sent (a copy that came in, in Inbox
-   or Spam, proves nothing); otherwise one draft of it (its envelope with Bcc, body,
+   or Spam, proves nothing; the search asks for sent copies, Trash included, and
+   reads every page of its answer); otherwise one draft of it (its envelope with Bcc, body,
    attachments and thread; a mail sent from a draft is put back as that draft was
    queued) is kept in that mailbox's Drafts, once the Places of its Drafts allow
    writing there as they do for email_draft, and the owner is told once to check it

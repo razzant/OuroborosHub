@@ -797,13 +797,14 @@ class GmailClient(MailClient):
         and the draft saved then asks the owner to check before sending it."""
         token = canonical_message_id(item.message_id)
         if token:
-            found = self._request("GET", "/messages", params={"q": "rfc822msgid:" + token, "includeSpamTrash": "true",
-                                                              "maxResults": 10})
-            for row in found.get("messages", []):
+            # Only this mailbox's own sent message shows it went out (SENT, also once moved to Trash); a copy that came in
+            # with the same ID (Inbox, Spam) proves nothing. The search asks for sent copies and reads every page of its
+            # answer, so copies that came in never hide the sent one; each found is still checked for SENT.
+            found = self._pages("/messages", "messages", params={"q": "rfc822msgid:" + token, "labelIds": "SENT",
+                                                                 "includeSpamTrash": "true", "maxResults": 10})
+            for row in found:
                 native = self.native_id(row["id"])
                 labels = self._request("GET", "/messages/" + native, params={"format": "minimal"}).get("labelIds") or []
-                # Only this mailbox's own sent message shows it went out (SENT, also once moved to Trash); a copy that
-                # came in with the same ID (Inbox, Spam) proves nothing, and the search goes on as if nothing was found.
                 if "SENT" in labels:
                     return "sent", {"transport": "gmail_api", "message_id": native,
                                     "thread_id": str(row.get("threadId") or ""), "found": "rfc822msgid"}

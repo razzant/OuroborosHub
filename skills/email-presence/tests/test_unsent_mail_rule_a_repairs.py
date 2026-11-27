@@ -187,6 +187,38 @@ def test_a_copy_that_is_not_in_sent_never_counts_as_the_mail_sent(mail, labels):
     assert len(mail.gmail.posts('/drafts')) == 1 and mail.gmail.posts('/messages/send') == []
 
 
+def test_the_sent_copy_is_found_past_a_first_page_of_copies_that_came_in(mail):
+    """Overlapping imported archives left ten copies that came in with the mail's Message-ID; its sent copy is on the
+    next page of the search. The search asks for sent copies (Trash included) and reads every page, so the mail is found
+    sent and no extra draft is made (Hub #382 second review, P3)."""
+    item = queue(mail.store, 'archive', unknown=True)
+    letter = EmailMessage()
+    letter['Message-ID'] = item.message_id
+    letter.set_content(item.body)
+    raw = letter.as_bytes()
+    came_in = [mail.gmail.keep(raw, ['INBOX']) for _ in range(10)]
+    sent = mail.gmail.keep(raw, ['SENT'])
+    asked = []
+
+    def two_pages(request):  # a provider that pages its answer whatever the search asks
+        if request.method == 'GET' and request.url.path == '/mail/messages':
+            query = dict(request.url.params)
+            asked.append(query)
+            if query.get('pageToken') == 'next':
+                return httpx.Response(200, json={'messages': [{'id': sent, 'threadId': 'fixture-thread'}]})
+            return httpx.Response(200, json={'messages': [{'id': native} for native in came_in], 'nextPageToken': 'next'})
+        return mail.gmail(request)
+
+    with httpx.Client(transport=httpx.MockTransport(two_pages)) as wire:
+        mail.runtime.client.http = wire
+        assert mail.runtime.process_uncertain()
+    mail.runtime.client.http = mail.http
+    receipt = mail.store.receipt('archive')
+    assert receipt['unknown_outcome'] == 'sent' and receipt['provider_receipt']['message_id'] == sent
+    assert mail.gmail.posts('/drafts') == [] and [query.get('pageToken', '') for query in asked] == ['', 'next']
+    assert {query.get('labelIds') for query in asked} == {'SENT'} and asked[0]['includeSpamTrash'] == 'true'
+
+
 def test_a_sent_copy_moved_to_trash_still_counts_as_sent(mail):
     item = queue(mail.store, 'lost', unknown=True)
     copy = EmailMessage()

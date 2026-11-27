@@ -66,7 +66,8 @@
 - A Gmail mail whose sending began and whose outcome is unknown is never sent a second
   time. Once Gmail search can show it, its own mailbox is searched for it by Message-ID:
   found in that mailbox's Sent, it is recorded sent (a copy that came in, in Inbox or
-  Spam, proves nothing); found as a draft, that draft is kept; otherwise one draft of it
+  Spam, proves nothing; the search asks for sent copies, Trash included, and reads every
+  page of its answer); found as a draft, that draft is kept; otherwise one draft of it
   (envelope with Bcc, body, attachments, thread, Message-ID) is saved in that mailbox's
   Drafts. A mail sent from an existing draft is put back as that draft was queued: Mail
   keeps the draft's source and files when it queues it. The draft is saved only once the
