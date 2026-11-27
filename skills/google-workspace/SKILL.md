@@ -50,15 +50,17 @@ sign_in:
     notes:
       client: >-
         Create an OAuth client of type Desktop app in your own Google Cloud project and enable the
-        Google APIs you use there. While the project's publishing status is Testing, Google ends every
-        sign-in after 7 days; publishing it keeps them (personal use needs no verification; Google shows
-        an "unverified app" screen). A client approved by your organization can be used instead; the
+        Google APIs you use there. While the project's publishing status is Testing, Google ends a
+        sign-in after 7 days once it holds any Drive, Docs, Sheets, Slides or Calendar permission (one for
+        identity and email alone is not limited); publishing it keeps them (personal use needs no
+        verification; Google shows an "unverified app" screen). A client approved by your organization can be used instead; the
         owner chooses the client per account on the skill's card.
       refused: >-
         admin_policy_enforced: your Workspace administrator approved only some permissions or another
         client; org_internal: this client belongs to another organization.
       refresh_rejected: >-
-        If your Google Cloud app is in Testing, Google ends sign-ins after 7 days.
+        If your Google Cloud app is in Testing, Google ends a sign-in with Drive, Docs, Sheets, Slides
+        or Calendar permissions after 7 days.
 ---
 
 # Google Workspace Skill

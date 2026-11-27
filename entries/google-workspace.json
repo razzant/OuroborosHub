@@ -3,7 +3,7 @@
     "documents"
   ],
   "description": "Universal Google Workspace integration for Google Sheets, Docs, Drive, Slides and Calendar via explicit OAuth or Service Account authentication.",
-  "digest": "cbd722d9b7a83fdc9608089c708cdfde468f28f9822137a9c66971e62c0b82e5",
+  "digest": "223d686abb3b4897a2019f7751d6de98cae5d11d8aad103504ce0499d82ab5dd",
   "install_specs": [
     "httpx>=0.24.0",
     "cryptography>=41.0.0"
