@@ -4,7 +4,7 @@
       "stars": 0
     }
   },
-  "generated_at": "2026-11-26T13:59:07.723744Z",
+  "generated_at": "2026-11-27T14:09:15.759273Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -20,6 +20,11 @@
     "adaptive-code-review": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/151",
+      "votes": 0
+    },
+    "agentmail-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/366",
       "votes": 0
     },
     "agentrq-bridge": {
@@ -82,6 +87,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/161",
       "votes": 0
     },
+    "coinmarketcap-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/367",
+      "votes": 0
+    },
     "confluence": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/162",
@@ -115,6 +125,11 @@
     "freshdesk": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/307",
+      "votes": 0
+    },
+    "garant-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/368",
       "votes": 0
     },
     "gdelt-mcp": {
@@ -152,6 +167,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/173",
       "votes": 0
     },
+    "lenta-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/369",
+      "votes": 0
+    },
     "medical-lab-analyzer": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/174",
@@ -187,6 +207,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/179",
       "votes": 0
     },
+    "pecom-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/370",
+      "votes": 0
+    },
     "perplexity": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/180",
@@ -212,6 +237,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/300",
       "votes": 1
     },
+    "readwise-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/371",
+      "votes": 0
+    },
     "restaurant_booking": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/181",
@@ -220,6 +250,11 @@
     "roadmap_analyst": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/182",
+      "votes": 0
+    },
+    "rusender-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/372",
       "votes": 0
     },
     "samokat-mcp-guide": {
@@ -257,6 +292,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/212",
       "votes": 0
     },
+    "singularityapp-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/373",
+      "votes": 0
+    },
     "slack-bridge": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/187",
@@ -287,9 +327,29 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/227",
       "votes": 0
     },
+    "tinvest-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/374",
+      "votes": 0
+    },
+    "todoist-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/375",
+      "votes": 0
+    },
     "token-usage": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/194",
+      "votes": 0
+    },
+    "trivago-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/376",
+      "votes": 0
+    },
+    "tutu-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/377",
       "votes": 0
     },
     "video_gen": {
@@ -302,9 +362,19 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/196",
       "votes": 0
     },
+    "vk-workspace-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/378",
+      "votes": 0
+    },
     "vkusvill": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/197",
+      "votes": 0
+    },
+    "vseinstrumenti-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/379",
       "votes": 0
     },
     "weather": {
@@ -325,6 +395,11 @@
     "word_tools": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/200",
+      "votes": 0
+    },
+    "yandex-360-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/380",
       "votes": 0
     },
     "yylo-tasks": {
