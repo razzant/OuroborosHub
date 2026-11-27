@@ -9,8 +9,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from asyncio import to_thread
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 try:
     from starlette.responses import JSONResponse as StarletteJSONResponse
@@ -21,10 +22,16 @@ try:
     from .auth import parse_service_account_info
     from .client import GoogleWorkspaceClient, VALUE_RENDER_OPTIONS
     from .results import file_extension, result_handler, store_state_bytes
+    from .user_oauth import (AccountStateUnknownError, SettingsStateUnknownError, UserOAuthError,
+                             account_report, needed_scope, read_local_settings,
+                             save_local_settings, save_selected_account, selected_account, user_route)
 except ImportError:
     from auth import parse_service_account_info
     from client import GoogleWorkspaceClient, VALUE_RENDER_OPTIONS
     from results import file_extension, result_handler, store_state_bytes
+    from user_oauth import (AccountStateUnknownError, SettingsStateUnknownError, UserOAuthError,
+                            account_report, needed_scope, read_local_settings,
+                            save_local_settings, save_selected_account, selected_account, user_route)
 
 if TYPE_CHECKING:
     from contracts.plugin_api import PluginAPI
@@ -53,30 +60,104 @@ def _get_client_sa_json(api: PluginAPI) -> Optional[str]:
         raise RuntimeError(f"Error reading GOOGLE_SERVICE_ACCOUNT_JSON from host settings: {exc}") from exc
 
 
+_OAUTH_SETTING_NAMES = {
+    "access_token": "GOOGLE_OAUTH_ACCESS_TOKEN",
+    "client_id": "GOOGLE_OAUTH_CLIENT_ID",
+    "client_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
+    "refresh_token": "GOOGLE_OAUTH_REFRESH_TOKEN",
+}
+
+
+def _clean_oauth_settings(raw: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    return {key: str(raw.get(name) or "").strip() or None for key, name in _OAUTH_SETTING_NAMES.items()}
+
+
+def _read_oauth_settings_state(api: PluginAPI) -> Tuple[Dict[str, Optional[str]], str]:
+    """Read granted user OAuth secrets and whether absence is confirmed ('ok', 'unknown', 'access_closed', 'unverified')."""
+    keys = list(_OAUTH_SETTING_NAMES.values())
+    reader = getattr(api, "get_settings_state", None)
+    if callable(reader):
+        try:
+            state_doc = reader(keys)
+        except Exception as exc:
+            if type(exc).__name__ != "ExtensionRegistrationError":
+                return _clean_oauth_settings({}), "unknown"
+        else:
+            if (isinstance(state_doc, dict)
+                    and state_doc.get("status") == "ok"
+                    and isinstance(state_doc.get("values"), dict)
+                    and isinstance(state_doc.get("missing"), list)):
+                values = state_doc["values"]
+                creds = _clean_oauth_settings(values)
+                seen = set(values.keys()) | set(state_doc["missing"])
+                has_refresh = all(creds[key] for key in ("client_id", "client_secret", "refresh_token"))
+                if creds["access_token"] or has_refresh:
+                    return creds, "ok"
+                token_keys = ("GOOGLE_OAUTH_REFRESH_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN")
+                if any(key not in seen for key in token_keys):
+                    return _clean_oauth_settings({}), "access_closed"
+                if creds["refresh_token"] and any(
+                        key not in seen for key in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET")):
+                    return _clean_oauth_settings({}), "access_closed"
+                return creds, "ok"
+            status = str(state_doc.get("status") or "unknown") if isinstance(state_doc, dict) else "unknown"
+            return _clean_oauth_settings({}), (status if status in ("unknown", "access_closed") else "unknown")
+    try:
+        creds = _clean_oauth_settings(api.get_settings(keys))
+    except Exception:
+        return _clean_oauth_settings({}), "unknown"
+    has_any = bool(creds["access_token"]) or all(creds[key] for key in ("client_id", "client_secret", "refresh_token"))
+    return creds, ("ok" if has_any else "unverified")
+
+
 def _get_oauth_credentials(api: PluginAPI) -> Dict[str, Optional[str]]:
     """Read only the user OAuth secrets explicitly granted to this skill."""
-    names = {
-        "access_token": "GOOGLE_OAUTH_ACCESS_TOKEN",
-        "client_id": "GOOGLE_OAUTH_CLIENT_ID",
-        "client_secret": "GOOGLE_OAUTH_CLIENT_SECRET",
-        "refresh_token": "GOOGLE_OAUTH_REFRESH_TOKEN",
-    }
-    settings = api.get_settings(list(names.values()))
-    return {key: str(settings.get(name) or "").strip() or None for key, name in names.items()}
+    return _read_oauth_settings_state(api)[0]
 
 
-def _make_client(api: PluginAPI, auth_mode: str = "service_account", subject: Optional[str] = None) -> GoogleWorkspaceClient:
+def _with_sign_in_notice(client: GoogleWorkspaceClient, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach an actionable sign-in notice (e.g. unsaved refresh rotation) to ordinary tool replies."""
+    notice = str((getattr(client, "sign_in_facts", None) or {}).get("sign_in_notice") or "")
+    if notice and isinstance(payload, dict) and "sign_in_notice" not in payload:
+        return {**payload, "sign_in_notice": notice}
+    return payload
+
+
+def _make_client(api: PluginAPI, auth_mode: str = "service_account", subject: Optional[str] = None,
+                 scope: str = "") -> GoogleWorkspaceClient:
     """Construct one of the two explicit Google auth routes.
 
     ``subject`` is deliberately an operation argument.  Domain-wide delegation
     is never activated from a setting or inferred from a service-account email.
+    ``scope`` is the permission the operation needs: the user route tells the host which
+    one it is, so a missing permission is the owner's next step and not a provider error.
     """
     mode = str(auth_mode or "service_account").strip().lower()
     if mode == "oauth":
-        credentials = _get_oauth_credentials(api)
-        if not credentials["access_token"] and not all(credentials[key] for key in ("client_id", "client_secret", "refresh_token")):
-            raise RuntimeError("Configure and grant GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REFRESH_TOKEN, or a short-lived GOOGLE_OAUTH_ACCESS_TOKEN.")
-        return GoogleWorkspaceClient(**credentials)
+        route = user_route(api, scope=scope, credentials_reader=lambda: _read_oauth_settings_state(api))
+        if route.message:
+            try:
+                api.log("info", route.message)
+            except Exception:
+                pass
+        if route.kind == "host":
+            client = GoogleWorkspaceClient(token_provider=route.provider)
+        else:
+            credentials = dict(route.credentials)
+            if not credentials.get("access_token") and not all(credentials.get(key) for key in ("client_id", "client_secret", "refresh_token")):
+                raise RuntimeError("Configure and grant GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REFRESH_TOKEN, or a short-lived GOOGLE_OAUTH_ACCESS_TOKEN.")
+            # The existing provider seam also covers legacy renewal during the transition.
+            # It is called after construction, with this client's own HTTP transport.
+            legacy_provider = route.legacy_provider
+            provider = (lambda rejected: legacy_provider(
+                client.client, rejected,
+                direct_committed=client._direct_bearer_committed,
+                on_source=lambda source: setattr(client, "_token_source", source),
+            )) if legacy_provider else None
+            client = GoogleWorkspaceClient(**credentials, token_provider=provider)
+        client.sign_in_source = route.source
+        client.sign_in_facts = route.facts
+        return client
     if mode != "service_account":
         raise ValueError("auth_mode must be 'service_account' or 'oauth'.")
     return GoogleWorkspaceClient(raw_sa_info=_get_client_sa_json(api), subject=subject)
@@ -85,21 +166,10 @@ def _make_client(api: PluginAPI, auth_mode: str = "service_account", subject: Op
 def _get_local_settings(api: PluginAPI) -> Dict[str, Any]:
     """Read local settings from the skill state directory with strict type validation."""
     try:
-        state_dir = Path(api.get_state_dir())
-        settings_path = state_dir / "settings.json"
-        if not settings_path.is_file():
-            return {}
-        parsed = json.loads(settings_path.read_text(encoding="utf-8"))
-        if not isinstance(parsed, dict):
-            try:
-                api.log("warning", f"Local settings.json is not a JSON object: {type(parsed).__name__}")
-            except Exception:
-                pass
-            return {}
-        return parsed
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        return read_local_settings(api)
+    except UserOAuthError as exc:
         try:
-            api.log("warning", f"Failed to read local settings.json: {exc}")
+            api.log("warning", str(exc))
         except Exception:
             pass
         return {}
@@ -145,21 +215,37 @@ def _make_workspace_auth_status(api: PluginAPI):
             "verified": False, "actor": None, "resource_access": "not_checked",
         }
         try:
-            with _make_client(api, mode, subject.strip() or None) as client:
+            with _make_client(api, mode, subject.strip() or None, needed_scope("drive")) as client:
                 if mode == "service_account":
                     info = parse_service_account_info(client.raw_sa_info)
                     payload.update(client_email=info.get("client_email"), project_id=info.get("project_id"),
                                    delegated_subject=subject.strip() or None)
-                else:
-                    payload["refresh_configured"] = bool(client.client_id and client.client_secret and client.refresh_token)
                 payload["configured"] = True
                 result = client.workspace_request("drive", "GET", "about", query={"fields": "user"})
+                if mode == "oauth":
+                    facts = dict(getattr(client, "sign_in_facts", {}) or {})
+                    payload["sign_in_source"] = facts.get("sign_in_source") or getattr(client, "sign_in_source", "")
+                    if payload["sign_in_source"] == "skill_settings":
+                        payload["refresh_configured"] = facts.get(
+                            "refresh_configured",
+                            bool(client.client_id and client.client_secret and client.refresh_token),
+                        )
+                    if facts.get("sign_in_message"):
+                        payload["sign_in_message"] = facts["sign_in_message"]
+                    if facts.get("sign_in_notice"):
+                        payload["sign_in_notice"] = facts["sign_in_notice"]
+                    if facts.get("account"):
+                        payload["account"] = facts["account"]
+                    payload["granted_scope"] = list(facts.get("granted_scope") or [])
                 actor = result.get("data", {}).get("user")
                 if not isinstance(actor, dict) or not (actor.get("emailAddress") or actor.get("permissionId")):
                     raise RuntimeError("Google Drive did not return a verifiable user identity.")
                 payload.update(status="ready", verified=True, actor=actor,
                                verification_scope="drive.about.user",
                                message="Google Drive verified this actor. Individual file access and write permissions require separate checks.")
+        except (AccountStateUnknownError, SettingsStateUnknownError) as exc:
+            payload["configured"] = None
+            payload["message"] = str(exc)
         except Exception as exc:
             payload["message"] = str(exc)
         return _format_json(payload)
@@ -167,19 +253,29 @@ def _make_workspace_auth_status(api: PluginAPI):
     return workspace_auth_status
 
 
+def _make_workspace_accounts(api: PluginAPI):
+    def workspace_accounts() -> str:
+        """List the Google accounts Ouroboros holds for this skill and the one it uses."""
+        return _format_json(account_report(api, credentials_reader=lambda: _read_oauth_settings_state(api)))
+
+    return workspace_accounts
+
+
 def _make_workspace_request(api: PluginAPI):
     def workspace_request(service: str, method: str, path: str,
                           query: Optional[Dict[str, Any]] = None, json_body: Optional[Any] = None,
                           auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
-            return _format_json(client.workspace_request(service, method, path, query, json_body))
+        with _make_client(api, auth_mode, scope=needed_scope(service, method)) as client:
+            res = client.workspace_request(service, method, path, query, json_body)
+            return _format_json(_with_sign_in_notice(client, res))
     return workspace_request
 
 
 def _make_sheets_info(api: PluginAPI):
     def sheets_info(spreadsheet_id: str, auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
-            return _format_json(client.sheets_info(spreadsheet_id=spreadsheet_id))
+        with _make_client(api, auth_mode, scope=needed_scope("sheets")) as client:
+            res = client.sheets_info(spreadsheet_id=spreadsheet_id)
+            return _format_json(_with_sign_in_notice(client, res))
 
     return sheets_info
 
@@ -189,10 +285,10 @@ def _make_sheets_read(api: PluginAPI):
                     value_render_option: str = "FORMATTED_VALUE", auth_mode: str = "service_account") -> str:
         """Read cell values from a rectangular range in a Google Sheet."""
         try:
-            with _make_client(api, auth_mode) as client:
+            with _make_client(api, auth_mode, scope=needed_scope("sheets")) as client:
                 res = client.sheets_read(spreadsheet_id=spreadsheet_id, range_name=range,
                                          max_rows=max_rows, value_render_option=value_render_option)
-                return _format_json(res)
+                return _format_json(_with_sign_in_notice(client, res))
         except Exception as exc:
             raise RuntimeError(f"sheets_read failed: {exc}") from exc
 
@@ -203,14 +299,14 @@ def _make_sheets_append(api: PluginAPI):
     def sheets_append(spreadsheet_id: str, range: str, rows: List[List[Any]], value_input_option: str = "USER_ENTERED", auth_mode: str = "service_account") -> str:
         """Append rows of data to a spreadsheet table."""
         try:
-            with _make_client(api, auth_mode) as client:
+            with _make_client(api, auth_mode, scope=needed_scope("sheets")) as client:
                 res = client.sheets_append(
                     spreadsheet_id=spreadsheet_id,
                     range_name=range,
                     rows=rows,
                     value_input_option=value_input_option,
                 )
-                return _format_json(res)
+                return _format_json(_with_sign_in_notice(client, res))
         except Exception as exc:
             raise RuntimeError(f"sheets_append failed: {exc}") from exc
 
@@ -222,15 +318,16 @@ def _make_docs_create(api: PluginAPI):
         """Create a new Google Document from scratch or by copying a template."""
         effective_folder_id = _resolve_folder_id(api, folder_id)
         effective_template_id = _resolve_template_id(api, template_id)
+        scope = needed_scope("drive" if (effective_folder_id or effective_template_id) else "docs")
 
         try:
-            with _make_client(api, auth_mode) as client:
+            with _make_client(api, auth_mode, scope=scope) as client:
                 res = client.docs_create(
                     title=title,
                     folder_id=effective_folder_id,
                     template_id=effective_template_id,
                 )
-                return _format_json(res)
+                return _format_json(_with_sign_in_notice(client, res))
         except Exception as exc:
             raise RuntimeError(f"docs_create failed: {exc}") from exc
 
@@ -246,7 +343,7 @@ def _make_drive_list(api: PluginAPI):
         effective_folder_id = _resolve_folder_id(api, folder_id)
 
         try:
-            with _make_client(api, auth_mode) as client:
+            with _make_client(api, auth_mode, scope=needed_scope("drive")) as client:
                 res = client.drive_list(
                     folder_id=effective_folder_id,
                     page_size=page_size,
@@ -254,7 +351,7 @@ def _make_drive_list(api: PluginAPI):
                     query=query, name=name, full_text=full_text,
                     corpora=corpora, drive_id=drive_id, spaces=spaces, order_by=order_by,
                 )
-                return _format_json(res)
+                return _format_json(_with_sign_in_notice(client, res))
         except Exception as exc:
             raise RuntimeError(f"drive_list failed: {exc}") from exc
 
@@ -265,9 +362,9 @@ def _make_drive_read_text(api: PluginAPI):
     def drive_read_text(file_id: str, max_chars: int = 100000, auth_mode: str = "service_account") -> str:
         """Read or export the plain text content of a Google Doc, Sheet, or text file."""
         try:
-            with _make_client(api, auth_mode) as client:
+            with _make_client(api, auth_mode, scope=needed_scope("drive")) as client:
                 res = client.drive_read_text(file_id=file_id, max_chars=max_chars)
-                return _format_json(res)
+                return _format_json(_with_sign_in_notice(client, res))
         except Exception as exc:
             raise RuntimeError(f"drive_read_text failed: {exc}") from exc
 
@@ -286,9 +383,9 @@ def _stage_drive_bytes(api: PluginAPI, result: Dict[str, Any]) -> Dict[str, Any]
 def _make_drive_download(api: PluginAPI):
     def drive_download(file_id: str, export_mime_type: Optional[str] = None, max_bytes: int = 50 * 1024 * 1024,
                        auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
+        with _make_client(api, auth_mode, scope=needed_scope("drive")) as client:
             result = client.drive_download(file_id=file_id, export_mime_type=export_mime_type, max_bytes=max_bytes)
-        return _format_json(_stage_drive_bytes(api, result))
+            return _format_json(_with_sign_in_notice(client, _stage_drive_bytes(api, result)))
 
     return drive_download
 
@@ -296,9 +393,9 @@ def _make_drive_download(api: PluginAPI):
 def _make_drive_export(api: PluginAPI):
     def drive_export(file_id: str, mime_type: str, max_bytes: int = 50 * 1024 * 1024,
                      auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
+        with _make_client(api, auth_mode, scope=needed_scope("drive")) as client:
             result = client.drive_export(file_id=file_id, mime_type=mime_type, max_bytes=max_bytes)
-        return _format_json(_stage_drive_bytes(api, result))
+            return _format_json(_with_sign_in_notice(client, _stage_drive_bytes(api, result)))
 
     return drive_export
 
@@ -321,50 +418,62 @@ def _make_drive_upload(api: PluginAPI):
             effective_name = name
         else:
             raise ValueError("Provide content_base64 or local_path.")
-        with _make_client(api, auth_mode) as client:
+        with _make_client(api, auth_mode, scope=needed_scope("drive")) as client:
             result = client.drive_upload(name=effective_name, content=content, mime_type=mime_type, folder_id=folder_id)
-        return _format_json(result)
+            return _format_json(_with_sign_in_notice(client, result))
 
     return drive_upload
 
 
 def _make_docs_read(api: PluginAPI):
     def docs_read(document_id: str, auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
-            return _format_json(client.docs_read(document_id=document_id))
+        with _make_client(api, auth_mode, scope=needed_scope("docs")) as client:
+            res = client.docs_read(document_id=document_id)
+            return _format_json(_with_sign_in_notice(client, res))
     return docs_read
 
 
 def _make_docs_update(api: PluginAPI):
     def docs_update(document_id: str, requests: List[Dict[str, Any]], readback: bool = True,
                     write_control: Optional[Dict[str, Any]] = None, auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
-            return _format_json(client.docs_update(document_id=document_id, requests=requests, readback=readback, write_control=write_control))
+        with _make_client(api, auth_mode, scope=needed_scope("docs")) as client:
+            res = client.docs_update(document_id=document_id, requests=requests, readback=readback, write_control=write_control)
+            return _format_json(_with_sign_in_notice(client, res))
     return docs_update
 
 
 def _make_sheets_update(api: PluginAPI):
     def sheets_update(spreadsheet_id: str, range: str, values: List[List[Any]],
                       value_input_option: str = "USER_ENTERED", auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
-            return _format_json(client.sheets_update(spreadsheet_id=spreadsheet_id, range_name=range, values=values, value_input_option=value_input_option))
+        with _make_client(api, auth_mode, scope=needed_scope("sheets")) as client:
+            res = client.sheets_update(spreadsheet_id=spreadsheet_id, range_name=range, values=values, value_input_option=value_input_option)
+            return _format_json(_with_sign_in_notice(client, res))
     return sheets_update
 
 
 def _make_sheets_batch_update(api: PluginAPI):
     def sheets_batch_update(spreadsheet_id: str, requests: List[Dict[str, Any]], auth_mode: str = "service_account") -> str:
-        with _make_client(api, auth_mode) as client:
-            return _format_json(client.sheets_batch_update(spreadsheet_id=spreadsheet_id, requests=requests))
+        with _make_client(api, auth_mode, scope=needed_scope("sheets")) as client:
+            res = client.sheets_batch_update(spreadsheet_id=spreadsheet_id, requests=requests)
+            return _format_json(_with_sign_in_notice(client, res))
     return sheets_batch_update
 
 
 # --- Settings Save Route Handler ---
 
 
+def _settings_unavailable(exc: UserOAuthError):
+    data = {"status": "error", "message": str(exc)}
+    return StarletteJSONResponse(data, status_code=503) if StarletteJSONResponse is not None else data
+
+
 def _make_settings_save(api: PluginAPI):
     async def settings_save(request: Any) -> Any:
         if getattr(request, "method", "POST") == "GET":
-            current = _get_local_settings(api)
+            try:
+                current = await to_thread(read_local_settings, api)
+            except UserOAuthError as exc:
+                return _settings_unavailable(exc)
             values = {key: current.get(key, "") for key in ("DEFAULT_FOLDER_ID", "TEMPLATES_JSON")}
             return StarletteJSONResponse(values) if StarletteJSONResponse is not None else values
         try:
@@ -398,21 +507,11 @@ def _make_settings_save(api: PluginAPI):
                     return StarletteJSONResponse(err_data, status_code=400)
                 return err_data
 
-        state_dir = Path(api.get_state_dir())
-        state_dir.mkdir(parents=True, exist_ok=True)
-        settings_path = state_dir / "settings.json"
-
-        settings_data = {
-            "DEFAULT_FOLDER_ID": default_folder,
-            "TEMPLATES_JSON": templates_json,
-        }
         try:
-            settings_path.write_text(json.dumps(settings_data, indent=2), encoding="utf-8")
-        except Exception as exc:
-            err_data = {"status": "error", "message": f"Failed to persist settings: {exc}"}
-            if StarletteJSONResponse is not None:
-                return StarletteJSONResponse(err_data, status_code=500)
-            return err_data
+            await to_thread(save_local_settings, api, {"DEFAULT_FOLDER_ID": default_folder,
+                                                       "TEMPLATES_JSON": templates_json})
+        except UserOAuthError as exc:
+            return _settings_unavailable(exc)
 
         ok_data = {"status": "ok", "message": "Settings saved successfully."}
         if StarletteJSONResponse is not None:
@@ -420,6 +519,48 @@ def _make_settings_save(api: PluginAPI):
         return ok_data
 
     return settings_save
+
+
+def _make_google_account_save(api: PluginAPI):
+    """The owner's choice of the Google account this skill uses.
+
+    An explicit card account takes precedence over an implicit connection.
+    """
+
+    async def google_account_save(request: Any) -> Any:
+        if getattr(request, "method", "POST") == "GET":
+            try:
+                values = {"DEFAULT_GOOGLE_ACCOUNT": await to_thread(selected_account, api)}
+            except UserOAuthError as exc:
+                return _settings_unavailable(exc)
+            return StarletteJSONResponse(values) if StarletteJSONResponse is not None else values
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            err_data = {"status": "error", "message": f"Invalid JSON payload: {exc}"}
+            if StarletteJSONResponse is not None:
+                return StarletteJSONResponse(err_data, status_code=400)
+            return err_data
+        if not isinstance(payload, dict):
+            err_data = {"status": "error", "message": "Expected JSON object."}
+            if StarletteJSONResponse is not None:
+                return StarletteJSONResponse(err_data, status_code=400)
+            return err_data
+        value = payload.get("DEFAULT_GOOGLE_ACCOUNT")
+        if not isinstance(value, str):
+            err_data = {"status": "error", "message": "Supply a Google account choice, or empty text to clear it."}
+            return StarletteJSONResponse(err_data, status_code=400) if StarletteJSONResponse is not None else err_data
+        try:
+            chosen = await to_thread(save_selected_account, api, value)
+        except UserOAuthError as exc:
+            return _settings_unavailable(exc)
+        ok_data = {"status": "ok", "DEFAULT_GOOGLE_ACCOUNT": chosen, "selected": chosen,
+                   "message": "The Google account choice is saved."}
+        if StarletteJSONResponse is not None:
+            return StarletteJSONResponse(ok_data, status_code=200)
+        return ok_data
+
+    return google_account_save
 
 
 # --- Plugin Registration Entrypoint ---
@@ -445,6 +586,14 @@ def register(api: PluginAPI) -> None:
             },
         },
         timeout_sec=90,
+    )
+
+    register_tool(
+        name="workspace_accounts",
+        handler=_make_workspace_accounts(api),
+        description="List the Google accounts Ouroboros holds for this skill and whether a legacy Settings sign-in still serves it.",
+        schema={"type": "object", "properties": {}},
+        timeout_sec=60,
     )
 
     register_tool(
@@ -689,6 +838,12 @@ def register(api: PluginAPI) -> None:
         methods=("GET", "POST"),
     )
 
+    api.register_route(
+        path="google_account/save",
+        handler=_make_google_account_save(api),
+        methods=("GET", "POST"),
+    )
+
     # 3. Register Settings Section
 
     api.register_settings_section(
@@ -722,6 +877,29 @@ def register(api: PluginAPI) -> None:
                         },
                     ],
                 },
+                {
+                    "type": "markdown",
+                    "text": (
+                        "Full Google Drive access also covers Docs, Sheets and Slides. For narrower access, "
+                        "turn off full Drive on the skill card in Extensions › Skills and choose individual permissions. "
+                        "Creating a document in a folder or from a template still needs Drive access."
+                    ),
+                },
+                {
+                    "type": "form",
+                    "route": "google_account/save",
+                    "method": "POST",
+                    "submit_label": "Save Google Account",
+                    "fields": [
+                        {
+                            "name": "DEFAULT_GOOGLE_ACCOUNT",
+                            "label": "Google account for user OAuth",
+                            "type": "text",
+                            "placeholder": "a-0123456789abcdef0123",
+                            "help": "Ask Ouroboros to list accounts with workspace_accounts. Paste the chosen account's key and save. Clear the field and save to remove your choice.",
+                        },
+                    ],
+                },
             ]
         },
     )
@@ -748,9 +926,9 @@ def register(api: PluginAPI) -> None:
                         {
                             "type": "markdown",
                             "text": (
-                                "1. **Choose credentials**: Add `GOOGLE_SERVICE_ACCOUNT_JSON`, or the `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_OAUTH_REFRESH_TOKEN` granted by your user OAuth flow, under **Settings → Secrets**. A temporary `GOOGLE_OAUTH_ACCESS_TOKEN` also works.\n"
-                                "2. **Verify access**: Call `workspace_auth_status(auth_mode='oauth')` for the user route or `auth_mode='service_account'` for the shared-resource route; then read the intended document. Service accounts do not inherit domain-wide sharing.\n"
-                                "3. **Set Defaults**: Open Settings to configure `DEFAULT_FOLDER_ID` and template mappings."
+                                "1. **Choose credentials**: Add `GOOGLE_SERVICE_ACCOUNT_JSON` under **Settings → Secrets** for the shared-resource route. For the user route, sign in for this skill on its card in **Extensions › Skills** (an Ouroboros that holds sign-ins) — or, on an older one, grant `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` and `GOOGLE_OAUTH_REFRESH_TOKEN` there.\n"
+                                "2. **Verify access**: Call `workspace_accounts` to see the accounts, then `workspace_auth_status(auth_mode='oauth')` for the user route or `auth_mode='service_account'` for the shared-resource route; then read the intended document. Service accounts do not inherit domain-wide sharing.\n"
+                                "3. **Set Defaults**: Open Settings to configure `DEFAULT_FOLDER_ID`, template mappings and the Google account to use."
                             ),
                         }
                     ],

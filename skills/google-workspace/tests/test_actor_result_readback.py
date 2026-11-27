@@ -12,16 +12,11 @@ def test_real_child_context_and_actor_file_readers(tmp_path):
     if importlib.util.find_spec("ouroboros") is None:
         pytest.skip("Ouroboros checkout required on PYTHONPATH for host reader integration")
     script = r'''
-import asyncio, hashlib, json, os
+import hashlib, json, os
 from pathlib import Path
 from types import SimpleNamespace
-from ouroboros.tools.tool_context import ToolContext
-from ouroboros.extension_process_runner import _tool_context_payload, _call_tool, _handler_wants_ctx
-from ouroboros import extension_loader
-from ouroboros.artifacts import task_artifact_dir_path, read_actor_source_bytes
-from ouroboros.headless import copy_child_task_result, remove_subagent_task_drive
-from ouroboros.task_results import write_task_result
-from ouroboros.tools.core_file_tools import _read_file
+from ouroboros.tools.registry import ToolContext, ToolRegistry
+from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.tools.shell import _run_script
 from results import result_handler, store_state_bytes
 root=Path(os.environ["FIXTURE_ROOT"])
@@ -31,8 +26,7 @@ project=root/"project"; project.mkdir()
 api=SimpleNamespace(get_state_dir=lambda:str(data/"state/skills/google-workspace"))
 text=json.dumps({"text":"完整 ответ 🧪"*60000,"end":"END-OF-FULL-SOURCE"},ensure_ascii=False)
 handler=result_handler(api,"workspace_request",lambda **kw:text)
-assert _handler_wants_ctx(handler)
-extension_loader.get_tool=lambda name:{"handler":handler,"wants_ctx":True}
+registry=ToolRegistry(repo,data)
 for mode in ["presence","project","subagent"]:
     task="google-"+mode
     drive=data if mode=="presence" else data/"state/headless_tasks"/task/"data"
@@ -42,15 +36,18 @@ for mode in ["presence","project","subagent"]:
         workspace_mode="external" if mode!="presence" else "",task_depth=1 if mode=="subagent" else 0)
     if mode=="subagent": ctx.task_constraint={"mode":"local_readonly_subagent"}
     if mode=="presence": ctx.task_metadata={"_presence_turn":True,"presence":{}}
-    # Actual isolated-child calling convention reconstructs the serialized ctx.
-    payload=json.loads(asyncio.run(_call_tool("fixture",{},data,repo,_tool_context_payload(ctx))))
+    # isolated_signing_probe.py covers real child dispatch; check the returned read recipe for each actor here.
+    registry.set_context(ctx)
+    payload=json.loads(handler(ctx))
+    assert payload["stored"] and payload["actor_readable"] and payload["result_complete"]
     ref=payload["source_ref"]
     path=Path(payload["path"])
     assert path.read_text(encoding="utf-8")==text
     assert hashlib.sha256(path.read_bytes()).hexdigest()==payload["sha256"]
-    head=_read_file(ctx,**payload["read"]["arguments"])
+    assert payload["read"]["tool"]=="read_file"
+    head=registry.execute("read_file",dict(payload["read"]["arguments"]))
     assert "完整 ответ" in head,head
-    tail=_read_file(ctx,root="artifact_store",path=str(path),start_char=len(text)-200)
+    tail=registry.execute("read_file",{"root":"artifact_store","path":str(path),"start_char":len(text)-200})
     assert "END-OF-FULL-SOURCE" in tail,tail
     if mode!="subagent":
         code="import hashlib,pathlib;print(hashlib.sha256(pathlib.Path("+repr(str(path))+").read_bytes()).hexdigest())"
@@ -68,19 +65,18 @@ for mode in ["presence","project","subagent"]:
         assert binary["path"]!=stored["path"]
         binary_paths.append((Path(binary["path"]),content))
     if mode != "presence":
-        write_task_result(drive, task, "completed", result="done", artifact_status="ready",
-                          llm_trace={"tool_calls":[{"tool":"workspace_request","result":json.dumps(payload)}]})
-        copied=copy_child_task_result(data,{"id":task,"drive_root":str(drive)})
-        assert copied["status"]=="completed"
-        assert remove_subagent_task_drive(data,task)
+        # Make this fixture drive unavailable; core tests own the cleanup policy.
+        drive.rename(drive.with_name("retired-data"))
         assert not drive.exists()
         assert all(path.read_bytes()==raw for path,raw in binary_paths)
         assert read_actor_source_bytes(data,task,ref)==text.encode("utf-8")
         restored=ToolContext(repo_dir=repo,drive_root=data,task_id=task)
-        assert "END-OF-FULL-SOURCE" in _read_file(restored,root="artifact_store",path=str(path),start_char=len(text)-200)
+        registry.set_context(restored)
+        assert "END-OF-FULL-SOURCE" in registry.execute("read_file",{"root":"artifact_store","path":str(path),"start_char":len(text)-200})
     print(mode,"PASS")
 '''
     env = dict(os.environ, FIXTURE_ROOT=str(tmp_path), OUROBOROS_DATA_DIR=str(tmp_path / "data"),
+               OUROBOROS_REPO_DIR=str(tmp_path / "repo"),
                OUROBOROS_SETTINGS_PATH=str(tmp_path / "settings.json"),
                OUROBOROS_RUNTIME_MODE="advanced", OUROBOROS_SAFETY_MODE="off")
     skill = str(Path(__file__).resolve().parents[1])

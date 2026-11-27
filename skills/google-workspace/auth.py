@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 import httpx
 
@@ -36,6 +36,19 @@ _TOKEN_CACHE: Dict[str, tuple[str, float]] = {}
 _OAUTH_CACHE_LOCK = threading.Lock()
 
 
+class UserRefreshError(RuntimeError):
+    def __init__(self, status: int, code: str):
+        super().__init__(f"Google user OAuth refresh failed ({status}): {code}.")
+        self.rejected = status in (400, 401) and code in ("invalid_grant", "invalid_client")
+
+
+DIRECT_BEARER_CONSENT_ERROR = (
+    "The directly supplied GOOGLE_OAUTH_ACCESS_TOKEN was already used in this command and cannot be "
+    "proven to belong to the Settings refresh grant, so this operation stopped instead of switching "
+    "consent mid-command. Check whether any earlier write already took effect before starting a new command."
+)
+
+
 def get_user_access_token(
     client_id: Optional[str],
     client_secret: Optional[str],
@@ -43,8 +56,12 @@ def get_user_access_token(
     http_client: httpx.Client,
     access_token: Optional[str] = None,
     force_refresh: bool = False,
+    on_refresh: Optional[Callable[[Dict[str, Any]], str]] = None,
+    *,
+    allow_refresh: bool = True,
+    on_source: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Reuse a user token or refresh at Google's fixed endpoint, once per call.
+    """Reuse or renew a user token; only an actual successful exchange calls on_refresh.
 
     Cache identity includes all granted credentials, so rotating a secret or
     changing users never reuses another credential set's access token. The
@@ -55,12 +72,23 @@ def get_user_access_token(
                    (client_id, client_secret, refresh_token, access_token)]
     client_id, client_secret, refresh_token, access_token = credentials
     fingerprint = "oauth:" + hashlib.sha256(json.dumps(credentials).encode("utf-8")).hexdigest()
+    if not allow_refresh:
+        if not force_refresh and access_token:
+            if on_source is not None:
+                on_source("direct")
+            return access_token
+        if all((client_id, client_secret, refresh_token)):
+            raise RuntimeError(DIRECT_BEARER_CONSENT_ERROR)
     with _OAUTH_CACHE_LOCK:
         cached = _TOKEN_CACHE.get(fingerprint)
         if not force_refresh:
             if cached and time.time() < cached[1] - 60:
+                if on_source is not None:
+                    on_source("refresh")
                 return cached[0]
             if not cached and access_token:
+                if on_source is not None:
+                    on_source("direct")
                 return access_token
         if not all((client_id, client_secret, refresh_token)):
             raise RuntimeError(
@@ -68,6 +96,7 @@ def get_user_access_token(
                 "GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REFRESH_TOKEN. "
                 "An access token alone must be replaced when it expires."
             )
+        sent_at = time.time()
         response = http_client.post(GOOGLE_TOKEN_URI, data={
             "grant_type": "refresh_token", "client_id": client_id,
             "client_secret": client_secret, "refresh_token": refresh_token,
@@ -82,7 +111,7 @@ def get_user_access_token(
             known_errors = {"invalid_grant", "invalid_client", "invalid_request",
                             "unauthorized_client", "unsupported_grant_type", "invalid_scope"}
             code = error if isinstance(error, str) and error in known_errors else "token_exchange_failed"
-            raise RuntimeError(f"Google user OAuth refresh failed ({response.status_code}): {code}.")
+            raise UserRefreshError(response.status_code, code)
         data = response.json()
         token = data.get("access_token")
         if not isinstance(token, str) or not token:
@@ -93,8 +122,18 @@ def get_user_access_token(
             raise RuntimeError("Google user OAuth response did not contain a valid expires_in.") from None
         if not 0 < expires_in < float("inf"):
             raise RuntimeError("Google user OAuth response did not contain a valid expires_in.")
-        _TOKEN_CACHE[fingerprint] = (token, time.time() + expires_in)
+        expires_at = sent_at + expires_in
+        _TOKEN_CACHE[fingerprint] = (token, expires_at)
+    if on_source is not None:
+        on_source("refresh")
+    if on_refresh is None:
         return token
+    rotated = data.get("refresh_token")
+    return on_refresh({
+        "access_token": token, "expires_at": expires_at,
+        "refresh_token": rotated if isinstance(rotated, str) and rotated else refresh_token,
+        "scope": data.get("scope"), "token_type": data.get("token_type", "Bearer"),
+    })
 
 
 def _base64url_encode(data: bytes) -> str:
