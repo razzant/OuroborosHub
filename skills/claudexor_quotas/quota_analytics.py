@@ -448,7 +448,7 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
         return sum(known) if known else None
 
     def rounded(value):
-        return round(value, 4) if value is not None else None
+        return qf._kept(value)
     jumps = sorted(((j.t, i) for i, (tr, w) in enumerate(trajs) for j in tr.jumps
                     if joint or j.key == w[0].key), key=lambda p: p[0])
     schedule: List[Dict[str, Any]] = []
@@ -468,13 +468,25 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
                          "adds": rounded(adds), "total_after": rounded(total(last, True)),
                          "known_after": sum(v is not None for v in values(last, True)),
                          "unknown_after": sum(v is None for v in values(last, True))})
-    later_times = sorted(w.reset for _tr, ws in trajs for w in told(ws) if w.reset is not None and w.reset > end)
+    later_resets = sorted(
+        (w.reset, i) for i, (_tr, ws) in enumerate(trajs)
+        for w in told(ws) if w.reset is not None and w.reset > end
+    )
     later = None
-    if later_times:
-        first = later_times[0]
-        near = [t for t in later_times if t - first <= qs.RESET_TOLERANCE_SEC]
-        later = {"at": qs._instant(first), "accounts": len(near), "more_events": 0,
-                 "more_accounts": len(later_times) - len(near)}
+    if later_resets:
+        later_events: List[List[Tuple[float, int]]] = []
+        for at, i in later_resets:
+            if later_events and at - later_events[-1][0][0] <= qs.RESET_TOLERANCE_SEC:
+                later_events[-1].append((at, i))
+            else:
+                later_events.append([(at, i)])
+        first_who = {i for _t, i in later_events[0]}
+        later = {
+            "at": qs._instant(later_events[0][0][0]),
+            "accounts": len(first_who),
+            "more_events": len(later_events) - 1,
+            "more_accounts": len({i for grp in later_events[1:] for _t, i in grp} - first_who),
+        }
     checkpoints = []
     for offset in qs.CHECKPOINTS.get(horizon, qs.CHECKPOINTS["24h"]):
         moment = round(now + offset)
@@ -681,23 +693,16 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     return out
 
 
-def _request_hold(state: "qs.SummaryState", subject: Tuple[str, str], covered: Set[str],
+def _request_hold(state: "qs.SummaryState", subject: Tuple[str, str],
                   model: Optional[str], kind: str) -> Optional[float]:
-    """When every hold the account reports apart from its windows that binds
-    this request ends (``math.inf``: one has no reported end; None: none
-    binds): a cooldown or a model reported out whose scope governs the
-    request (quota_scope.applies) though no window of the account has that
-    scope. A hold of a scope one of its windows has (``covered``) is that
-    window's own (Member.hold_until), by that window's rules."""
+    """When every hold the account reports (cooldown or live model-scoped
+    exhaustion) whose scope governs this request ends (``math.inf``: one has
+    no reported end; None: none binds), applied independently of whether a
+    sibling window of that scope is fresh, stale, or absent."""
     ends = [math.inf if end is None else end
-            for _kind, held, desc, end in state.norm.holds.get(subject, [])
-            if held not in covered and desc is not None and quota_scope.applies(desc, model, kind) is True]
+            for _kind, _held, desc, end in state.norm.holds.get(subject, [])
+            if desc is not None and quota_scope.applies(desc, model, kind) is True]
     return max(ends) if ends else None
-
-
-def _hold_scope(calc: "qs.GroupCalc") -> str:
-    """The hold scope of a window (quota_scope.hold_key), as its members were decorated with."""
-    return quota_scope.hold_key(calc.scope_info) if calc.scope_info is not None else calc.scope
 
 
 def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence["qs.GroupCalc"],
@@ -799,8 +804,7 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
             binding = [own_member] + [
                 m for key in bound if key != chart.key
                 for m in (acct.members.get(key),) if m is not None and m.status == "measured"]
-            covered = {_hold_scope(groups[key]) for key in bound} | {"-"}
-            request_end = _request_hold(state, acct.subject, covered, model, kind)
+            request_end = _request_hold(state, acct.subject, model, kind)
             blk = qf.later_of(blk, request_end, *(m.hold_until for m in binding))
             unsure = bool(why) and not whole_pool
             if blk is not None and not math.isfinite(blk):

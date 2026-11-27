@@ -2851,7 +2851,8 @@ def _scenario_line(total, now: float, end: float, breaks: Iterable[float]) -> Li
             out.append([at, right])
     if not times or times[-1] < end:
         out.append([round(end), total(end, False)])
-    return [[t, round(v, 4)] for t, v in out]
+    kept = _forecast_mod()._kept
+    return [[t, kept(v)] for t, v in out]
 
 
 def _scenario_functions(members: List[Member], paced: List[Member], now: float):
@@ -2915,6 +2916,7 @@ def _scenario(members: List[Member], paced: List[Member], now: float, end: float
                 runs_out.append({"at": round(again), "reset_reported": True, "after_refill": True})
     runs_out.sort(key=lambda row: row["at"])
 
+    kept = _forecast_mod()._kept
     schedule: List[Dict[str, Any]] = []
     # Split at the horizon first (horizon_events): an event ends by ``end``,
     # and an account resetting just past it is only in ``later``.
@@ -2929,9 +2931,9 @@ def _scenario(members: List[Member], paced: List[Member], now: float, end: float
             "at": _instant(at), "last": _instant(last), "accounts": len(group),
             # What each refill gives back is what the account has used by
             # then in this scenario: never the "no new use" amount reused.
-            "adds": round(sum(value(member, member.reading.resets_at, True)
-                              - value(member, member.reading.resets_at, False) for member in group), 4),
-            "total_after": round(total(last, True), 4),
+            "adds": kept(sum(value(member, member.reading.resets_at, True)
+                             - value(member, member.reading.resets_at, False) for member in group)),
+            "total_after": kept(total(last, True)),
         })
     checkpoints = []
     for offset in CHECKPOINTS.get(horizon, CHECKPOINTS["24h"]):
@@ -2941,7 +2943,7 @@ def _scenario(members: List[Member], paced: List[Member], now: float, end: float
         moment = round(now + offset)
         if moment <= end:
             checkpoints.append({"after_seconds": round(offset), "at": moment,
-                                "value": round(total(moment, True), 4)})
+                                "value": kept(total(moment, True))})
     return {
         "line": _scenario_line(total, now, end, breaks),
         "accounts": len(members),

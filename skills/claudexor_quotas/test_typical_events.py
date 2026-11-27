@@ -389,3 +389,40 @@ def test_a_spent_scoped_window_keeps_a_longer_model_exhaustion_hold_across_its_o
         assert v["state"] == "blocked_gap" and v["empty_at"] == round(NOW) and v["resumes_at"] == NOW + 6 * H, v
         assert sc["runs_out"][0]["at"] == NOW + 26 * H, sc["runs_out"]
         assert qf.eval_polyline(sc["line"], NOW + 4 * H) == 1.0 and qf.eval_polyline(sc["line"], NOW + 6 * H) == 1.0
+
+
+def test_pre_unlock_margin_excludes_just_unlocked_balance_and_tiny_no_new_use_stays_positive():
+    """1. At 0.05 win/h, refilled B unlocks at +4h while runnable A dips to 0.02 just before +4h:
+    the pre-unlock margin is 0.02 (tight), never 1.02 including B's just-unlocked balance.
+    2. Selected-window No new use keeps 0.00004 positive in line and checkpoints while true 0.0 stays 0.0."""
+    a, b = _member(0.22, NOW + 100 * H, "a"), _member(0.50, NOW + 2 * H, "b")
+    sc = qf.build_typical_scenario([a, b], NOW, NOW + 86400, "24h", RATE, blocked_until=[None, NOW + 4 * H])
+    v = sc["verdict"]
+    assert v["state"] == "tight" and v["first_reset_at"] == NOW + 2 * H, v
+    assert v["tight_reset_at"] == NOW + 4 * H and math.isclose(v["before_tight_reset"], 1.02, abs_tol=1e-4), v
+    assert math.isclose(v["usable_before_reset"], 0.02, abs_tol=1e-4), v
+
+    # Selected-window No new use: 0.00004 stays positive in line and checkpoints; 0.0 stays 0.0.
+    tiny_data = _payload([_snap("a", [_con("primary", 0.99996, WEEK, NOW + 30 * H, "Weekly")])], [_profile("a")])
+    tiny_state = qs.compute(tiny_data, qs.HistoryView(state="empty"), NOW)
+    tiny_calc = tiny_state.groups[0]
+    for nnu in (
+        qs.build_chart(tiny_state, tiny_calc.key, "codex", "24h")["scenarios"]["no_new_use"],
+        qa.build(tiny_state, tiny_calc, "24h")["window"]["scenarios"]["no_new_use"],
+    ):
+        assert nnu["line"] and all(val > 0 and math.isclose(val, 0.00004, rel_tol=0.05) for _t, val in nnu["line"]), nnu["line"]
+        assert nnu["checkpoints"] and all(
+            cp["value"] > 0 and math.isclose(cp["value"], 0.00004, rel_tol=0.05) for cp in nnu["checkpoints"]
+        ), nnu["checkpoints"]
+        assert math.isclose(nnu["verdict"]["current"], 0.00004, rel_tol=0.05), nnu["verdict"]
+
+    zero_data = _payload([_snap("a", [_con("primary", 1.0, WEEK, NOW + 30 * H, "Weekly")])], [_profile("a")])
+    zero_state = qs.compute(zero_data, qs.HistoryView(state="empty"), NOW)
+    zero_calc = zero_state.groups[0]
+    for nnu in (
+        qs.build_chart(zero_state, zero_calc.key, "codex", "24h")["scenarios"]["no_new_use"],
+        qa.build(zero_state, zero_calc, "24h")["window"]["scenarios"]["no_new_use"],
+    ):
+        assert nnu["line"] and all(val == 0.0 for _t, val in nnu["line"]), nnu["line"]
+        assert nnu["checkpoints"] and all(cp["value"] == 0.0 for cp in nnu["checkpoints"]), nnu["checkpoints"]
+        assert nnu["verdict"]["current"] == 0.0, nnu["verdict"]

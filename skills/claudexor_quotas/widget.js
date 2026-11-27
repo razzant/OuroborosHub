@@ -6030,7 +6030,7 @@
         } else if (st === 'unavailable') {
             tone = 'muted';
             headline = t('verdict.unavailable_head', { limit: limitName });
-            sub = t('verdict.unavailable_sub');
+            sub = t(v.reason === 'history_truncated' ? 'verdict.truncated_sub' : 'verdict.unavailable_sub');
         } else if (st === 'held') {
             tone = 'muted';
             var hKey = v.held_reason === 'scope_not' ? 'verdict.held_scope_not_head'
@@ -6265,6 +6265,7 @@
         joint: { title: 'chart.typical_joint_title', legend: 'chart.legend_typical_joint' },
         held: { title: 'chart.typical_held_title', legend: 'chart.legend_typical_held' },
         mixed: { title: 'chart.typical_mixed_title', legend: 'chart.legend_typical_held' },
+        truncated: { title: 'chart.typical_truncated_title', legend: 'chart.legend_typical_truncated' },
         unavailable: { title: 'chart.typical_unavailable_title', legend: 'chart.legend_typical_unavailable' },
         at_limit: { title: 'chart.typical_at_limit_title', legend: 'chart.legend_typical_at_limit' },
         none: { title: 'chart.typical_idle_title', legend: 'chart.legend_typical_idle' }
@@ -6275,7 +6276,7 @@
         if (chart.mode === 'joint') return 'joint';
         var typ = (chart.scenarios && chart.scenarios.typical) || {};
         if (typ.status === 'held') return typ.held_reason === 'mixed' ? 'mixed' : 'held';
-        if (typ.status === 'unavailable') return 'unavailable';
+        if (typ.status === 'unavailable') return typ.reason === 'history_truncated' ? 'truncated' : 'unavailable';
         if (typ.reason === 'all_observed_at_limit') return 'at_limit';
         return 'none';
     }
@@ -6451,15 +6452,17 @@
             }
             return t(typ.held_reason === 'restricted' ? 'fact.r_typical_restricted' : 'fact.r_typical_held');
         }
-        if (typ.status === 'unavailable') return t('fact.r_typical_unavailable');
+        if (typ.status === 'unavailable') {
+            return t(typ.reason === 'history_truncated' ? 'fact.r_typical_truncated' : 'fact.r_typical_unavailable');
+        }
         if (typ.reason === 'all_observed_at_limit') return t('fact.r_typical_at_limit');
         return t('fact.r_typical_insufficient', { valid: validHoursWords(typ.valid_hours, typ.min_valid_hours || 12), min: typ.min_valid_hours || 12 });
     }
 
-    // When the shared pool runs out at this typical pace, inside what is drawn: its first stop, by what keeps the
-    // rest, and every following one as "again". Each stop is said once, only a stop after an earlier one is "again",
-    // and a stop that depends on accounts of unknown availability distinguishes reserve held at the start from an
-    // unknown account becoming relevant later in the stop.
+    // Future moments inside what is drawn when the shared pool runs out at this typical pace (an already-active stop
+    // at now is shown in the verdict strip): each stop is said once, by what keeps the rest, and every following one
+    // (including one after an active stop at now) as "again". A stop that depends on accounts of unknown availability
+    // distinguishes reserve held at the start from an unknown account becoming relevant later in the stop.
     function runsOutWords(sc, ctx) {
         var rows = sc.runs_out || [];
         if (!rows.length) return '';
@@ -6469,8 +6472,9 @@
             var when = { when: whenWords(isoOf(r.at)) };
             if (r.unknown_later) return t(again ? 'runs.pool_unknown_later_again' : 'runs.pool_unknown_later', when);
             if (r.unknown) return t(again ? 'runs.pool_unknown_again' : 'runs.pool_unknown', when);
+            if (r.blocked_only) return t(again ? 'runs.pool_blocked_again' : 'runs.pool_blocked', when);
             if (again) return t(r.after_refill ? 'runs.pool_again' : 'runs.pool_later', when);
-            return t(r.blocked_only ? 'runs.pool_blocked' : r.reset_reported ? 'runs.pool_before' : 'runs.pool_none', when);
+            return t(r.reset_reported ? 'runs.pool_before' : 'runs.pool_none', when);
         }
         var parts = rows.map(function (r, idx) { return said(r, idx > 0 || !!r.again); });
         return t('runs.pool_lead', { parts: parts.join('; ') });

@@ -140,14 +140,17 @@ it (`api.get_state_dir()`):
   there, else the longest, from when to when (exact seconds and the line's start
   kept via `_instant`),
   an earlier stop in a few words (`earlier_empty_at`, `earlier_resumes_at`), and
-  its point marked on the drawn line. Details lists all simulated stops in the
-  span once each; only one after an earlier stop is "again", and sub-0.01
-  positive values render as `<0.01`. Single-limit applicability uses the
+  its point marked on the drawn line. Details lists each future simulated stop
+  in the span once (a stop already active at `now` is shown in the verdict
+  strip); only one after an earlier stop (including an active stop at `now`) is
+  "again", and sub-0.01 positive values render as `<0.01`. Single-limit
+  applicability uses the
   engine's scope rule even when `window_seconds` is absent, while Combined
   requires comparable window lengths across governing limits. The selected
   limit's No new use marks that limit's own resets only, and Combined names the
-  next known reset even past a 24 h span. When
-  Typical is unknown (fewer than 12 valid hours, history unavailable, or held)
+  next known reset (by distinct accounts) even past a 24 h span. When
+  Typical is unknown (fewer than 12 valid hours, history unreadable or 48 h
+  history input capped/truncated, or held)
   or when **Combined** (`joint`) is active, Typical draws **no** numeric future
   line, checkpoints or schedule under Typical's name and explains why, while
   **No new use** remains a working refill-only option. Combined preserves all
@@ -1109,12 +1112,16 @@ fitted to the lines.
   - *typical* (`typical`, the default) — continues the selected limit pool's
     48-hour observed pooled hourly burn rate (comparable positive burn over the
     preceding 48 hours divided by the valid hours when the limit had reserve,
-    at least 12 of them, with 80% pool coverage — 100% for 1–4 accounts)
+    at least 12 of them, with 80% pool coverage — 100% for 1–4 accounts — using
+    only the common relevant interval `[now - 48h - 2 * SIGHTING_GAP_SEC, now]`
+    prioritized by `HistoryStore.read` Pass 1 so 24 h and 7 d agree identically
+    under row caps)
     across the currently measured accounts so pooled demand shifts onto
     remaining accounts when one hits zero, refilling each account once at its
     next reported reset. When fewer than 12 valid hours exist, accounts sat at
     their limit so their use could not be seen (`reason`:
-    `all_observed_at_limit`), history is unavailable, or all accounts are held
+    `all_observed_at_limit`), history cannot be read or the 48-hour input hit
+    the read cap (`history_truncated`), or all accounts are held
     (scope, another unknown/unreset limit, or their own restriction with no
     reported end), Typical draws no numeric future line, checkpoints or
     schedule and explains why (a measured zero with sufficient pool coverage
@@ -1143,11 +1150,13 @@ fitted to the lines.
   last of them (`total_after`) — `later` (the first reported reset past the
   span: when and for how many, never how much), `checkpoints` (the total an
   hour, 6 and 12 hours and a day ahead; a day, 3 days and a week on the
-  7-day span) and, at a pace, `runs_out` (when the reserve that can run
-  reaches zero inside the span, Typical's pool or each recent-pace account:
+  7-day span) and, at a pace, `runs_out` (future moments strictly after `now`
+  inside the span when the reserve that can run reaches zero, Typical's pool or
+  each recent-pace account — an already-active stop at `now` is shown in the
+  verdict strip rather than `runs_out`:
   before a reported reset, with none reported, or after a refill; Typical's
   entries say what holds the rest, `blocked_only` or `unknown`, and `again`
-  only after an earlier stop). A selected limit's own future (the window view)
+  only after an earlier stop, including one active at `now`). A selected limit's own future (the window view)
   schedules that limit's resets only; another binding window's refill is no
   reset of it.
   Every one of them is read off the same functions the line is drawn from;
@@ -1195,7 +1204,8 @@ condition), or why no line is drawn; for *No new use* what is left before
 the reset if nothing more is used. It is not shown while the answer for a newly
 chosen model or request kind is read. Under the chart one compact legend
 explains solid/dashed history and the line drawn; "Details, notes and data"
-holds the full legend, when the pool runs out at the typical pace, the
+holds the full legend, future stops when the pool runs out at the typical pace
+(any stop already active at `now` stays in the verdict strip), the
 checkpoints, the first two reported resets with the rest on request, the
 limit's details (scope, restrictions with the unrestricted windows, what is
 not counted, plans, shared sign-ins, resets, even use and the trailing-hour

@@ -1139,3 +1139,205 @@ def test_horizon_switch_preserves_48h_typical_under_row_cap_and_discloses_48h_tr
     assert typ_plat["reason"] == "history_truncated"
     assert typ_plat["rate_per_hour"] is None
     assert typ_plat["line"] == []
+
+
+def test_three_source_bridge_value_disagreement_cannot_yield_false_measured_zero():
+    """Three simultaneously observed sources at 19.1%, 20.0%, 20.9% over a 13h plateau
+    must NOT let the middle source (within 1pp of each extreme) emit a false measured zero.
+    Within-tolerance controls, asynchronous monotone transitions, and pre-watch cached
+    readings remain clean."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 13 * H
+    sweeps = [t0 + k * 300.0 for k in range(13 * 12 + 1)]
+    view = qs.HistoryView(state="ok", salt="a" * 32, sweeps=sweeps, sweep_ok=[True] * len(sweeps))
+
+    # 1. Exact repro: 19.1% / 20.0% / 20.9% simultaneous 13h plateaus -> 0 valid hours, no false zero.
+    spread_runs = [
+        qs.Run("s1", 0.191, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s2", 0.200, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s3", 0.209, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+    ]
+    assert qf._account_segments(spread_runs, NOW - 48 * H, NOW, view, []) == []
+    calc, state = _state_from_runs(
+        {"a": spread_runs}, [("a", 0.200, NOW, reset_at, "s2")],
+        sweeps=sweeps, sweep_ok=[True] * len(sweeps),
+    )
+    est = qf.estimate_typical_pace(calc, state)
+    assert est["state"] == "insufficient" and est["valid_hours"] == 0.0 and est["rate_per_hour"] is None, est
+
+    # 2. Standalone conflicting pair (19.1% at t_mid vs 20.9% at t_mid + dt) blocks middle 20.0%
+    #    plateau within qs.SAME_INSTANT_SEC (0s and 1s inclusive), while 2s stays 13h / zero
+    #    (asynchronous monotone readings).
+    t_mid = t0 + 6 * H
+    for dt in (0.0, 1.0):
+        pair_runs = [
+            qs.Run("s2", 0.200, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+            qs.Run("s1", 0.191, reset_at, PLAN, t_mid, t_mid, 1, t_mid, t_mid),
+            qs.Run("s3", 0.209, reset_at, PLAN, t_mid + dt, t_mid + dt, 1, t_mid + dt, t_mid + dt),
+        ]
+        assert qf._account_segments(pair_runs, NOW - 48 * H, NOW, view, []) == []
+        calc_p, state_p = _state_from_runs(
+            {"a": pair_runs}, [("a", 0.200, NOW, reset_at, "s2")],
+            sweeps=sweeps, sweep_ok=[True] * len(sweeps),
+        )
+        est_p = qf.estimate_typical_pace(calc_p, state_p)
+        assert est_p["state"] == "insufficient" and est_p["valid_hours"] == 0.0 and est_p["rate_per_hour"] is None, (dt, est_p)
+    async_pair_runs = [
+        qs.Run("s2", 0.200, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s1", 0.191, reset_at, PLAN, t_mid, t_mid, 1, t_mid, t_mid),
+        qs.Run("s3", 0.209, reset_at, PLAN, t_mid + 2.0, t_mid + 2.0, 1, t_mid + 2.0, t_mid + 2.0),
+    ]
+    segs_2s = qf._account_segments(async_pair_runs, NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_2s), 13 * H, abs_tol=1.0), segs_2s
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_2s), 0.0, abs_tol=1e-6), segs_2s
+    calc_2s, state_2s = _state_from_runs(
+        {"a": async_pair_runs}, [("a", 0.200, NOW, reset_at, "s2")],
+        sweeps=sweeps, sweep_ok=[True] * len(sweeps),
+    )
+    est_2s = qf.estimate_typical_pace(calc_2s, state_2s)
+    assert est_2s["state"] == "zero" and est_2s["valid_hours"] == 13.0 and est_2s["rate_per_hour"] == 0.0, est_2s
+
+    # 3. Control: all three within 1pp (19.5% / 20.0% / 20.4%) -> measured zero over 13h.
+    agree_runs = [
+        qs.Run("s1", 0.195, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s2", 0.200, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s3", 0.204, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+    ]
+    calc_ok, state_ok = _state_from_runs(
+        {"a": agree_runs}, [("a", 0.200, NOW, reset_at, "s2")],
+        sweeps=sweeps, sweep_ok=[True] * len(sweeps),
+    )
+    est_ok = qf.estimate_typical_pace(calc_ok, state_ok)
+    assert est_ok["state"] == "zero" and est_ok["valid_hours"] == 13.0 and est_ok["rate_per_hour"] == 0.0, est_ok
+
+    # 4. Control: asynchronous monotone transitions across 3 sources (no chord false veto).
+    async_segs = qf._account_segments([
+        qs.Run("s1", 0.10, reset_at, PLAN, t0, t0, 1, t0, t0 + 6 * H - 300.0),
+        qs.Run("s1", 0.25, reset_at, PLAN, t0 + 6 * H, t0 + 6 * H, 1, t0 + 6 * H, NOW - 300.0),
+        qs.Run("s1", 0.40, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+        qs.Run("s2", 0.15, reset_at, PLAN, t0 + 2 * H, t0 + 2 * H, 1, t0 + 2 * H, t0 + 8 * H - 300.0),
+        qs.Run("s2", 0.30, reset_at, PLAN, t0 + 8 * H, t0 + 8 * H, 1, t0 + 8 * H, t0 + 8 * H),
+        qs.Run("s3", 0.20, reset_at, PLAN, t0 + 4 * H, t0 + 4 * H, 1, t0 + 4 * H, t0 + 10 * H - 300.0),
+        qs.Run("s3", 0.35, reset_at, PLAN, t0 + 10 * H, t0 + 10 * H, 1, t0 + 10 * H, t0 + 10 * H),
+    ], NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in async_segs), 13 * H, abs_tol=1.0), async_segs
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in async_segs), 0.30, abs_tol=1e-4), async_segs
+
+    # 5. Control: pre-watch cached old reading (n_obs == 1) on s3 does not veto clean agreeing plateaus.
+    cached_runs = [
+        qs.Run("s1", 0.200, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s2", 0.204, reset_at, PLAN, t0, NOW, len(sweeps), t0, NOW),
+        qs.Run("s3", 0.100, reset_at, PLAN, t0 - 2 * H, t0 - 2 * H, 1, t0 + 8 * H, NOW),
+    ]
+    segs_cached = qf._account_segments(cached_runs, NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_cached), 13 * H, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_cached), 0.0, abs_tol=1e-6)
+
+
+def test_24h_and_7d_agree_with_pre_48h_sighting_under_row_cap(tmp_path, monkeypatch):
+    """Under MAX_READ_ROWS, an older sighting at -51h (outside the Pass-1 common relevant
+    interval [now - 48h - 2*SIGHTING_GAP_SEC, now]) must not enter cohort presence on one
+    span and drop on the other; 24h and 7d agree identically with uncapped history while
+    preserving edge continuity readings inside [typical_since, now - 48h] and disclosing
+    honest history_truncated if the fresh 48h window itself overflows."""
+    store = quota_history.HistoryStore(tmp_path / "parity_51h")
+    key_7d = qs.group_key("codex", "primary", WEEK, ())
+    profs = [profile("codex", f"cur-{a}", plan="plus") for a in range(3)]
+    t_origin = NOW - 7 * 86400.0
+    st_init = payload(
+        [_snap("cur-0", 0.10, NOW + 3 * 86400.0, observed_at=t_origin)],
+        profs, harnesses=("codex",),
+    )
+    plugin.persist_sweep(store, st_init, "", t_origin)
+
+    conn = sqlite3.connect(str(store.path))
+    try:
+        salt = conn.execute("SELECT value FROM meta WHERE key='salt'").fetchone()[0]
+        conn.execute("DELETE FROM run")
+        conn.execute("DELETE FROM sweep")
+        step = 360.0  # 6m <= SIGHTING_GAP_SEC
+        n_sw = int(7 * 86400.0 / step)
+        # Include an older failed sweep at -55h (outside 24h sweeps_from, inside 7d sweeps_from).
+        t_fail_old = NOW - 55 * H
+        conn.executemany(
+            "INSERT INTO sweep (at, ok, reason) VALUES (?, ?, ?)",
+            [(t_origin + i * step, 0 if abs((t_origin + i * step) - t_fail_old) < 1.0 else 1, "ok")
+             for i in range(n_sw + 1)],
+        )
+        run_rows = []
+        # 3 current accounts: 0.011/h each in -48h..-30h (0.033/h pool), 0.0055/h each in -30h..0
+        # (0.0165/h pool) -> exact 48h rate = (18*0.033 + 30*0.0165)/48 = 0.0226875 win/h
+        # (vs 30h rate = 0.0165 win/h if -51h sighting injected 18h presence!).
+        for a in range(3):
+            sub = qs.pseudo_id(salt, "codex", f"cur-{a}")
+            for i in range(n_sw + 1):
+                t = t_origin + i * step
+                age_h = (NOW - t) / H
+                if age_h > 48.0:
+                    ratio, res_t = 0.10, NOW + 3 * 86400.0
+                elif age_h > 30.0:
+                    ratio, res_t = 0.10 + (48.0 - age_h) * 0.011, NOW + 3 * 86400.0
+                else:
+                    ratio, res_t = 0.298 + (30.0 - age_h) * 0.0055, NOW + 3 * 86400.0
+                run_rows.append((sub, key_7d, "app", PLAN, round(ratio, 6), res_t, t, t, 1, t, t, 0, 0))
+        # Former account sighted at -51h (outside Pass-1 typical_since) and at -30h:
+        # previously carried last_seen+24h (-27h, capped at -30h) into [-48h, -30h] whenever -51h was read.
+        sub_former = qs.pseudo_id(salt, "codex", "former-51h")
+        t51, t30 = NOW - 51 * H, NOW - 30 * H
+        run_rows.append((sub_former, key_7d, "app", PLAN, 0.20, NOW + 3 * 86400.0, t51, t51, 1, t51, t51, 0, 0))
+        run_rows.append((sub_former, key_7d, "app", PLAN, 0.30, NOW + 3 * 86400.0, t30, t30, 1, t30, t30, 1, 0))
+        # Older filler rows in -7d..-52h so 7d exhausts MAX_READ_ROWS in Pass 2 before left-edge seeds.
+        for f in range(12):
+            sf = qs.pseudo_id(salt, "codex", f"filler-{f}")
+            for i in range(0, int((7 * 86400.0 - 52 * H) / step), 2):
+                t = t_origin + i * step
+                run_rows.append((sf, key_7d, "app", PLAN, round(0.10 + (i % 80) * 0.003, 6),
+                                 NOW - 48 * H, t, t, 1, t, t, 0, 0))
+        conn.executemany(
+            "INSERT INTO run (subject, series, source, plan, ratio, resets_at, "
+            "first_obs, last_obs, n_obs, first_seen, last_seen, after_gap, after_correction) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            run_rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    live = [_snap(f"cur-{a}", 0.463, NOW + 3 * 86400.0, observed_at=NOW) for a in range(3)]
+    status = payload(live, profs, harnesses=("codex",))
+    expected_rate = round((18 * 0.033 + 30 * 0.0165) / 48.0, 4)
+
+    # 1. Uncapped control: 24h and 7d both use the common relevant interval [typical_since, now].
+    u24 = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="24h")
+    u7d = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="7d")
+    for rv in (u24, u7d):
+        typ = rv["chart"]["scenarios"]["typical"]
+        assert typ["status"] == "ok" and typ["valid_hours"] == 48.0, typ
+        assert typ["rate_per_hour"] == expected_rate, typ
+
+    # 2. Capped older history (1600 rows fits ~1450 Pass-1 rows, caps 7d Pass-2 + left-edge seeds):
+    #    24h and 7d still match identically with the uncapped control (both analytics=False and True).
+    monkeypatch.setattr(quota_history, "MAX_READ_ROWS", 1600)
+    for analytics in (False, True):
+        c24 = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="24h", analytics=analytics)
+        c7d = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="7d", analytics=analytics)
+        t24, t7d = c24["chart"]["scenarios"]["typical"], c7d["chart"]["scenarios"]["typical"]
+        assert t24["status"] == t7d["status"] == "ok"
+        assert t24["valid_hours"] == t7d["valid_hours"] == 48.0
+        assert t24["valid_seconds"] == t7d["valid_seconds"]
+        assert t24["rate_per_hour"] == t7d["rate_per_hour"] == expected_rate
+        assert c7d["summary"]["history"]["truncated"] is True
+        if analytics:
+            a24 = c24["chart"]["analytics"]["window"]["scenarios"]["typical"]
+            a7d = c7d["chart"]["analytics"]["window"]["scenarios"]["typical"]
+            assert a24["valid_hours"] == a7d["valid_hours"] == 48.0
+            assert a24["rate_per_hour"] == a7d["rate_per_hour"] == expected_rate
+
+    # 3. Capped fresh 48h Pass-1 (800 rows < ~1450 Pass-1 rows): BOTH 24h and 7d report history_truncated.
+    monkeypatch.setattr(quota_history, "MAX_READ_ROWS", 800)
+    for horizon in ("24h", "7d"):
+        ov = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon=horizon, analytics=True)
+        for sc in (ov["chart"]["scenarios"]["typical"], ov["chart"]["analytics"]["window"]["scenarios"]["typical"]):
+            assert sc["status"] == "unavailable" and sc["reason"] == "history_truncated", sc
+            assert sc["verdict"]["state"] == "unavailable" and sc["verdict"]["reason"] == "history_truncated"
+            assert sc["rate_per_hour"] is None and sc["line"] == []

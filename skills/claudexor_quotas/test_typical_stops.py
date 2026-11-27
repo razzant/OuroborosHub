@@ -107,13 +107,15 @@ def test_a_stop_that_begins_at_a_refill_landing_on_accounts_that_cannot_run_is_s
 @pytest.mark.parametrize("left,rate,at", [(0.20, 0.10, 2 * H), (0.10, 0.30, 1200.0)])
 def test_capacity_back_at_the_refill_instant_is_no_stop(left, rate, at):
     """A runs out at the instant B both resets and may run again (the second case lands within float noise of it):
-    the refill serves the demand at once. No stop, no mark, the margin before the reset is B's share."""
+    the refill serves the demand at once. No stop, no mark; the total before the reset is B's held share (0.30),
+    while usable reserve immediately before B unlocks hits zero ('tight', never 'runs_out' or 'lasts')."""
     a, b = _member(left, None, "a"), _member(0.30, NOW + at, "b")
     info = dict(OK, rate_per_hour=rate)
     for sc in _both_spans([a, b], info, blocked_until=[None, NOW + at]):
         v = sc["verdict"]
-        assert v["empty_at"] is None and v["earlier_empty_at"] is None and v["state"] == "lasts", v
+        assert v["empty_at"] is None and v["earlier_empty_at"] is None and v["state"] == "tight", v
         assert math.isclose(v["before_first_reset"], 0.3, abs_tol=1e-4), v
+        assert v["usable_before_reset"] == 0.0, v
         assert not [r for r in sc["runs_out"] if r["at"] <= NOW + at + 1], sc["runs_out"]
 
 
@@ -298,6 +300,54 @@ def test_a_known_cooldown_outlasting_a_stop_stays_blocked_despite_an_unread_sibl
     # Unspecified model is not bound by daily_ma, so B's stale five_hour makes +2h..+5h conditional right away.
     v_unspec = _window(m5, _week(m5), model=None)["scenarios"]["typical"]["verdict"]
     assert v_unspec["state"] == "unknown_gap" and v_unspec["unknown_at_empty"] == 0.4, v_unspec
+
+
+@pytest.mark.parametrize("hold_kind", ["exhaustion", "cooldown"])
+def test_model_hold_applies_despite_stale_sibling_limit_and_stays_isolated_to_that_model(hold_kind):
+    """Selected model m-a is held on B until +8h while B's sibling limit balance (daily_ma)
+    is stale. When A empties at +2h and refills at +5h, B is definitely held (blocked_gap),
+    not conditional, even with 0.40 left on the selected window; when A refills at +10h
+    unknown coverage remains unknown after +8h; another model (m-b) and unspecified requests
+    are unaffected by m-a's hold."""
+    until = NOW + 8 * H
+
+    def state_for(a_reset):
+        b_daily = _con("daily_ma", 0.10, DAY, NOW + 20 * H, "Daily m-a", models=["m-a"], freshness="stale")
+        b_avail = {"state": "available"}
+        if hold_kind == "exhaustion":
+            b_avail["model_scoped_exhaustions"] = [
+                {"constraint_id": "daily_ma", "applies_to_models": ["m-a"], "resets_at": qs.iso(until)}
+            ]
+        else:
+            b_daily["cooldown_until"] = qs.iso(until)
+        return _state([
+            _snap("a", [_con("primary", 0.80, WEEK, a_reset, "Weekly", freshness="fresh"),
+                        _con("daily_ma", 0.10, DAY, NOW + 20 * H, "Daily m-a", models=["m-a"], freshness="fresh")], NOW),
+            _snap("b", [_con("primary", 0.60, WEEK, NOW + 60 * H, "Weekly", freshness="fresh"),
+                        b_daily], NOW, availability=b_avail),
+        ], rate=0.10)
+
+    # Gap +2h..+5h completely covered by B's +8h hold on m-a -> blocked_gap (not conditional).
+    s5 = state_for(NOW + 5 * H)
+    sc5 = _window(s5, _week(s5), model="m-a")["scenarios"]["typical"]
+    v5 = sc5["verdict"]
+    assert v5["state"] == "blocked_gap" and v5["empty_at"] == NOW + 2 * H and v5["resumes_at"] == NOW + 5 * H, v5
+    assert v5["locked_at_empty"] == 0.4 and v5["unknown_at_empty"] is None, v5
+    assert sc5["runs_out"][0].get("blocked_only") and not sc5["runs_out"][0].get("unknown"), sc5["runs_out"]
+
+    # Gap +2h..+10h outlasts +8h hold -> unknown coverage resumes after +8h (unknown_gap / unknown_later).
+    s10 = state_for(NOW + 10 * H)
+    sc10 = _window(s10, _week(s10), model="m-a")["scenarios"]["typical"]
+    v10 = sc10["verdict"]
+    assert v10["state"] == "unknown_gap" and v10["empty_at"] == NOW + 2 * H and v10["resumes_at"] == NOW + 10 * H, v10
+    assert v10["locked_at_empty"] == 0.4 and v10["unknown_at_empty"] is None and v10["unknown_refilled"] is False, v10
+    assert sc10["runs_out"][0].get("unknown_later") is True, sc10["runs_out"]
+
+    # Other model (m-b) and unspecified-model query are unaffected by m-a's hold: B is runnable (0.60 total lasts past +5h).
+    for other_model in ("m-b", None):
+        v_other = _window(s5, _week(s5), model=other_model)["scenarios"]["typical"]["verdict"]
+        assert v_other["state"] == "lasts" and v_other["empty_at"] is None, (other_model, v_other)
+        assert math.isclose(v_other["before_first_reset"], 0.1, abs_tol=1e-4), (other_model, v_other)
 
 
 def test_single_untimed_limit_keeps_typical_when_applicable_while_combined_requires_comparable_units():
@@ -499,10 +549,15 @@ def fixture_file(tmp_path_factory):
             explicit(week("acct-b", 0.50, now + 60 * H, t, (0.10, now + 4 * H))),
             explicit(week("acct-c", 0.50, now + 60 * H, t, (0.10, now + 4 * H)), stale=("five_hour",))],
             _rate(0.05), disabled=("acct-a", "acct-b")),
-        # A little reserve: 0.004 left.
+        # A little reserve: 0.004 left (and 0.00004 for sub-4-decimal No new use check).
         "tiny": _route_views(root / "tiny", lambda t, now: [week("acct-a", 0.004, now + 30 * H, t)], _rate(0.0001)),
+        "tiny_nnu": _route_views(root / "tiny_nnu", lambda t, now: [week("acct-a", 0.00004, now + 30 * H, t)], _rate(0.0001)),
         # 0.50 left, refilled at +1h, out at +11h with no reset ahead: one stop, not "again".
         "refilled": _route_views(root / "refilled", lambda t, now: [week("acct-a", 0.50, now + H, t)], _rate(0.10)),
+        # Repeat stop retaining held reserve: A (0.20, resets +5h) empties at +2h and again at +15h while disabled B holds 0.40.
+        "repeat_blocked": _route_views(root / "repeat_blocked", lambda t, now: [
+            week("acct-a", 0.20, now + 5 * H, t),
+            week("acct-b", 0.40, now + 60 * H, t)], _rate(0.10), disabled=("acct-b",)),
         "joint": _joint_views(root / "joint"),
     }
     path = root / "views.json"
@@ -654,9 +709,49 @@ const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
   assert.doesNotMatch(text(dataTbl), /(?<![\d.])0\.00(?!\s+of)/, text(dataTbl));
   env.disposeHooks[0]();
 
+  // Selected-window No new use with 0.00004 stays positive ("<0.01", never 0.00) in checkpoints and cursor.
+  env = await open('tiny_nnu');
+  click(env, 'horizon:24h');
+  click(env, 'scenario:no_new_use');
+  await settle();
+  const nnuCps = classes(block(env), 'cp-num').map(text);
+  assert.ok(nnuCps.length >= 1 && nnuCps.every((v) => v === '<0.01'), nnuCps.join(' | '));
+  env.disposeHooks[0]();
+
   // The first stop after a refill, with none before it: said once, never "again".
   env = await open('refilled');
   assert.match(facts(env), /^At typical pace, the pool runs out with no reported reset \([^)]*\)\.$/, facts(env));
+  env.disposeHooks[0]();
+
+  // Repeat stop retaining held reserve: says usable reserve runs out again while restricted accounts hold the rest, never "the pool runs out again".
+  env = await open('repeat_blocked');
+  assert.match(facts(env), /usable reserve runs out while restricted accounts hold the rest \([^)]*\); usable reserve runs out again while restricted accounts hold the rest \([^)]*\)\./, facts(env));
+  assert.doesNotMatch(facts(env), /the pool runs out again/, facts(env));
+  env.disposeHooks[0]();
+
+  // history_truncated messages talk about capped/exceeded read input, never unreadability; unreadable stays unreadable.
+  env = await openVariant(variant('insufficient', (typ) => {
+    typ.status = 'unavailable';
+    typ.reason = 'history_truncated';
+    typ.verdict.state = 'unavailable';
+    typ.verdict.reason = 'history_truncated';
+  }));
+  assert.match(text(strip(env)), /exceeded the read limit/, text(strip(env)));
+  assert.doesNotMatch(text(strip(env)), /cannot be read|could not be read/i, text(strip(env)));
+  assert.match(byFocus(env.root, 'scenario:typical').title, /exceeded the read limit/);
+  assert.match(text(classes(block(env), 'calm-legend')[0]), /exceeded the read limit/);
+  assert.match(text(classes(block(env), 'chart-legend')[0]), /exceeded the read limit/);
+  assert.doesNotMatch(text(block(env)), /cannot be read|could not be read/i);
+  env.disposeHooks[0]();
+
+  env = await openVariant(variant('insufficient', (typ) => {
+    typ.status = 'unavailable';
+    typ.reason = 'history_unreadable';
+    typ.verdict.state = 'unavailable';
+    typ.verdict.reason = 'history_unreadable';
+  }));
+  assert.match(text(strip(env)), /cannot be read/, text(strip(env)));
+  assert.match(text(classes(block(env), 'chart-legend')[0]), /could not be read/);
   env.disposeHooks[0]();
 
   // Combined on 24 h names the next known reset although the span ends before it.

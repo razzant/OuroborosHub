@@ -6,7 +6,11 @@ context snapshot and Details) completely separate from this forecast.
 
 Estimator:
     Reads ONLY the exact selected limit series (never mixing window lengths,
-    request kinds or model scopes) over the preceding 48 hours ``[now - 48h, now]``.
+    request kinds or model scopes) over the common relevant interval
+    ``[now - 48h - 2 * SIGHTING_GAP_SEC, now]`` (matching ``HistoryStore.read``
+    Pass 1 so 24 h and 7 d spans always see the same runs, failed sweeps and
+    edge continuity readings into ``[now - 48h, now]`` even when older chart
+    history is capped).
     Attaches all fresh recordable live readings per source from ``state.norm``
     (falling back to ``calc.measured`` for synthetic states with empty
     ``norm.readings``) via ``quota_summary._with_live`` without bridging gaps.
@@ -24,12 +28,15 @@ Estimator:
       with ``boundary(prev, nxt, view) == ""``, no failed sweeps in between,
       strictly advancing observation time inside ``[now - 48h, now]`` and
       non-negative delta contribute their positive ratio increase.
-    - Multi-source accounts check reset compatibility across active spans and
-      monotonic observation/plateau compatibility within ``VALUE_TOLERANCE``
-      and ``RESET_TOLERANCE_SEC`` (no linear chord interpolation, no artificial
-      padding, and no veto by a frozen ``n_obs == 1`` old cached reading on
-      newer fresh observations), then deduplicate clean same-source legs with
-      a simple deterministic source choice on transition-atomic cells.
+    - Multi-source accounts compute account-wide conflicts across every pair
+      of distinct sources (active reset spans, segment compatibility,
+      observation-vs-segment and simultaneous observation agreement within
+      ``VALUE_TOLERANCE`` and ``RESET_TOLERANCE_SEC``, with no linear chord
+      interpolation, no artificial padding, and no veto by a frozen ``n_obs == 1``
+      old cached reading on newer fresh observations) and apply them to every
+      source so an intermediate or resetless source cannot mask a real
+      disagreement, then deduplicate clean same-source legs with a simple
+      deterministic source choice on transition-atomic cells.
 
 Pool coverage, capacity-bearing denominator and explicit limitations:
     An elementary interval is adequately covered only when at least
@@ -399,7 +406,7 @@ def _in_intervals(t: float, intervals: Sequence[Tuple[float, float]], margin: fl
     return idx >= 0 and intervals[idx][1] >= t - margin
 
 
-def _reset_conflicts(
+def _account_conflicts(
     sources: Sequence[str],
     evidence: Dict[str, Tuple[
         List[_Seg], List[float],
@@ -407,19 +414,24 @@ def _reset_conflicts(
         List[Tuple[float, float, float]], List[float],
         List[Tuple[float, float]],
     ]],
-) -> Tuple[List[Tuple[float, float]], List[float]]:
-    """Account-wide known-reset conflicts across any two distinct sources.
+) -> Tuple[List[Tuple[float, float]], List[Tuple[float, bool]]]:
+    """Account-wide cross-source value and reset conflicts across all source pairs.
 
-    Returns ``(conflict_intervals, conflict_points)`` where two sources report
-    known reset dates differing by more than ``RESET_TOLERANCE_SEC`` (without
-    an ended cycle vetoing a running one), so a third source with no reset date
-    cannot mask the conflict.
+    Returns ``(conflict_intervals, conflict_points)`` where any two distinct
+    sources genuinely disagree — over active reset spans, overlapping segments,
+    observation-vs-segment bounds, or simultaneous observations — so neither a
+    middle-valued source nor a source lacking ``resets_at`` can mask a real
+    conflict. Asynchronous monotone transitions and pre-watch cached readings
+    are never flagged as conflicts. Each conflict point carries ``(t, ended)``
+    so an ended-cycle conflict cannot veto a running cycle at a reset rollover.
     """
     same_t = qs.SAME_INSTANT_SEC
     tol = qs.RESET_TOLERANCE_SEC
+    val_tol = qs.VALUE_TOLERANCE + qs.RATIO_EPS
     int_by_src: Dict[str, Tuple[List[Tuple[float, float, float]], List[float]]] = {}
     sweep_events: List[Tuple[float, int, str, float]] = []
-    pts: List[Tuple[float, float, str]] = []
+    r_pts: List[Tuple[float, float, str]] = []
+    all_obs: List[Tuple[float, float, Optional[float], str]] = []
 
     for src in sources:
         segs, _seg_ends, obs, _obs_ts, rspans, _max_hi, rpts = evidence[src]
@@ -436,13 +448,14 @@ def _reset_conflicts(
             sweep_events.append((lo, 1, src, r))
             sweep_events.append((hi, 0, src, r))
         int_by_src[src] = (src_ints, max_hi)
-        for ot, _oy, ores in obs:
+        for ot, oy, ores in obs:
+            all_obs.append((ot, oy, ores, src))
             if ores is not None:
-                pts.append((ot, ores, src))
+                r_pts.append((ot, ores, src))
         for rt, rval in rpts:
-            pts.append((rt, rval, src))
+            r_pts.append((rt, rval, src))
 
-    # End events (0) precede start events (1) so exact reset rollovers do not conflict.
+    # 1. Active reset-span conflicts (end events precede start events for exact rollovers).
     sweep_events.sort(key=lambda e: (e[0], e[1]))
     active: Dict[str, Dict[float, int]] = {}
     raw_intervals: List[Tuple[float, float]] = []
@@ -482,21 +495,77 @@ def _reset_conflicts(
                 break
         if conflict:
             raw_intervals.append((t_cur, t_nxt))
-    conflict_intervals = _merge_intervals(raw_intervals)
 
-    pts.sort(key=lambda p: p[0])
     conflict_pts_set = set()
-    n_pts = len(pts)
-    for i, (t_a, r_a, s_a) in enumerate(pts):
+
+    # 2. Segment-vs-segment conflicts across every pair of distinct sources.
+    for idx_a, src_a in enumerate(sources):
+        segs_a = evidence[src_a][0]
+        if not segs_a:
+            continue
+        for idx_b in range(idx_a + 1, len(sources)):
+            segs_b, ends_b = evidence[sources[idx_b]][0], evidence[sources[idx_b]][1]
+            if not segs_b:
+                continue
+            for seg_a in segs_a:
+                j = bisect.bisect_left(ends_b, seg_a.t0 - same_t - 1e-6)
+                while j < len(segs_b) and segs_b[j].t0 <= seg_a.t1 + same_t + 1e-6:
+                    seg_b = segs_b[j]
+                    if _segments_conflict(seg_a, seg_b):
+                        o0, o1 = max(seg_a.t0, seg_b.t0), min(seg_a.t1, seg_b.t1)
+                        if o1 > o0 + 1e-6:
+                            raw_intervals.append((o0, o1))
+                        else:
+                            for pt_t, pt_y, pt_r, other_seg in (
+                                (seg_a.t0, seg_a.r0, seg_a.resets_at, seg_b),
+                                (seg_a.t1, seg_a.r1, seg_a.resets_at, seg_b),
+                                (seg_b.t0, seg_b.r0, seg_b.resets_at, seg_a),
+                                (seg_b.t1, seg_b.r1, seg_b.resets_at, seg_a),
+                            ):
+                                if _point_vs_seg_conflict(pt_t, pt_y, pt_r, other_seg):
+                                    conflict_pts_set.add((pt_t, pt_r is not None and pt_r <= pt_t + same_t))
+                    j += 1
+
+    # 3. Simultaneous observation value conflicts and observation-vs-segment conflicts.
+    all_obs.sort(key=lambda o: o[0])
+    n_obs = len(all_obs)
+    for i, (t_a, y_a, r_a, s_a) in enumerate(all_obs):
+        ended_a = r_a is not None and r_a <= t_a + same_t
+        j = i + 1
+        while j < n_obs and all_obs[j][0] <= t_a + same_t + 1e-6:
+            t_b, y_b, r_b, s_b = all_obs[j]
+            if s_b != s_a:
+                ended_b = r_b is not None and r_b <= t_b + same_t
+                if ended_a == ended_b and abs(y_a - y_b) > val_tol:
+                    conflict_pts_set.add((t_a, ended_a))
+                    conflict_pts_set.add((t_b, ended_b))
+            j += 1
+        for other in sources:
+            if other == s_a:
+                continue
+            osegs, oends = evidence[other][0], evidence[other][1]
+            if not osegs:
+                continue
+            k = bisect.bisect_left(oends, t_a - same_t - 1e-6)
+            while k < len(osegs) and osegs[k].t0 <= t_a + same_t + 1e-6:
+                if _point_vs_seg_conflict(t_a, y_a, r_a, osegs[k]):
+                    conflict_pts_set.add((t_a, ended_a))
+                    break
+                k += 1
+
+    # 4. Known-reset point conflicts against other known-reset points and active reset spans.
+    r_pts.sort(key=lambda p: p[0])
+    n_pts = len(r_pts)
+    for i, (t_a, r_a, s_a) in enumerate(r_pts):
         ended_a = r_a <= t_a + same_t
         j = i + 1
-        while j < n_pts and pts[j][0] <= t_a + same_t + 1e-6:
-            t_b, r_b, s_b = pts[j]
+        while j < n_pts and r_pts[j][0] <= t_a + same_t + 1e-6:
+            t_b, r_b, s_b = r_pts[j]
             if s_b != s_a:
                 ended_b = r_b <= t_b + same_t
                 if ended_a == ended_b and abs(r_a - r_b) > tol:
-                    conflict_pts_set.add(t_a)
-                    conflict_pts_set.add(t_b)
+                    conflict_pts_set.add((t_a, ended_a))
+                    conflict_pts_set.add((t_b, ended_b))
             j += 1
         for other in sources:
             if other == s_a:
@@ -510,70 +579,35 @@ def _reset_conflicts(
                 if hi >= t_a - same_t - 1e-6:
                     ended_b = r_b <= t_a + same_t
                     if ended_a == ended_b and abs(r_a - r_b) > tol:
-                        conflict_pts_set.add(t_a)
+                        conflict_pts_set.add((t_a, ended_a))
                         break
                 k += 1
-    return conflict_intervals, sorted(conflict_pts_set)
+
+    return _merge_intervals(raw_intervals), sorted(conflict_pts_set)
 
 
 def _filter_clean_segments(
     segs: Sequence[_Seg],
-    others: Sequence[str],
-    by_src: Dict[str, Tuple[
-        List[_Seg], List[float],
-        List[Tuple[float, float, Optional[float]]], List[float],
-        List[Tuple[float, float, float]], List[float],
-        List[Tuple[float, float]],
-    ]],
-    reset_conflicts: Tuple[Sequence[Tuple[float, float]], Sequence[float]] = ((), ()),
+    conflicts: Tuple[Sequence[Tuple[float, float]], Sequence[Tuple[float, bool]]] = ((), ()),
 ) -> List[_Seg]:
-    """Keep segments free of cross-source value/reset conflicts.
+    """Keep segments free of account-wide cross-source value/reset conflicts.
 
     Transitions are atomic (dropped on any conflict). Plateaus carve out exact
-    overlapping conflicting segments / reset spans and drop on any standalone
-    conflicting observation without artificial padding. Account-wide known
-    reset conflicts apply to every source, including sources with no reset date.
+    overlapping conflict intervals and drop on any standalone conflict point
+    not covered by those exclusions, without artificial padding.
     """
     same_t = qs.SAME_INSTANT_SEC
-    rc_ints, rc_pts = reset_conflicts
-    rc_ends = [hi for _lo, hi in rc_ints]
+    c_ints, c_pts = conflicts
+    c_ends = [hi for _lo, hi in c_ints]
+    c_pt_ts = [pt[0] for pt in c_pts]
     kept: List[_Seg] = []
     for seg in segs:
         exclusions: List[Tuple[float, float]] = []
         drop = False
-        for other in others:
-            osegs, oseg_ends, _oobs, _oobs_ts, orspans, omax_hi, _orpts = by_src[other]
-            j = bisect.bisect_left(oseg_ends, seg.t0 - same_t - 1e-6)
-            while j < len(osegs) and osegs[j].t0 <= seg.t1 + same_t + 1e-6:
-                ob_seg = osegs[j]
-                if _segments_conflict(seg, ob_seg):
-                    o0, o1 = max(seg.t0, ob_seg.t0), min(seg.t1, ob_seg.t1)
-                    if seg.is_plateau and o1 > o0 + 1e-6:
-                        exclusions.append((o0, o1))
-                    else:
-                        drop = True
-                        break
-                j += 1
-            if drop:
-                break
-            if seg.resets_at is not None:
-                j = bisect.bisect_left(omax_hi, seg.t0 + 1e-6)
-                while j < len(orspans) and orspans[j][0] < seg.t1 - 1e-6:
-                    lo, hi, r_other = orspans[j]
-                    if (hi > seg.t0 + 1e-6
-                            and abs(seg.resets_at - r_other) > qs.RESET_TOLERANCE_SEC):
-                        if seg.is_plateau:
-                            exclusions.append((max(seg.t0, lo), min(seg.t1, hi)))
-                        else:
-                            drop = True
-                            break
-                    j += 1
-                if drop:
-                    break
-        if not drop and rc_ints:
-            j = bisect.bisect_left(rc_ends, seg.t0 + 1e-6)
-            while j < len(rc_ints) and rc_ints[j][0] < seg.t1 - 1e-6:
-                lo, hi = rc_ints[j]
+        if c_ints:
+            j = bisect.bisect_left(c_ends, seg.t0 + 1e-6)
+            while j < len(c_ints) and c_ints[j][0] < seg.t1 - 1e-6:
+                lo, hi = c_ints[j]
                 if hi > seg.t0 + 1e-6:
                     if seg.is_plateau:
                         exclusions.append((max(seg.t0, lo), min(seg.t1, hi)))
@@ -584,22 +618,14 @@ def _filter_clean_segments(
         if drop:
             continue
         merged_excl = _merge_intervals(exclusions)
-        for other in others:
-            _osegs, _oseg_ends, oobs, oobs_ts, _orspans, _omax_hi, _orpts = by_src[other]
-            j = bisect.bisect_left(oobs_ts, seg.t0 - same_t - 1e-6)
-            while j < len(oobs) and oobs_ts[j] <= seg.t1 + same_t + 1e-6:
-                ot, oy, ores = oobs[j]
-                if _point_vs_seg_conflict(ot, oy, ores, seg):
-                    if not seg.is_plateau or not _in_intervals(ot, merged_excl, same_t + 1e-6):
-                        drop = True
-                        break
-                j += 1
-            if drop:
-                break
-        if not drop and rc_pts:
-            j = bisect.bisect_left(rc_pts, seg.t0 - same_t - 1e-6)
-            while j < len(rc_pts) and rc_pts[j] <= seg.t1 + same_t + 1e-6:
-                if not seg.is_plateau or not _in_intervals(rc_pts[j], merged_excl, same_t + 1e-6):
+        if c_pts:
+            j = bisect.bisect_left(c_pt_ts, seg.t0 - same_t - 1e-6)
+            while j < len(c_pts) and c_pt_ts[j] <= seg.t1 + same_t + 1e-6:
+                pt_t, pt_ended = c_pts[j]
+                if seg.resets_at is not None and (seg.resets_at <= pt_t + same_t) != pt_ended:
+                    j += 1
+                    continue
+                if not seg.is_plateau or not _in_intervals(pt_t, merged_excl, same_t + 1e-6):
                     drop = True
                     break
                 j += 1
@@ -649,12 +675,10 @@ def _account_segments(
             max_hi.append(hi_so_far)
         evidence[src] = (segs, [s.t1 for s in segs], obs, [o[0] for o in obs], rspans, max_hi, rpts)
 
-    reset_conflicts = _reset_conflicts(sources, evidence)
+    conflicts = _account_conflicts(sources, evidence)
     clean_by_src: Dict[str, List[_Seg]] = {}
     for src in sources:
-        kept = _filter_clean_segments(
-            evidence[src][0], [o for o in sources if o != src], evidence, reset_conflicts
-        )
+        kept = _filter_clean_segments(evidence[src][0], conflicts)
         if kept:
             clean_by_src[src] = kept
 
@@ -763,7 +787,8 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
         })
 
     win_start = now - TYPICAL_LOOKBACK_SEC
-    if view.truncated_at.get(calc.key, -math.inf) >= win_start - 2 * qs.SIGHTING_GAP_SEC - 1e-6:
+    typical_since = qs.typical_history_since(now)
+    if view.truncated_at.get(calc.key, -math.inf) >= typical_since:
         return _finish({
             "state": "unavailable", "reason": "history_truncated",
             "rate_per_hour": None, "valid_seconds": 0, "valid_hours": 0.0,
@@ -783,15 +808,21 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
     raw_ts = list(view.sweeps)
     raw_ok = (list(view.sweep_ok) if view.sweep_ok is not None and len(view.sweep_ok) == len(raw_ts)
               else [True] * len(raw_ts))
-    failed = sorted(t for t, ok in zip(raw_ts, raw_ok) if not ok and t <= now + 1e-6)
+    failed = sorted(t for t, ok in zip(raw_ts, raw_ok) if not ok and typical_since - 1e-6 <= t <= now + 1e-6)
 
-    # Gather runs strictly for calc.key and attach all fresh recordable live
-    # readings per source (same filter as the collector), falling back to
-    # calc.measured for synthetic SummaryStates with empty norm.readings.
+    # Gather runs strictly for calc.key from the common relevant interval
+    # [typical_since, now] (matching HistoryStore.read Pass 1, including edge
+    # continuity readings into [now - 48h, now] while ignoring older Pass-2 /
+    # left-edge rows that can differ between 24h and 7d under MAX_READ_ROWS).
+    # Attach all fresh recordable live readings per source (same filter as the
+    # collector), falling back to calc.measured for synthetic SummaryStates
+    # with empty norm.readings.
     by_sub: Dict[str, List[qs.Run]] = {}
     for (sub, series), runs in view.runs.items():
         if series == calc.key and runs:
-            by_sub[sub] = list(runs)
+            rel = [r for r in runs if r.last_seen >= typical_since]
+            if rel:
+                by_sub[sub] = rel
 
     pseudo_by_subject: Dict[Tuple[str, str], str] = {
         (m.harness, m.subject_id): m.pseudo
@@ -1133,7 +1164,13 @@ def simulate_pool(
                     for i in run:
                         left[i] *= factor
         vertices.append((at, sum(left)))
-        usable_before[at] = usable(at)
+        # Immediately before ``at``: accounts whose hold ends at ``at`` are
+        # still blocked until the unlock happens, so their balance is not part
+        # of the pre-unlock margin.
+        usable_before[at] = sum(
+            left[i] for i in range(len(items))
+            if i not in unk and not (items[i][2] is not None and items[i][2] >= at - 1e-9)
+        )
 
         refilled_before = refilled_any
         resetting = [i for i, (_r, res, _b) in enumerate(items) if res is not None and res == at]

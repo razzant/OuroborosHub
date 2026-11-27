@@ -10,6 +10,7 @@ import pytest
 import plugin
 import quota_analytics as qa
 import quota_history
+import quota_joint as qj
 import quota_summary as qs
 from test_reserve import FIVE_H, NOW, WEEK, constraint, payload, profile, snap
 
@@ -178,3 +179,36 @@ def test_prefix_scoped_windows_stay_out_of_the_default_joint(tmp_path):
     scoped = plugin.reserve_view(store, data, NOW, NOW, harness="claude", analytics=True, model="gemini-3")
     labels = [w["label"] for w in scoped["chart"]["analytics"]["joint"]["windows"]]
     assert "Gemini weekly" in labels and "five_hour" in labels
+
+
+def test_combined_later_counts_distinct_accounts_not_windows():
+    """In Combined (_scenario with joint=True), one account with two windows resetting
+    simultaneously at +48h (past the 24h span) counts 1 account in later, matching in-span
+    schedule counting by account identity rather than number of windows."""
+    end_24h = NOW + 24 * H
+    end_7d = NOW + 7 * 24 * H
+    r48 = NOW + 48 * H
+    w_short = qj.Win("claude|five_hour|18000|-", 0.5, r48, None, 1.0, "claude|five_hour|18000|-")
+    w_week = qj.Win("claude|seven_day|604800|-", 0.6, r48, None, 1.0, "claude|five_hour|18000|-")
+    tr_24 = qj.simulate([w_short, w_week], NOW, end_24h, False)
+    tr_7d = qj.simulate([w_short, w_week], NOW, end_7d, False)
+
+    sc_24 = qa._scenario([(tr_24, [w_short, w_week])], 0, True, NOW, end_24h, "24h")
+    sc_7d = qa._scenario([(tr_7d, [w_short, w_week])], 0, True, NOW, end_7d, "7d")
+    assert sc_7d["schedule"][0]["accounts"] == 1
+    assert sc_24["later"] == {"at": round(r48), "accounts": 1, "more_events": 0, "more_accounts": 0}, sc_24["later"]
+
+    # Two accounts each with two windows resetting simultaneously at +48h -> 2 accounts, 0 more.
+    sc_two = qa._scenario([(tr_24, [w_short, w_week]), (tr_24, [w_short, w_week])], 0, True, NOW, end_24h, "24h")
+    assert sc_two["later"] == {"at": round(r48), "accounts": 2, "more_events": 0, "more_accounts": 0}, sc_two["later"]
+
+    # Account A resets at +30h and +72h; Account B resets at +72h -> first event 1 account, 1 more event, 1 more distinct account.
+    r30, r72 = NOW + 30 * H, NOW + 72 * H
+    a_wins = [qj.Win("k1", 0.5, r30, None, 1.0, "k1"), qj.Win("k2", 0.6, r72, None, 1.0, "k1")]
+    b_wins = [qj.Win("k1", 0.5, r72, None, 1.0, "k1"), qj.Win("k2", 0.6, r72, None, 1.0, "k1")]
+    sc_stag = qa._scenario(
+        [(qj.simulate(a_wins, NOW, end_24h, False), a_wins),
+         (qj.simulate(b_wins, NOW, end_24h, False), b_wins)],
+        0, True, NOW, end_24h, "24h",
+    )
+    assert sc_stag["later"] == {"at": round(r30), "accounts": 1, "more_events": 1, "more_accounts": 1}, sc_stag["later"]
