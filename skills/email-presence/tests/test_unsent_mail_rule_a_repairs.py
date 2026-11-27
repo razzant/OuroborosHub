@@ -24,6 +24,7 @@ from lib.host_adapter import _DRAFT_POLICY_UNREAD
 from lib.owner_notice import OwnerNotifier, tell_owner
 from lib.runtime import EmailRuntime
 from lib.store import EmailStore, drafted_notice, waiting_notice
+from test_binding_core import core_host  # noqa: F401
 from test_gmail_transition import HOST, Host, mailbox
 from test_unsent_mail_rule_a import ADDRESS, Gmail, Notify, draft_raw, mail, notices, queue, unb64  # noqa: F401
 
@@ -600,6 +601,69 @@ def test_a_drafts_place_that_holds_writes_keeps_the_mail_waiting_and_tells_the_o
     assert mail.runtime.process_uncertain()
     assert mail.store.receipt('lost')['unknown_outcome'] == 'drafted' and len(mail.gmail.posts('/drafts')) == 1
     assert [line['kind'] for line in notices(mail.store)] == ['drafted']  # the held line, never posted, ended with it
+
+
+ROOT = '<conversation@example.test>'
+
+
+def test_rule_a_asks_the_policy_of_a_replys_conversation_as_email_draft_does(mail):
+    """A reply of unknown outcome is put back in Drafts within its own conversation, so the Place of that conversation
+    is asked too, with its thread, as email_draft asks it: while it holds writes, the mail waits and the owner is told
+    once; once it allows them, the draft is saved (Hub #382 second review, P5)."""
+    asked, policy = [], {ROOT: 'Draft not saved: Work thread is paused'}
+
+    def draft_folder_hold(account_id, folder, *, thread_id=''):  # only the conversation, asked with its thread, holds
+        asked.append((account_id, folder, thread_id))
+        return policy.get(folder, '') if thread_id == folder else ''
+
+    mail.runtime.host = SimpleNamespace(draft_folder_hold=draft_folder_hold)
+    queue(mail.store, 'reply', unknown=True, references=[ROOT], in_reply_to=ROOT,
+          reporting={'account_id': 'google:one', 'sender': ADDRESS, 'gmail_thread_id': 'provider-thread-one'})
+    assert mail.runtime.process_uncertain()
+    assert ('google:one', ROOT, ROOT) in asked and ('google:one', 'Drafts', '') in asked
+    assert 'unknown_outcome' not in mail.store.receipt('reply') and mail.gmail.posts('/drafts') == []
+    line, = notices(mail.store)
+    assert line['kind'] == 'held' and 'may already have gone out' in line['text'] and 'Work' not in line['text']
+    policy[ROOT] = ''  # the owner sets that conversation's Place active again
+    due_now(mail.store)
+    assert mail.runtime.process_uncertain()
+    assert mail.store.receipt('reply')['unknown_outcome'] == 'drafted' and len(mail.gmail.posts('/drafts')) == 1
+
+
+@pytest.mark.parametrize('target', ['Drafts', 'DRAFT', ROOT])
+def test_a_place_the_owner_pauses_keeps_rule_a_from_writing_a_reply_there(mail, core_host, target):
+    """The real Host's Places: the owner pauses the Place of Gmail's Drafts, or of the very conversation the reply was
+    sent in, while its outcome is unknown. email_draft would be refused there; rule A saves no draft either until the
+    owner sets it active again (Hub #382 second review, P5)."""
+    from dataclasses import replace
+    places, drive, adapter = core_host
+    account = 'google:one'
+    places.connect_place(drive, connector='email-presence', provider='email', account_id=account, state='active')
+    place = places.connect_place(drive, connector='email-presence', provider='email', account_id=account,
+                                 conversation_id=target, state='active')
+    if target == ROOT:
+        places._write(drive, place.place_id, lambda row: replace(row, thread_id=ROOT))
+    mail.runtime.host = adapter
+    item = queue(mail.store, 'reply', references=[ROOT], in_reply_to=ROOT,
+                 reporting={'account_id': account, 'gmail_thread_id': 'provider-thread-one'})
+
+    def answer_lost(request):
+        if request.url.path == '/mail/messages/send':
+            raise httpx.ReadTimeout('no answer', request=request)
+        return mail.gmail(request)
+
+    with httpx.Client(transport=httpx.MockTransport(answer_lost)) as wire:
+        mail.runtime.client.http = wire
+        assert mail.runtime.process_outbox()
+    mail.runtime.client.http = mail.http
+    assert mail.store.receipt(item.request_id)['state'] == 'uncertain'
+    due_now(mail.store)
+    places.edit_place(drive, place.place_id, 'set_state', author='owner', state='paused')
+    assert mail.runtime.process_uncertain()
+    assert mail.gmail.posts('/drafts') == [] and 'unknown_outcome' not in mail.store.receipt(item.request_id)
+    places.edit_place(drive, place.place_id, 'set_state', author='owner', state='active')
+    due_now(mail.store)
+    assert mail.runtime.process_uncertain() and len(mail.gmail.posts('/drafts')) == 1
 
 
 def test_a_drafts_policy_that_cannot_be_read_now_is_asked_again_quietly(mail):

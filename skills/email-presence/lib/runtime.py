@@ -613,7 +613,7 @@ class EmailRuntime:
                 self.store.settle_uncertain(item, "sent", receipt=details)
                 return True
             if found is None:
-                hold = self._drafts_hold()
+                hold = self._drafts_hold(item)
                 if hold:
                     # A Place (or this skill's access) keeps Mail from writing these Drafts: it waits, and the owner, told
                     # once, decides (allow writing there, or delete it).
@@ -639,15 +639,21 @@ class EmailRuntime:
             self.store.defer_uncertain(item, getattr(exc, "mail_diagnostic", None) or type(exc).__name__)
         return True
 
-    def _drafts_hold(self):
-        """What the Places of this mailbox's Drafts say about saving a draft there now, asked as email_draft asks for both
-        names of Gmail's Drafts: "" when they allow it, the hold when a Place or this skill's access refuses it, None while
-        the policy cannot be read."""
+    def _drafts_hold(self, item):
+        """What the Places say about saving a draft of `item` in this mailbox's Drafts now, asked as email_draft asks: both
+        names of Gmail's Drafts, and for a reply the conversation it is saved into (its root and the conversation its
+        headers emit, each with its thread). "" when they allow it, the hold when a Place or this skill's access refuses
+        it, None while a policy cannot be read."""
         check = getattr(self.host, "draft_folder_hold", None)
         if check is None:
             return ""
-        for folder in ("DRAFT", "Drafts"):
-            hold = check(self.account, folder, thread_id="")
+        targets = [("DRAFT", ""), ("Drafts", "")]
+        if item.in_reply_to or item.references:
+            root = conversation_root(references=item.references, in_reply_to=item.in_reply_to, message_id=item.message_id)
+            emitted = emitted_conversation(item.in_reply_to, item.references, item.message_id)
+            targets += [(conversation, conversation) for conversation in dict.fromkeys((root, emitted)) if conversation]
+        for target, thread in targets:
+            hold = check(self.account, target, thread_id=thread)
             if hold == _DRAFT_POLICY_UNREAD:
                 return None
             if hold:

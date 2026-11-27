@@ -71,8 +71,9 @@
   (envelope with Bcc, body, attachments, thread, Message-ID) is saved in that mailbox's
   Drafts. A mail sent from an existing draft is put back as that draft was queued: Mail
   keeps the draft's source and files when it queues it. The draft is saved only once the
-  Places of that mailbox's Drafts allow writing there, asked as email_draft asks; while a
-  Place or this skill's access holds them, the mail waits and the owner is told once.
+  Places of that mailbox's Drafts, and for a reply those of its conversation (asked with
+  its thread), allow writing there, asked as email_draft asks; while a Place or this
+  skill's access holds them, the mail waits and the owner is told once.
   Nothing is drafted in another mailbox. The owner is told once, in one line naming the
   subject and the mail's request_id: "The email ... (request_id ...) is in Drafts of ...:
   check it and send it". Gmail may give a sent message a Message-ID of its own, so a

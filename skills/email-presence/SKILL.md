@@ -251,10 +251,11 @@ remain unchanged and delivery additionally checks their emitted scope.
    or Spam, proves nothing; the search asks for sent copies, Trash included, and
    reads every page of its answer); otherwise one draft of it (its envelope with Bcc, body,
    attachments and thread; a mail sent from a draft is put back as that draft was
-   queued) is kept in that mailbox's Drafts, once the Places of its Drafts allow
-   writing there as they do for email_draft, and the owner is told once to check it
-   and send it. While a Place or this skill's access keeps Mail from writing those
-   Drafts, the mail waits and the owner is told so once. Nothing is drafted in
+   queued) is kept in that mailbox's Drafts, once the Places of its Drafts, and for a
+   reply those of its conversation (asked with its thread), allow writing there as
+   they do for email_draft, and the owner is told once to check it and send it. While
+   a Place or this skill's access keeps Mail from writing there, the mail waits and
+   the owner is told so once. Nothing is drafted in
    another mailbox. These notices go through the host's `notify_owner` (one System row
    in Main, mirrored to the owner's Telegram) and name the mail by its subject and its
    `request_id` (left out only when it cannot be shown whole on one line); until the

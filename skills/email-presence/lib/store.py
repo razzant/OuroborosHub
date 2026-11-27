@@ -100,7 +100,7 @@ def unresolved_notice(subject, address, request_id=""):
 
 def draft_held_notice(subject, address, request_id=""):
     return _notice('The email "{subject}"{ref} may already have gone out from {address}; it is put in Drafts there once '
-                   "a Place or this skill's access in Ouroboros allows writing Drafts: check Sent, or ask to delete it.",
+                   "Ouroboros allows writing it there (a Place, or this skill's access): check Sent, or ask to delete it.",
                    subject, address, request_id)
 
 
