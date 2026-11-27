@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4dc1ce1d701d61553ff2ce6b3fa6426f03fb8130",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/f2d7dba5716f026381d77876711b98e1ee5f5e25",
   "schema_version": 1,
   "skills": [
     {
@@ -2641,13 +2641,13 @@
       "files": [
         {
           "path": "README.md",
-          "sha256": "553a8f50d0416e13e55f6094e8f08fabbcfb1d62257e1d3f980382741b8678f9",
-          "size": 18962
+          "sha256": "5f7e047be90ef8c81968774f6056f87b10fd298a9a08e4c5048a93606a3a48e6",
+          "size": 25364
         },
         {
           "path": "SKILL.md",
-          "sha256": "d7b7afcfe5a76f40e3e967f9f3fe57ff6588866be92c7ef4a1d0176cf64205d7",
-          "size": 5391
+          "sha256": "0bafd2f34f230781f3fa385145f1283dd4ebc2c0a1c7d9e94956a7912f147dbe",
+          "size": 10106
         },
         {
           "path": "__init__.py",
@@ -2656,18 +2656,23 @@
         },
         {
           "path": "auth.py",
-          "sha256": "3d25caf14ab1596c14e248bf9e0a8ad1a0f08e4a21ac0036ce3c6243907902b8",
-          "size": 11340
+          "sha256": "c031d1093f1746ac913d1abc44dc0e44bf7ded61a7391ee39d947e26a0b316b4",
+          "size": 13005
         },
         {
           "path": "client.py",
-          "sha256": "992404e76b32cb5812f23563ecf94027be6621377440809b34377fac904471eb",
-          "size": 30697
+          "sha256": "731c836769dc611c4c40d675b0c8e65218f07da8b728245243f74a83e1b66623",
+          "size": 32468
+        },
+        {
+          "path": "host_sign_in.py",
+          "sha256": "1a78481bf85c0762e60c9af79a081e611434878560d4c7b048ae273370a6792b",
+          "size": 8399
         },
         {
           "path": "plugin.py",
-          "sha256": "360bffe739aaf1078094d9faed12c34e61d0cf5fc9017b21e82d75616bdaf62e",
-          "size": 38776
+          "sha256": "f1529d7b9b5d812e15ccc1886df15ee446564da243a33cfcaa3127ac380da738",
+          "size": 49088
         },
         {
           "path": "results.py",
@@ -2681,18 +2686,23 @@
         },
         {
           "path": "tests/isolated_signing_probe.py",
-          "sha256": "cff980dad64336edbb3d63f5066a687c10089f0c2189ae9e0342e33f63c535d2",
-          "size": 10794
+          "sha256": "b7931838ff978b1fb1c50cde032b8608e60245166743d3393114296e330e6189",
+          "size": 11020
         },
         {
           "path": "tests/test_actor_result_readback.py",
-          "sha256": "0cb0e65fcdc574be5cfd67d2c41b9c365caa90a4cd1a9e857bc1b17cd05fceb9",
-          "size": 5325
+          "sha256": "17363098179660ee4a773763e575309d4ef58ad07991323875f9e8481f3f8e96",
+          "size": 4941
         },
         {
           "path": "tests/test_google_workspace.py",
           "sha256": "04fbd2015e286eacdce8f5a1660891044a59db4d79306101bb152bc43941492c",
           "size": 35142
+        },
+        {
+          "path": "tests/test_host_sign_in.py",
+          "sha256": "1f9def0c7251dc524a7669c9fba833d05e27a74d47db1c657bb06e3be5ed0130",
+          "size": 77023
         },
         {
           "path": "tests/test_isolated_signing.py",
@@ -2706,13 +2716,18 @@
         },
         {
           "path": "tests/test_user_oauth.py",
-          "sha256": "ed24717be8e9546a3a6cfc2161425c532f686a91fdd24e5e11557c216aae2e75",
-          "size": 15965
+          "sha256": "95b05db79c5f385799cf3facb3439f8d99acdc00551ea58616def35a820e5aba",
+          "size": 16192
         },
         {
           "path": "tests/workspace_fixtures.py",
           "sha256": "643ee2302d8ebd3e2d797c7f404371a5b693f09d388c6d8c9a93e265fc0cb734",
           "size": 914
+        },
+        {
+          "path": "user_oauth.py",
+          "sha256": "f218602d64ca8475143a0ba952359246f7e8fa396cb90255b01b09cce2cc210c",
+          "size": 66516
         }
       ],
       "install_specs": [
@@ -2722,7 +2737,7 @@
       "name": "google-workspace",
       "slug": "google-workspace",
       "type": "extension",
-      "version": "0.3.0"
+      "version": "0.4.0"
     },
     {
       "description": "Comprehensive, charming, and fully playable Happy Farm game widget with crops, livestock, economy, orders, day-night/weather cycles, and audio.",
