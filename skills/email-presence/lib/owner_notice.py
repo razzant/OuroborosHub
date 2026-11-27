@@ -13,6 +13,7 @@ import os
 
 import httpx
 
+from .accounts import AccountError
 from .host_adapter import _SkillToken, _loopback
 from .store import EmailStore
 
@@ -94,7 +95,9 @@ def signed_out(account):
 def tell_owner(accounts, notifier):
     """One pass over every mailbox with a store: a signed-out Gmail mailbox gets its waiting notices (EmailStore
     note_waiting); then each due notice that still holds is posted (EmailStore due_notices ends the others unposted).
-    Returns how many the host confirmed."""
+    Each is read again just before its own post, with its mailbox's sign-in as it is then: its mail may have gone, been
+    deleted or settled, or the mailbox signed in again, while the host took the line before it. Returns how many the
+    host confirmed."""
     supported, confirmed = None, 0
     for account in accounts.list():
         directory = accounts.mail_dir(account)
@@ -112,7 +115,14 @@ def tell_owner(accounts, notifier):
                 supported = notifier.supported()
             if not supported:
                 continue  # read again on the next pass; an older host leaves them in the status
-            for key, notice in due:
+            for key, _read in due:
+                try:
+                    away = signed_out(accounts.get(account["id"]))
+                except AccountError:
+                    break  # the mailbox was removed meanwhile: nothing more is said about its mail
+                notice = store.notice_to_post(key, signed_out=away)
+                if notice is None:
+                    continue  # it no longer holds (ended unposted) or is no longer due
                 outcome, wait = notifier.post(notice["text"], notice.get("attempts"))
                 store.finish_notice(key, outcome, wait, "" if outcome == "sent" else outcome)
                 confirmed += outcome == "sent"

@@ -1001,6 +1001,20 @@ class EmailStore:
                 pending = [(key, notice) for key, notice in pending if key not in ended]
         return [(key, notice) for key, notice in pending if notice["available_at"] <= now]
 
+    def notice_to_post(self, key, *, signed_out=False):
+        """The notice under `key` as it is now, read again just before it is posted (`signed_out`: its mailbox as it is
+        now): None unless it is still pending, due and still says what is true (_holds); one that no longer holds is
+        ended unposted, in this same write."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            notice = self._get(db, key)
+            if notice is None or notice.get("state") != "pending" or notice["available_at"] > time.time():
+                return None
+            if not self._holds(db, notice, signed_out):
+                db.execute("DELETE FROM runtime_state WHERE key=?", (key,))
+                return None
+            return notice
+
     @staticmethod
     def _pending_notices(db):
         rows = db.execute("SELECT key,value FROM runtime_state WHERE key LIKE ? ORDER BY updated_at,key",

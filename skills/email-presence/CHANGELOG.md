@@ -83,7 +83,8 @@
   mail's receipt, and is posted later; a 503 from the host is posted again after a pause.
   A line is posted only while it is still true: one saying a mail waits ends unposted, in
   the same write, once the mail goes, is deleted or settled, or once its mailbox is
-  signed in again. A send whose worker stopped during it is known to be of unknown
+  signed in again; each line is read again, with its mailbox's sign-in, just before it is
+  posted, so a change made while the host took the line before it is seen. A send whose worker stopped during it is known to be of unknown
   outcome also while its mailbox is signed out.
 - "Send" and "delete" in chat are the mind's: `email_send` with a Gmail `draft_id` sends
   an existing draft as it is now (the Host checks its actual recipients and Safety reads

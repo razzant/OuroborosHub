@@ -260,7 +260,8 @@ remain unchanged and delivery additionally checks their emitted scope.
    host confirms one (no grant yet, an older host, the host away) it is shown in the
    mailbox's status and the mail's receipt and posted later, only while it is still
    true: a waiting line ends unposted once its mail went, was deleted or settled, or
-   its mailbox is signed in again. The owner's "send" or "delete" in chat is for the
+   its mailbox is signed in again, and each line is read again, with its mailbox's
+   sign-in, just before it is posted. The owner's "send" or "delete" in chat is for the
    mind to apply: `email_send` with `draft_id` sends such a draft as it is then,
    `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
    discard_queued sends now or drops a mail that has not gone out; `email_accounts`

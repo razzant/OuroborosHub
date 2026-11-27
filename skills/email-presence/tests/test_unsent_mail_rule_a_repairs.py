@@ -5,6 +5,7 @@ for access or for a policy never fails a mail or sends it a second time.
 Fictional mailboxes, an inert scripted host and an inert recording Gmail, as in test_unsent_mail_rule_a: nothing here
 reaches Google, a real host or a real mailbox, and a "send" is only recorded.
 """
+import json
 import threading
 import time
 from email import message_from_bytes
@@ -97,6 +98,31 @@ def test_a_waiting_line_not_yet_posted_is_dropped_once_its_mailbox_is_signed_in_
     host = Notify()
     assert told(mail.accounts, host) == 0 and host.posted == [] and notices(mail.store) == []
     assert mail.store.receipt('queued')['state'] == 'pending'  # it waits for its worker, not for a sign-in
+
+
+@pytest.mark.parametrize('meanwhile', ['deleted', 'signed_in'])
+def test_a_line_is_read_again_just_before_it_is_posted(mail, meanwhile):
+    """Two lines go in one pass. While the host takes the first, the owner deletes the second mail, or the mailbox is
+    signed in again: the second line no longer holds and is never posted from what the pass read before (Hub #382
+    second review, P2)."""
+    queue(mail.store, 'first', subject='First letter')
+    queue(mail.store, 'second', subject='Second letter')
+    saved = mail.accounts.get('google:one')
+    mail.accounts.disconnect('google:one')
+    host = Notify()
+
+    def owner_acts_while_the_first_line_is_posted(request):
+        if request.url.path == '/notify' and 'First letter' in json.loads(request.content)['text']:
+            if meanwhile == 'deleted':
+                dropped = mail.service.mailbox(action='discard_queued', account_id='google:one', request_id='second')
+                assert dropped['ok'] and dropped['receipt']['state'] == 'cancelled'
+            else:
+                sign_in_again(mail, saved)
+        return host(request)
+
+    assert told(mail.accounts, owner_acts_while_the_first_line_is_posted) == 1
+    assert [line for line in host.posted if 'Second letter' in line] == [] and len(host.posted) == 1
+    assert [notice['text'] for notice in notices(mail.store) if 'Second letter' in notice['text']] == []
 
 
 def test_a_sign_in_moving_to_the_host_is_not_a_sign_out(tmp_path, monkeypatch):
