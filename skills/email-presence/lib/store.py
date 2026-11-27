@@ -882,13 +882,18 @@ class EmailStore:
         worker that stopped before its sending began (its lease ran out), is cancelled; its receipt stays, with the mail,
         so replaying the same request_id never queues it again and the mail can still be sent from another mailbox. One
         whose outcome is unknown and not yet settled is never drafted. A mail a worker is on this moment, sent, failed or
-        already settled is left as it is. The result is its receipt, with the mail, and whether it was dropped."""
+        already settled is left as it is.
+
+        The result is its receipt, with the mail; what this very write did: `cancelled` (it had not begun to go out, so
+        it never goes from this mailbox and may be sent from another), `discarded` (its sending had begun and its outcome
+        is unknown: it may already have gone out, and it is no longer looked for) or "" (left as it is); and the state
+        this write found it in. Whatever was read about it before this write says none of that."""
         now = time.time()
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM outbox WHERE request_id=?", (str(request_id),)).fetchone()
             if row is None:
-                return None, False
+                return None, "", ""
             item = self._outbox_item(row)
             leased = bool(row["lease_token"]) and row["lease_until"] > now
             if row["state"] in _QUEUED and not leased:
@@ -896,17 +901,17 @@ class EmailStore:
                 db.execute("UPDATE outbox SET state='cancelled',last_error='Deleted by the owner before it was sent',"
                            "lease_token='',lease_until=0,updated_at=? WHERE id=?", (now, row["id"]))
                 self._freeze_reports(db, row["id"], [email_report(item, "failed", error="Deleted by the owner")])
-                dropped = True
+                done = "cancelled"
             elif _unsettled(row["state"], row["reporting_json"]) and not leased:
                 reporting = {**item.reporting, "reconciled": {"outcome": "discarded", "at": now}}
                 db.execute("UPDATE outbox SET reporting_json=?,updated_at=? WHERE id=?",
                            (json.dumps(reporting), now, row["id"]))
-                dropped = True
+                done = "discarded"
             else:
-                dropped = False
-            if dropped:
+                done = ""
+            if done:
                 self._retire(db, row["request_id"])
-        return self.receipt(request_id, with_letter=True), dropped
+        return self.receipt(request_id, with_letter=True), done, row["state"]
 
     def release_queued(self, request_id, link=None):
         """The owner's "send" for a mail still queued or held (or taken by a worker that stopped before its sending began):

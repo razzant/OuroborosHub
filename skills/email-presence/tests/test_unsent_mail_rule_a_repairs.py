@@ -5,6 +5,7 @@ for access or for a policy never fails a mail or sends it a second time.
 Fictional mailboxes, an inert scripted host and an inert recording Gmail, as in test_unsent_mail_rule_a: nothing here
 reaches Google, a real host or a real mailbox, and a "send" is only recorded.
 """
+import threading
 import time
 from email import message_from_bytes
 from email.message import EmailMessage
@@ -313,6 +314,76 @@ def test_a_mail_whose_outcome_is_unknown_is_never_offered_for_another_mailbox(ma
     drop = mail.service.mailbox(account_id='google:one', action='discard_queued', request_id='lost')
     assert drop['ok'] and drop['receipt']['unknown_outcome'] == 'discarded'
     assert 'may already have gone out' in drop['message'] and 'will not go out' not in drop['message']
+
+
+def test_a_move_is_advised_only_by_the_write_that_took_a_mail_not_yet_begun_off_the_queue(mail, monkeypatch):
+    """Mail advised the mind to delete the mail from the signed-out mailbox first. Before that is carried out, the
+    mailbox signs in again and its worker hands the mail to Gmail, which accepts it, but its answer is lost. The delete's
+    first look still sees the send under way; meanwhile the worker records the outcome as unknown, and the deleting
+    write itself finds it so. Only that write speaks: the mail may already have gone out, nothing advises sending it
+    from another mailbox, and following the answer sends it once in all (Hub #382 second review, P1)."""
+    assert mail.service.send(account_id='google:one', request_id='invoice', subject='Invoice',
+                             to='reader@example.test', body='Fictional invoice')['ok']
+    saved = mail.accounts.get('google:one')
+    mail.accounts.disconnect('google:one')
+    advice = mail.service.mailbox(account_id='google:one', action='send_queued', request_id='invoice')
+    assert 'discard_queued' in advice['error']
+    sign_in_again(mail, saved)
+    accepted, answer_lost = threading.Event(), threading.Event()
+    worked = []
+
+    def accept_then_lose_the_answer(request):
+        response = mail.gmail(request)
+        if request.method == 'POST' and request.url.path == '/mail/messages/send':
+            accepted.set()
+            assert answer_lost.wait(10)
+            raise httpx.ReadTimeout('the accepted send lost its answer', request=request)
+        return response
+
+    read_receipt, seen = EmailStore.receipt, []
+
+    def first_look_then_the_worker(store, request_id, **kwargs):
+        value = read_receipt(store, request_id, **kwargs)
+        seen.append(value['state'])
+        if value['state'] == 'sending':  # the delete looked while the send was under way; the worker ends it now
+            answer_lost.set()
+            worker.join(10)
+            assert worked == [True]
+        return value
+
+    with httpx.Client(transport=httpx.MockTransport(accept_then_lose_the_answer)) as wire:
+        mail.runtime.client.http = wire
+        worker = threading.Thread(target=lambda: worked.append(mail.runtime.process_outbox()))
+        worker.start()
+        try:
+            assert accepted.wait(10)
+            with monkeypatch.context() as patch:
+                patch.setattr(EmailStore, 'receipt', first_look_then_the_worker)
+                taken = mail.service.mailbox(account_id='google:one', action='discard_queued', request_id='invoice')
+        finally:
+            answer_lost.set()
+            worker.join(10)
+            mail.runtime.client.http = mail.http
+    assert seen[0] == 'sending' and taken['ok'] and taken['receipt']['unknown_outcome'] == 'discarded'
+    second_gmail = Gmail()
+    if 'email_send' in taken['message']:  # the mind follows only what the tool answered
+        with httpx.Client(transport=httpx.MockTransport(second_gmail)) as second_http:
+            second = second_mailbox(mail, monkeypatch, second_http)
+            letter = taken['receipt']['letter']
+            assert mail.service.send(account_id='google:two', request_id='invoice',
+                                     **{key: letter[key] for key in ('to', 'cc', 'bcc', 'subject', 'body')})['ok']
+            drain(mail, second, second_http)
+    assert (len(mail.gmail.posts('/messages/send')), len(second_gmail.posts('/messages/send'))) == (1, 0)
+    assert 'may already have gone out' in taken['message'] and 'will not go out' not in taken['message']
+    assert 'will not go out' in advice['error']  # the advice itself waits for that answer
+
+
+def test_a_delete_that_finds_the_send_under_way_warns_that_it_may_have_gone_out(mail):
+    queue(mail.store, 'live')
+    assert mail.store.mark_sending(mail.store.claim_outbox(lease_seconds=300))  # its worker is sending it this moment
+    refused = mail.service.mailbox(account_id='google:one', action='discard_queued', request_id='live')
+    assert refused['code'] == 'not_discardable' and 'may already have gone out' in refused['error']
+    assert 'email_send' not in refused['error'] and mail.store.receipt('live')['state'] == 'sending'
 
 
 def test_a_letter_with_only_blind_recipients_moves_with_them_kept_blind(mail, monkeypatch):

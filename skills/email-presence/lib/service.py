@@ -721,16 +721,22 @@ class MailService:
             unknown = (f"Its sending began and its outcome is unknown: it may already have gone out from "
                        f"{account['address']}, so Mail never sends it again")
             if action == "discard_queued":
-                receipt, dropped = store.discard_queued(request_id)
-                if dropped and began:
-                    message = (unknown + ". It is no longer looked for in Sent or put in Drafts; its receipt stays.")
-                elif dropped:
-                    message = ("It will not go out from this mailbox. Its receipt stays, with the mail in `letter`, so it "
-                               "can be sent from another mailbox with email_send.")
-                return {"ok": dropped, "account_id": account["id"], "request_id": request_id, "receipt": receipt,
-                        **({"message": message} if dropped else {
-                            "code": "not_discardable",
-                            "error": "Only a mail that has not gone out can be deleted from the queue; check its receipt."})}
+                # Only what the deleting write itself did speaks: the mail may have begun to go out since it was read above.
+                receipt, done, found = store.discard_queued(request_id)
+                if done == "cancelled":
+                    message = ("It will not go out from this mailbox: it had not begun to. Its receipt stays, with the "
+                               "mail in `letter`, so it can be sent from another mailbox with email_send.")
+                elif done == "discarded":
+                    message = (unknown + ". It is no longer looked for in Sent or put in Drafts; its receipt stays. "
+                               "It is not to be sent from another mailbox.")
+                elif found in ("processing", "sending", "uncertain", "partial"):
+                    error = (f"It was not deleted: its sending began or is under way, so it may already have gone out "
+                             f"from {account['address']}. Mail never sends it again, and it is not to be sent from "
+                             "another mailbox; check its receipt.")
+                else:
+                    error = "Only a mail that has not gone out can be deleted from the queue; check its receipt."
+                return {"ok": bool(done), "account_id": account["id"], "request_id": request_id, "receipt": receipt,
+                        **({"message": message} if done else {"code": "not_discardable", "error": error})}
             if began:
                 return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
                         "receipt": receipt, "error": unknown + (
@@ -755,8 +761,9 @@ class MailService:
                         "error": f"{account['address']} is not signed in to Mail now ({exc}). The mail goes by itself once "
                                  "it is. To send it from another mailbox instead, first discard_queued it here: that "
                                  "takes it off this mailbox's queue, only while it has not begun to go out, and returns "
-                                 "the mail (also in email_receipt); only then send that mail from the other mailbox "
-                                 "with email_send."}
+                                 "the mail (also in email_receipt). Only when it answers that the mail will not go out "
+                                 "from this mailbox, send that mail from the other mailbox with email_send; when it "
+                                 "answers that the mail may already have gone out, it is never sent again."}
             if not store.release_queued(request_id, link):
                 return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
                         "receipt": store.receipt(request_id),
@@ -947,7 +954,7 @@ def register_tools(api, service):
          {**message, "remove_labels": array, "folder_names": array, "message_conversation_id": message_conversation,
           "message_thread_id": message_thread, "label_names": array})
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id (the owner's line and email_accounts' waiting name it): discard_queued drops it (also while the mailbox is signed out) and returns the mail, send_queued sends it now under the mailbox's current sign-in. To send it from another mailbox, discard_queued it here first, then email_send the returned mail there.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id (the owner's line and email_accounts' waiting name it): discard_queued drops it (also while the mailbox is signed out) and returns the mail, send_queued sends it now under the mailbox's current sign-in. To send it from another mailbox, discard_queued it here first and, only when it answers that the mail will not go out from here, email_send the returned mail there; one that may already have gone out is never sent again.",
          {**message, "action": string, "destination": string, "folder_names": array, "flags": array, "remove_flags": {"type": "boolean"},
           "request_id": {"type": "string", "description": "discard_queued and send_queued only: the queued mail's request_id."},
           "add_labels": array, "remove_labels": array, "label_names": array, "label_id": string, "draft_id": string, "properties": {"type": "object"},

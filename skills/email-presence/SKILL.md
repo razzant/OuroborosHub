@@ -540,11 +540,14 @@ remain readable by explicit account_id.
   that account that has not begun to go out (also one a stopped worker had taken),
   also while the mailbox is signed out; its receipt stays with the mail, so replaying
   that request_id never queues it again. To send a waiting mail from another mailbox,
-  drop it here first and then send the mail its result returns from the other
-  mailbox: it can then never go out from both. For a mail of unknown outcome not yet
-  checked it means no draft is made; such a mail may already have gone out and is
-  never offered for sending anywhere. `send_queued` sends a mail that is still queued
-  or held now, under the mailbox's current confirmed sign-in.
+  drop it here first and then, only when that answers that it will not go out from
+  this mailbox, send the mail its result returns from the other mailbox: it can then
+  never go out from both. The answer is what the deleting write itself found, never an
+  earlier look: a mail whose sending began meanwhile (the mailbox signed in again) is
+  answered as possibly gone out. For a mail of unknown outcome not yet checked it
+  means no draft is made; such a mail may already have gone out and is never offered
+  for sending anywhere. `send_queued` sends a mail that is still queued or held now,
+  under the mailbox's current confirmed sign-in.
 - New Hosts advertise presence_place_binding_version=1. The tool captures the
   applicable target binding before enqueue; delivery checks that retained binding
   against current scope. A newly unbound send is distinct from a disconnected

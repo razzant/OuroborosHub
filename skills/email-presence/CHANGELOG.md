@@ -94,7 +94,10 @@
   receipt stays as `cancelled`, with the mail, so a replayed request_id never queues it
   again) and `send_queued` sends one now under the mailbox's current sign-in. To send a
   waiting mail from another mailbox, the mind drops it first and sends the returned mail
-  there, so it never goes from both; a mail of unknown outcome is never offered for that.
+  there only when the drop answers that it will not go out from here, so it never goes
+  from both; that answer is what the deleting write itself found, so a mail whose sending
+  began meanwhile is answered as possibly gone out, and a mail of unknown outcome is never
+  offered for that.
   `email_receipt` names the unknown outcome found (`unknown_outcome`), the draft kept
   (`draft_id`), the owner's notices and, while a mail has not gone out or once it was
   dropped, the mail as queued: To, Cc and Bcc apart (a mail may have only Cc or Bcc
