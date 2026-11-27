@@ -81,9 +81,20 @@ class OwnerNotifier:
         return f"http_{response.status_code}", _pause("busy", attempts)
 
 
+def signed_out(account):
+    """A Gmail mailbox that no sign-in serves now: not connected, and not because Mail reserved its own saved sign-in
+    while that moves to the host (a transfer neither refused nor withdrawn): nobody signed out then, and the next pass of
+    the transfer settles it either way."""
+    if account.get("provider") != "gmail" or account.get("connected"):
+        return False
+    claim = account.get("gmail_transfer") or {}
+    return not (claim.get("generation") and not claim.get("refusal") and not claim.get("withdrawn"))
+
+
 def tell_owner(accounts, notifier):
     """One pass over every mailbox with a store: a signed-out Gmail mailbox gets its waiting notices (EmailStore
-    note_waiting); then each due notice is posted. Returns how many the host confirmed."""
+    note_waiting); then each due notice that still holds is posted (EmailStore due_notices ends the others unposted).
+    Returns how many the host confirmed."""
     supported, confirmed = None, 0
     for account in accounts.list():
         directory = accounts.mail_dir(account)
@@ -91,9 +102,10 @@ def tell_owner(accounts, notifier):
             continue
         store = EmailStore(directory)
         try:
-            if account.get("provider") == "gmail" and not account.get("connected"):
-                store.note_waiting(account.get("address") or account["id"])
-            due = store.due_notices()
+            away = signed_out(account)
+            if away:
+                store.note_waiting(account.get("address") or account["id"], sending_off=account.get("sending") == "off")
+            due = store.due_notices(signed_out=away)
             if not due:
                 continue
             if supported is None:

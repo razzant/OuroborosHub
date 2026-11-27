@@ -182,7 +182,8 @@ def test_a_mail_of_unknown_outcome_goes_to_drafts_once_and_the_owner_is_told_onc
     receipt = mail.store.receipt('lost')
     assert receipt['state'] == 'uncertain' and receipt['unknown_outcome'] == 'drafted' and receipt['draft_id'] == 'draft-1'
     told, = notices(mail.store)
-    assert told['text'] == f'The email "Quarterly numbers" is in Drafts of {ADDRESS}: check it and send it.'
+    assert told['text'] == (f'The email "Quarterly numbers" (request_id lost) is in Drafts of {ADDRESS}: '
+                            'check it and send it.')
     assert receipt['owner_notices'] == [{'kind': 'drafted', 'text': told['text'], 'state': 'pending'}]
     assert mail.gmail.posts('/messages/send') == []  # never sent a second time
     assert not mail.runtime.process_uncertain()
@@ -248,8 +249,8 @@ def test_a_signed_out_mailbox_keeps_its_mail_waiting_and_the_owner_is_told_once(
         assert tell_owner(mail.accounts, notifier) == 2
         assert tell_owner(mail.accounts, notifier) == 0 and len(host.posted) == 2  # told once each
     waiting, unknown = sorted(host.posted, key=lambda text: 'may already' in text)
-    assert waiting == (f'The email "Quarterly numbers" waits for {ADDRESS} to be signed in to Mail again and then goes '
-                       'by itself; you can also ask to send it from another mailbox or to delete it.')
+    assert waiting == (f'The email "Quarterly numbers" (request_id queued) waits for {ADDRESS} to be signed in to Mail '
+                       'again and then goes by itself; you can also ask to send it from another mailbox or to delete it.')
     assert 'may already have gone out' in unknown and 'never sent twice' in unknown
     assert all('private body' not in text and 'reader@' not in text for text in host.posted)
     assert mail.runtime.process_uncertain()  # nothing is searched or drafted while it is signed out: asked again later
@@ -427,8 +428,9 @@ def test_the_companion_tells_the_owner_once_about_mail_waiting_in_a_signed_out_m
             await task
 
         asyncio.run(asyncio.wait_for(exercise(), 20))
-    assert host.posted == [f'The email "Quarterly numbers" waits for {ADDRESS} to be signed in to Mail again and then '
-                           'goes by itself; you can also ask to send it from another mailbox or to delete it.']
+    assert host.posted == [f'The email "Quarterly numbers" (request_id queued) waits for {ADDRESS} to be signed in to '
+                           'Mail again and then goes by itself; you can also ask to send it from another mailbox or to '
+                           'delete it.']
     assert mail.gmail.requests == [] and mail.store.receipt('queued')['state'] == 'pending'
 
 

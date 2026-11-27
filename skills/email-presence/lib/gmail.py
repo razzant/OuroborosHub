@@ -14,11 +14,12 @@ from collections.abc import Mapping
 from functools import cache, wraps
 from email.policy import SMTP
 from email.utils import getaddresses, parseaddr
+from pathlib import Path
 
 import httpx
 
 from .accounts import AccountError, bearer_mark
-from .gmail_host import (CARD, HostNotReached, SignInError, bearer_scopes, credential_owner, host_link, local_grant,
+from .gmail_host import (CARD, SignInError, bearer_scopes, credential_owner, host_link, local_grant,
                          mail_scope, queued_link, sending_link)
 from .google_auth import FULL_MAIL_SCOPE, SETTINGS_SCOPE
 from .client import MailClient
@@ -745,21 +746,24 @@ class GmailClient(MailClient):
     def delivery(self, item=None):
         # Authentication refresh happens before the outbox enters uncertain-send custody. A queued mail goes out under the
         # access named for this pass (EmailRuntime.process_outbox: whichever confirmed sign-in of this mailbox's own Google
-        # account serves it now), and the host refuses any other connection or consent when its bearer is issued.
+        # account serves it now), and the host refuses any other connection or consent when its bearer is issued. A host
+        # that cannot give it now (HostNotReached and any other SignInError) leaves the mail waiting, unsent: the outbox
+        # holds it as it holds a signed-out mailbox's mail, and it goes once the host answers again.
         link = item.reporting.get("gmail_connection") if item is not None else None
         if item is not None and not (isinstance(link, Mapping) and (link.get("host") or link.get("id"))):
             link = self.sending_link()
+        link = link if isinstance(link, Mapping) else None
+        self._delivery_access = self._access_token(change=True, link=link)
         try:
-            self._delivery_access = self._access_token(change=True, link=link if isinstance(link, Mapping) else None)
-        except HostNotReached as exc:
-            # The host the access comes from never connected: nothing was sent, so the queue's ordinary bounded retry
-            # applies, not a hold every 5 seconds for as long as the host is away. Other holds keep waiting as before.
-            raise DeliveryRejected("The Google sign-in host could not be reached; nothing was sent",
-                                   retryable=True, retry_after=30) from exc
-        try:
+            draft = item.reporting.get("gmail_draft") if item is not None else None
+            if isinstance(draft, Mapping):
+                # Before its sending begins (EmailRuntime marks it sending only once this is done): a read that fails
+                # leaves it queued, never of unknown outcome; a draft gone or changed since its check is refused.
+                self._check_draft(draft, link)
             yield self
         finally:
             self._delivery_access = ""
+            self._checked_draft = None
 
     def connection_link(self):
         """The access a mail queued now is recorded with (gmail_host.queued_link)."""
@@ -785,8 +789,8 @@ class GmailClient(MailClient):
 
     def find_submitted(self, item):
         """What this mailbox holds of a queued mail whose submission began and whose outcome is unknown, searched by the
-        Message-ID it went out with: ("sent", receipt) when a message other than a draft carries it, ("draft", draft)
-        when only a draft does (the draft it was sent from, or one saved for it before), else (None, None).
+        Message-ID it went out with: ("sent", receipt) when a message of this mailbox's Sent carries it, ("draft", draft)
+        when a draft does (the draft it was sent from, or one saved for it before), else (None, None).
 
         Gmail search can lag a moment behind a send and Gmail may give a sent message a Message-ID of its own, so an
         empty answer never proves that nothing went out: the store waits before this is asked (EmailStore.RECONCILE_AFTER),
@@ -798,7 +802,9 @@ class GmailClient(MailClient):
             for row in found.get("messages", []):
                 native = self.native_id(row["id"])
                 labels = self._request("GET", "/messages/" + native, params={"format": "minimal"}).get("labelIds") or []
-                if "DRAFT" not in labels:
+                # Only this mailbox's own sent message shows it went out (SENT, also once moved to Trash); a copy that
+                # came in with the same ID (Inbox, Spam) proves nothing, and the search goes on as if nothing was found.
+                if "SENT" in labels:
                     return "sent", {"transport": "gmail_api", "message_id": native,
                                     "thread_id": str(row.get("threadId") or ""), "found": "rfc822msgid"}
         sent_from = item.reporting.get("gmail_draft")
@@ -821,37 +827,67 @@ class GmailClient(MailClient):
     def save_unsent(self, item, link):
         """One Gmail draft, in this same mailbox, of a queued mail whose outcome is unknown and that it does not hold
         (find_submitted): its exact envelope (Bcc kept in the draft's header, as a draft keeps it), body, attachments,
-        thread and Message-ID, so the owner can check and send it from any device and a later search finds it."""
-        message = copy.deepcopy(self.message(item))
-        if item.bcc:
-            message["Bcc"] = ", ".join(item.bcc)
-        payload = {"message": {"raw": base64.urlsafe_b64encode(message.as_bytes(policy=SMTP)).decode().rstrip("=")}}
+        thread and Message-ID, so the owner can check and send it from any device and a later search finds it. A mail sent
+        from an existing draft is put back as that draft was queued (_queued_draft)."""
+        if isinstance(item.reporting.get("gmail_draft"), Mapping):
+            raw = self._queued_draft(item)
+        else:
+            message = copy.deepcopy(self.message(item))
+            if item.bcc:
+                message["Bcc"] = ", ".join(item.bcc)
+            raw = message.as_bytes(policy=SMTP)
+        payload = {"message": {"raw": base64.urlsafe_b64encode(raw).decode().rstrip("=")}}
         if item.reporting.get("gmail_thread_id"):
             payload["message"]["threadId"] = item.reporting["gmail_thread_id"]
         result = self._request("POST", "/drafts", body=payload, **({"link": link} if link else {}))
         return {"id": result["id"], "message_ref": "gmail:" + self.native_id(result["message"]["id"]), "how": "created"}
 
+    @staticmethod
+    def _queued_draft(item):
+        """The source of the draft a mail was sent from, exactly as it was read when it was queued (EmailStore.stage_draft):
+        its HTML, files and every header as they were. One without a Message-ID gets the one the mail was queued with, on
+        a line of its own, so a later search finds what is put back. ValueError when that source was not kept whole."""
+        source = item.reporting["gmail_draft"].get("source")
+        if not isinstance(source, Mapping) or not isinstance(source.get("path"), str) or not source["path"]:
+            raise ValueError("The draft this mail was sent from was not kept as it was queued")
+        raw = Path(source["path"]).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != source.get("sha256"):
+            raise ValueError("The kept source of the draft this mail was sent from is not the one queued")
+        if email.message_from_bytes(raw, policy=email.policy.compat32).get("Message-ID") is None:
+            newline = b"\r\n" if raw.split(b"\n", 1)[0].endswith(b"\r") else b"\n"
+            raw = b"Message-ID: " + item.message_id.encode("ascii") + newline + raw
+        return raw
+
     def draft_letter(self, draft_id):
-        """An existing draft as it is now, for email_send(draft_id): its raw source read with the intake parser, its Bcc,
-        Gmail thread and a digest of the bytes, so the send that follows names exactly the draft that was checked."""
+        """An existing draft as it is now, for email_send(draft_id): its raw source read with the intake parser (its files'
+        bytes included, and the source itself as `_raw_source`, for EmailStore.stage_draft), its Bcc, Gmail thread and a
+        digest of the bytes, so the send that follows names exactly the draft that was checked."""
         draft = self._request("GET", "/drafts/" + _draft_id(draft_id), params={"format": "raw"})
         message = draft.get("message") if isinstance(draft, dict) else None
         if (not isinstance(message, dict) or draft.get("id") != draft_id or not isinstance(message.get("raw"), str)
                 or not message["raw"]):
             raise ValueError("Gmail did not return the selected draft; nothing was queued")
         raw = base64.urlsafe_b64decode(message["raw"] + "=" * (-len(message["raw"]) % 4))
-        letter = parse_message(raw, folder="Gmail", uid=0, max_body_chars=None, missing_id="")
+        letter = parse_message(raw, folder="Gmail", uid=0, max_body_chars=None, missing_id="",
+                               include_attachment_data=True)
         source = email.message_from_bytes(raw, policy=email.policy.default)
         letter.update(bcc=_addresses(source.get("Bcc")), digest=hashlib.sha256(message["raw"].encode()).hexdigest(),
                       provider_thread_id=str(message.get("threadId") or ""))
         return letter
 
-    def _send_draft(self, draft):
-        """Send one existing draft (users.drafts.send) only while it is still the very draft that was checked: a draft
-        changed or deleted since is refused, and nothing is sent."""
+    def _check_draft(self, draft, link=None):
+        """Read the draft a mail sent by draft_id names, with the access it is sent under: refused (DeliveryRejected,
+        nothing was sent) when it is gone or changed since it was checked. A bearer Gmail refuses for this read is replaced
+        once by the next bearer of the same sign-in (the same `link`), and the send presents that one."""
+        path = "/drafts/" + _draft_id(draft["id"])
         try:
-            current = self._request("GET", "/drafts/" + _draft_id(draft["id"]), params={"format": "raw"},
-                                    access=self._delivery_access)
+            try:
+                current = self._request("GET", path, params={"format": "raw"}, access=self._delivery_access, again=False)
+            except GmailError as exc:
+                if exc.status != 401:
+                    raise
+                self._delivery_access = self._access_token(change=True, link=link)  # the refused one is never presented
+                current = self._request("GET", path, params={"format": "raw"}, access=self._delivery_access, again=False)
         except GmailError as exc:
             if exc.status == 404:
                 raise DeliveryRejected("The draft no longer exists; nothing was sent") from exc
@@ -859,6 +895,13 @@ class GmailClient(MailClient):
         raw = ((current.get("message") or {}) if isinstance(current, dict) else {}).get("raw")
         if not isinstance(raw, str) or hashlib.sha256(raw.encode()).hexdigest() != draft.get("digest"):
             raise DeliveryRejected("The draft changed after it was checked; nothing was sent. Check it and send it again")
+        self._checked_draft = draft["id"]
+
+    def _send_draft(self, draft):
+        """Send one existing draft (users.drafts.send) only while it is still the very draft that was checked: delivery()
+        read it before the send began; a caller outside it has it read here."""
+        if getattr(self, "_checked_draft", None) != draft.get("id"):
+            self._check_draft(draft)
         return self._request("POST", "/drafts/send", body={"id": draft["id"]}, access=self._delivery_access)
 
     def transmit(self, _session, message, recipients, *, has_bcc=False, reporting=None):

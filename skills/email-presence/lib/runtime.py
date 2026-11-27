@@ -14,15 +14,16 @@ import httpx
 from .delivery import DeliveryRejected, email_report
 from .accounts import AccountError
 from .gmail import GmailError
-from .host_adapter import (_BINDINGS_CORRUPT, _TARGETS_DIFFER, LEGACY_REPLY_HELD, MATCH_SCOPE, PLACE_MATCH,
-                           RECIPIENT_PLACES, HostBindingTerminalError, HostRetryError, HostTurnStatus,
+from .gmail_host import HostNotReached
+from .host_adapter import (_BINDINGS_CORRUPT, _DRAFT_POLICY_UNREAD, _TARGETS_DIFFER, LEGACY_REPLY_HELD, MATCH_SCOPE,
+                           PLACE_MATCH, RECIPIENT_PLACES, HostBindingTerminalError, HostRetryError, HostTurnStatus,
                            automatic_reply_targets, binding_modes, capture_hold, capture_recipients, match_arguments,
                            place_refusal_hold, recipient_delivery_hold, reply_target_rows, valid_reply_targets)
 from .mime import (MailAddressError, conversation_root, emitted_conversation, envelope_groups, extract_body,
                    reply_chain)
 from .retained import RetainedSourceError, automatic_reply_envelope
 from .settings import SENDING_OFF_HOLD, load_settings
-from .store import RequestIdConflict, drafted_notice, unresolved_notice
+from .store import RequestIdConflict, draft_held_notice, drafted_notice, unresolved_notice
 
 log = logging.getLogger("email_presence")
 # A busy conversation or full capacity refusal resubmits the same event after the
@@ -473,7 +474,7 @@ class EmailRuntime:
         try:
             # A disconnected account raises AccountError, held below; Sending off holds the same item.
             if self._sending_off():
-                self.store.hold_outbox(item, SENDING_OFF_HOLD)
+                self.store.hold_outbox(item, SENDING_OFF_HOLD, kind="sending_off")
                 return True
             if getattr(self.client, "transport", None) == "gmail_api":
                 # Rule A: a mail that has not gone out goes, as before 0.11, under whichever confirmed sign-in of this
@@ -511,7 +512,7 @@ class EmailRuntime:
                 # The account and Place policy may have changed while the provider connection opened. Nothing
                 # was submitted yet, so a hold here is certain and the same item stays queued for release.
                 if self._sending_off():
-                    self.store.hold_outbox(item, SENDING_OFF_HOLD)
+                    self.store.hold_outbox(item, SENDING_OFF_HOLD, kind="sending_off")
                     return True
                 reason = self._delivery_hold(item)
                 if reason:
@@ -549,7 +550,10 @@ class EmailRuntime:
             else:
                 self.store.fail_outbox(item.row_id, item.lease_token, str(exc), reports=[email_report(item, "failed", error=str(exc))])
         except AccountError as exc:
-            self.store.hold_outbox(item, "Held: " + str(exc))
+            # Its access cannot be named or issued now: nothing was sent, and it waits, spending no attempt, for as long
+            # as that lasts. A sign-in host that cannot be reached at all is asked again after a longer pause.
+            self.store.hold_outbox(item, "Held: " + str(exc), kind="access",
+                                   delay=30 if isinstance(exc, HostNotReached) else 5)
         except (smtplib.SMTPDataError, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused) as exc:
             # Typed negative SMTP replies prove this transaction was not accepted.
             code = getattr(exc, "smtp_code", 550)
@@ -587,9 +591,11 @@ class EmailRuntime:
 
         Its own mailbox, while a confirmed sign-in of the same Google account serves it, is searched for it by the
         Message-ID it went out with. Found sent, it is recorded sent. Found as a draft (the one it was sent from, or one
-        saved for it before), that draft is kept; otherwise one draft of it is saved there. Either way the owner is told
-        once where it is. Nothing is drafted in another mailbox: with no confirmed sign-in, or a search or write that
-        fails, it is asked about again later. One mail per call; False when none is due."""
+        saved for it before), that draft is kept; otherwise one draft of it is saved there (a mail sent from a draft is
+        put back as that draft was queued), once the Places of that mailbox's Drafts allow writing there, as for
+        email_draft. Either way the owner is told once where it is, or that it waits for those Places. Nothing is drafted
+        in another mailbox: with no confirmed sign-in, a policy that cannot be read, or a search or write that fails, it
+        is asked about again later. One mail per call; False when none is due."""
         if getattr(self.client, "transport", None) != "gmail_api":
             return False
         item = self.store.claim_uncertain()
@@ -602,7 +608,17 @@ class EmailRuntime:
             if found == "sent":
                 self.store.settle_uncertain(item, "sent", receipt=details)
                 return True
-            if found is None and not item.reporting.get("gmail_draft"):
+            if found is None:
+                hold = self._drafts_hold()
+                if hold:
+                    # A Place (or this skill's access) keeps Mail from writing these Drafts: it waits, and the owner, told
+                    # once, decides (allow writing there, or delete it).
+                    self.store.defer_uncertain(item, hold, notice=draft_held_notice(item.subject, address,
+                                                                                    item.request_id))
+                    return True
+                if hold is None:
+                    self.store.defer_uncertain(item, "The policy of Drafts could not be read now")
+                    return True
                 try:
                     details = self.client.save_unsent(item, link)
                 except (GmailError, ValueError, OSError) as exc:
@@ -611,16 +627,28 @@ class EmailRuntime:
                     if isinstance(exc, AccountError) or (isinstance(exc, GmailError) and exc.status not in (400, 404)):
                         raise
                     self.store.settle_uncertain(item, "unresolved", error=type(exc).__name__,
-                                                notice=unresolved_notice(item.subject, address))
+                                                notice=unresolved_notice(item.subject, address, item.request_id))
                     return True
-            if found is None and not details:
-                # The draft it was to be sent from is gone and Gmail holds no sent copy it can find.
-                self.store.settle_uncertain(item, "unresolved", notice=unresolved_notice(item.subject, address))
-                return True
-            self.store.settle_uncertain(item, "drafted", draft=details, notice=drafted_notice(item.subject, address))
+            self.store.settle_uncertain(item, "drafted", draft=details,
+                                        notice=drafted_notice(item.subject, address, item.request_id))
         except (AccountError, GmailError, httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             self.store.defer_uncertain(item, getattr(exc, "mail_diagnostic", None) or type(exc).__name__)
         return True
+
+    def _drafts_hold(self):
+        """What the Places of this mailbox's Drafts say about saving a draft there now, asked as email_draft asks for both
+        names of Gmail's Drafts: "" when they allow it, the hold when a Place or this skill's access refuses it, None while
+        the policy cannot be read."""
+        check = getattr(self.host, "draft_folder_hold", None)
+        if check is None:
+            return ""
+        for folder in ("DRAFT", "Drafts"):
+            hold = check(self.account, folder, thread_id="")
+            if hold == _DRAFT_POLICY_UNREAD:
+                return None
+            if hold:
+                return hold
+        return ""
 
     async def process_delivery_report(self):
         pending = self.store.next_delivery_report()

@@ -193,7 +193,7 @@ class MailService:
     def queue_status(self, account):
         directory = self.accounts.mail_dir(account)
         if not (directory / "email_presence.sqlite3").exists():
-            return {"inbox": {}, "outbox": {}, "outbox_held": 0, "receipts": [], "delivery_reports_pending": 0}
+            return {"inbox": {}, "outbox": {}, "outbox_held": 0, "receipts": [], "waiting": [], "delivery_reports_pending": 0}
         store = EmailStore(directory)
         return {**store.status(), "poll_health": store.get("poll_health")}
 
@@ -512,8 +512,9 @@ class MailService:
             elif envelope_groups(*supplied) == envelope_groups(queued.to, queued.cc, queued.bcc):
                 # A replay names the queued mailboxes, perhaps spelled as in its first, prepared call.
                 recipients, visible_cc, visible_bcc = queued.to, queued.cc, queued.bcc
-            if not recipients or (not str(body).strip() and not str(html_body).strip()):
-                raise ValueError("to (or reply_all source) and body are required")
+            if not (recipients or visible_cc or visible_bcc) or (not str(body).strip() and not str(html_body).strip()):
+                # A mail may have only Cc or Bcc recipients (one moved from another mailbox keeps them apart).
+                raise ValueError("a recipient (to, cc or bcc, or a reply_all source) and body are required")
             bare = envelope_groups(recipients, visible_cc, visible_bcc)
             prepared, canonical = recipient_arguments(to, cc, bcc, bare)
             if queued is not None:
@@ -655,8 +656,12 @@ class MailService:
                         "retry_arguments": retry}
             if replying and (problem := wire_thread_problem(letter["in_reply_to"], letter["references"])):
                 raise ValueError(problem + '; nothing was queued')
+            # The draft as it is read now, kept whole: rule A puts it back from this source if its send's outcome is
+            # unknown and the draft is gone, and its receipt gives its HTML and files to send from another mailbox.
+            source, files = store.stage_draft(rid, letter)
             reporting = {"version": -1, "account_id": account["id"], "sender": letter["sender"], "origin": tool_origin(ctx),
-                         "gmail_draft": {"id": draft_id, "digest": letter["digest"]}, "reply_source_syntax": 1}
+                         "gmail_draft": {"id": draft_id, "digest": letter["digest"], "source": source},
+                         "reply_source_syntax": 1}
             if letter["provider_thread_id"]:
                 reporting["gmail_thread_id"] = letter["provider_thread_id"]
             if link:
@@ -677,8 +682,9 @@ class MailService:
                 reporting[PLACE_MATCH] = modes
             try:
                 store.enqueue_outbox(request_id=rid, to=groups[0], cc=groups[1], bcc=groups[2], subject=letter["subject"],
-                                     body=letter["body"], in_reply_to=letter["in_reply_to"],
-                                     references=letter["references"], reporting=reporting, hold_reason=hold,
+                                     body=letter["body"], html_body=letter.get("body_html") or "",
+                                     in_reply_to=letter["in_reply_to"], references=letter["references"],
+                                     attachments=files, reporting=reporting, hold_reason=hold,
                                      message_id=letter["message_id"])
             except RequestIdConflict as exc:
                 return {"ok": False, "account_id": account["id"], "code": "request_id_conflict", "error": str(exc), "request_id": rid}
@@ -690,8 +696,11 @@ class MailService:
 
     def queued(self, *, account_id="", action="", request_id="", **unused):
         """email_mailbox discard_queued / send_queued: the owner's "delete" or "send" for one mail of this mailbox that has
-        not gone out, chosen by its request_id (email_receipt names the mail, as a notice does). Both work while the
-        mailbox is signed out of Mail: "delete" cancels it there; "send" needs this mailbox signed in again."""
+        not gone out, chosen by its request_id (the owner's line and email_accounts' `waiting` name it). Both work while
+        the mailbox is signed out of Mail: "delete" takes it off this mailbox's queue, in one write and only while it has
+        not begun to go out, and returns the mail, which can then be sent from another mailbox; "send" needs this mailbox
+        signed in again. A mail whose sending began and whose outcome is unknown is never offered for sending anywhere:
+        it may already have gone out."""
         if not account_id or not request_id:
             raise ValueError(f"{action} takes the mail's account_id and request_id")
         if any(value not in (None, "", [], {}, False) for value in unused.values()):
@@ -704,15 +713,33 @@ class MailService:
                     "error": "No mail with this request_id in this account"}
         store = EmailStore(directory)
         try:
-            if store.receipt(request_id) is None:
+            receipt = store.receipt(request_id)
+            if receipt is None:
                 return {"ok": False, "code": "not_found", "account_id": account["id"], "request_id": request_id,
                         "error": "No mail with this request_id in this account"}
+            began = receipt["state"] in ("uncertain", "partial")
+            unknown = (f"Its sending began and its outcome is unknown: it may already have gone out from "
+                       f"{account['address']}, so Mail never sends it again")
             if action == "discard_queued":
                 receipt, dropped = store.discard_queued(request_id)
+                if dropped and began:
+                    message = (unknown + ". It is no longer looked for in Sent or put in Drafts; its receipt stays.")
+                elif dropped:
+                    message = ("It will not go out from this mailbox. Its receipt stays, with the mail in `letter`, so it "
+                               "can be sent from another mailbox with email_send.")
                 return {"ok": dropped, "account_id": account["id"], "request_id": request_id, "receipt": receipt,
-                        **({"message": "It will not go out; its receipt stays."} if dropped else {
+                        **({"message": message} if dropped else {
                             "code": "not_discardable",
                             "error": "Only a mail that has not gone out can be deleted from the queue; check its receipt."})}
+            if began:
+                return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
+                        "receipt": receipt, "error": unknown + (
+                            ": once its mailbox is signed in, it is looked for in Sent and put in Drafts if it is not "
+                            "there. Check its receipt." if not receipt.get("unknown_outcome") else
+                            ". Check its receipt.")}
+            if receipt["state"] not in ("pending", "retry", "held", "processing"):
+                return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
+                        "receipt": receipt, "error": "Only a mail still queued or held can be sent this way; check its receipt."}
             link = None
             try:
                 if account["provider"] == "gmail":
@@ -726,8 +753,10 @@ class MailService:
             except AccountError as exc:
                 return {"ok": False, "code": "mailbox_not_signed_in", "account_id": account["id"], "request_id": request_id,
                         "error": f"{account['address']} is not signed in to Mail now ({exc}). The mail goes by itself once "
-                                 "it is. To send it from another mailbox instead, read it with email_receipt, send it "
-                                 "there with email_send and then discard_queued it here."}
+                                 "it is. To send it from another mailbox instead, first discard_queued it here: that "
+                                 "takes it off this mailbox's queue, only while it has not begun to go out, and returns "
+                                 "the mail (also in email_receipt); only then send that mail from the other mailbox "
+                                 "with email_send."}
             if not store.release_queued(request_id, link):
                 return {"ok": False, "code": "not_queued", "account_id": account["id"], "request_id": request_id,
                         "receipt": store.receipt(request_id),
@@ -918,7 +947,7 @@ def register_tools(api, service):
          {**message, "remove_labels": array, "folder_names": array, "message_conversation_id": message_conversation,
           "message_thread_id": message_thread, "label_names": array})
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id: discard_queued drops it (also while the mailbox is signed out), send_queued sends it now under the mailbox's current sign-in.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id (the owner's line and email_accounts' waiting name it): discard_queued drops it (also while the mailbox is signed out) and returns the mail, send_queued sends it now under the mailbox's current sign-in. To send it from another mailbox, discard_queued it here first, then email_send the returned mail there.",
          {**message, "action": string, "destination": string, "folder_names": array, "flags": array, "remove_flags": {"type": "boolean"},
           "request_id": {"type": "string", "description": "discard_queued and send_queued only: the queued mail's request_id."},
           "add_labels": array, "remove_labels": array, "label_names": array, "label_id": string, "draft_id": string, "properties": {"type": "object"},

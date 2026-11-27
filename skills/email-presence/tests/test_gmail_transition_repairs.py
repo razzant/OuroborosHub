@@ -383,20 +383,27 @@ def test_mail_queued_before_a_new_sign_in_the_local_copy_has_not_seen_goes_under
     assert sent == ['Bearer fixture-host-access'] * 2 and [body.get('consent') for body in host.tokens] == ['d' * 32] * 2
 
 
-def test_a_host_that_never_connected_for_the_bearer_is_retried_within_the_queues_bounds(tmp_path, monkeypatch):
+def test_a_sign_in_host_that_cannot_be_reached_for_the_bearer_keeps_the_mail_waiting_until_it_can(tmp_path, monkeypatch):
+    """The host lists the mailbox's sign-in, but its token request never connects. Nothing was sent: the mail waits, held
+    for access and spending no attempt, however long that lasts, and goes once the host answers again (rule A)."""
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
-    asked = []
+    asked, sent, reachable = [], [], {'now': False}
     host = Host()
     host.held[KEY] = listed('cn-1', via='card')
 
     def wire(request):  # the sign-in host's token request never connects; its other answers are the fixture's
-        if request.url.path == '/sign-in/token':
+        if request.url.path == '/sign-in/token' and not reachable['now']:
             asked.append(request.url.path)
             raise httpx.ConnectError('refused', request=request)
         return host(request)
 
+    def gmail(request):  # an inert recorder in place of Gmail: nothing is delivered anywhere
+        assert request.method == 'POST' and request.url.path == '/mail/messages/send'
+        sent.append(request.headers['Authorization'])
+        return httpx.Response(200, json={'id': 'a1', 'threadId': 'fixture-thread'})
+
     with httpx.Client(transport=httpx.MockTransport(wire)) as http, \
-            httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail('nothing may reach Gmail'))) as mail:
+            httpx.Client(transport=httpx.MockTransport(gmail)) as mail:
         accounts = AccountStore(tmp_path, sign_in=GmailSignIn(*HOST, http=http))
         account = mailbox(accounts, gmail_host=dict(MOVED))
         store = EmailStore(accounts.mail_dir(account))
@@ -404,14 +411,21 @@ def test_a_host_that_never_connected_for_the_bearer_is_retried_within_the_queues
                              reporting={'gmail_connection': {'host': 'cn-1'}})
         runtime = EmailRuntime(store, GmailClient(accounts, 'google:one', http=mail), SimpleNamespace(), account='google:one')
         states = []
-        for _ in range(6):
+        for _ in range(8):
             with store._connect() as db:
                 db.execute('UPDATE outbox SET available_at=0')
-            if not runtime.process_outbox():
-                break
+            assert runtime.process_outbox()
             states.append(store.receipt('send')['state'])
-    assert states == ['retry'] * 4 + ['failed'] and len(asked) == 5  # bounded, and certain: nothing was sent
-    assert 'nothing was sent' in store.receipt('send')['last_error']
+            with store._connect() as db:
+                pause, attempts = db.execute("SELECT available_at - updated_at, attempts FROM outbox").fetchone()
+            assert pause >= 25 and attempts == 0  # asked again after a pause, no attempt spent
+        assert states == ['held'] * 8 and len(asked) == 8 and sent == []  # certain: nothing was sent
+        assert store.receipt('send')['last_error'] == 'Held: The Google sign-in host did not return a readable answer.'
+        reachable['now'] = True
+        with store._connect() as db:
+            db.execute('UPDATE outbox SET available_at=0')
+        assert runtime.process_outbox()
+    assert store.receipt('send')['state'] == 'completed' and sent == ['Bearer fixture-host-access']
 
 
 @pytest.mark.parametrize(('result', 'continues'), [('imported', True), ('already_present', False)])

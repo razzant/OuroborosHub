@@ -17,9 +17,10 @@ Existing EMAIL_* configurations keep their original identity and mail history.
 Known thread replies preserve RFC threading, and transient Host failures retry
 stored paid output without generating it again. Unknown provider acceptance is
 never automatically resent: for Gmail, Mail looks for the mail in its own mailbox
-and otherwise keeps it there as one draft, and tells the owner once in the chat.
-Queued Gmail mail, including mail queued before this version, goes out under its
-mailbox's current sign-in, and waits while that mailbox is signed out of Mail.
+and otherwise keeps it there as one draft, and tells the owner once in the chat,
+naming the mail's request_id. Queued Gmail mail, including mail queued before this
+version, goes out under its mailbox's current sign-in, and waits while that mailbox
+is signed out of Mail; a line about it is posted only while it is still true.
 Sender authentication remains explicitly unverified.
 
 Searches return pages: pass `next_page_token` back as `page_token` with the same

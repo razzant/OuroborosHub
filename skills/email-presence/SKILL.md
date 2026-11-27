@@ -241,18 +241,30 @@ remain unchanged and delivery additionally checks their emitted scope.
    is its verified Google subject, never a matching address. While no confirmed
    sign-in of that account serves it (signed out, or its sign-in to be renewed on the
    card), it waits unsent, and the owner is told once which mail waits and why; it
-   goes by itself once the mailbox is signed in again. A mail whose sending began and
-   whose outcome is unknown is never sent a second time: its own mailbox is searched
-   for it by Message-ID; found sent, it is recorded sent; otherwise one draft of it
-   (its envelope with Bcc, body, attachments and thread) is kept in that mailbox's
-   Drafts, and the owner is told once to check it and send it. Nothing is drafted in
+   goes by itself once the mailbox is signed in again, unless Sending is off or a
+   Place held it, which the line then says instead. A saved sign-in that Mail is
+   moving to the host is not a sign-out and posts no line. A sign-in host that cannot
+   be reached for a queued mail's bearer leaves that mail waiting too, spending no
+   attempt, until it answers. A mail whose sending began and whose outcome is unknown
+   is never sent a second time: its own mailbox is searched for it by Message-ID;
+   found in that mailbox's Sent, it is recorded sent (a copy that came in, in Inbox
+   or Spam, proves nothing); otherwise one draft of it (its envelope with Bcc, body,
+   attachments and thread; a mail sent from a draft is put back as that draft was
+   queued) is kept in that mailbox's Drafts, once the Places of its Drafts allow
+   writing there as they do for email_draft, and the owner is told once to check it
+   and send it. While a Place or this skill's access keeps Mail from writing those
+   Drafts, the mail waits and the owner is told so once. Nothing is drafted in
    another mailbox. These notices go through the host's `notify_owner` (one System row
-   in Main, mirrored to the owner's Telegram); until the host confirms one (no grant
-   yet, an older host, the host away) it is shown in the mailbox's status and the
-   mail's receipt and posted later. The owner's "send" or "delete" in chat is for the
+   in Main, mirrored to the owner's Telegram) and name the mail by its subject and its
+   `request_id` (left out only when it cannot be shown whole on one line); until the
+   host confirms one (no grant yet, an older host, the host away) it is shown in the
+   mailbox's status and the mail's receipt and posted later, only while it is still
+   true: a waiting line ends unposted once its mail went, was deleted or settled, or
+   its mailbox is signed in again. The owner's "send" or "delete" in chat is for the
    mind to apply: `email_send` with `draft_id` sends such a draft as it is then,
    `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
-   discard_queued sends now or drops a mail that has not gone out.
+   discard_queued sends now or drops a mail that has not gone out; `email_accounts`
+   lists every mail that waits (`waiting`) by request_id and subject.
    Provider revocation is a separate action and can affect
    other uses of that Google client. An unconfirmed transfer does not fall back to
    its old token: refresh the account view or sign in again on the card.
@@ -511,18 +523,27 @@ remain readable by explicit account_id.
   when available. An ambiguous SMTP/API acceptance is never blindly replayed; for
   Gmail the receipt also names what was found (`unknown_outcome`: sent, drafted,
   unresolved or discarded), the draft kept for it (`draft_id`) and the owner's
-  notices. email_receipt also returns, while a mail has not gone out, the mail as
-  queued, so it can be sent from another mailbox with email_send at the owner's
-  word. A Place's or account's hold is asked about again and lifts when they allow.
+  notices. email_receipt also returns, while a mail has not gone out and once it was
+  dropped (`cancelled`), the mail as queued (To, Cc and Bcc kept apart, its HTML and
+  files), so it can be sent from another mailbox with email_send at the owner's word;
+  a mail may have only Cc or Bcc recipients. A Place's or account's hold is asked
+  about again and lifts when they allow.
 - email_send with a Gmail `draft_id` sends that existing draft as it is now: the
   Host checks its actual To, Cc and Bcc (and its conversation when it replies) and
   Safety reads its subject and text (and HTML), which `retry_arguments` names first;
   its attachments are not named in the call. It is queued like any mail and goes out
-  only while the draft is unchanged since that check (users.drafts.send).
-- email_mailbox `discard_queued` with a request_id drops a mail of that account that
-  has not gone out (its receipt stays, so replaying that request_id never queues it
-  again), also while the mailbox is signed out; for a mail of unknown outcome not yet
-  checked it means no draft is made. `send_queued` sends a mail that is still queued
+  only while the draft is unchanged since that check (users.drafts.send): it is read
+  again before its sending begins, under the sign-in it is sent with. Mail keeps the
+  draft's source and files as they were queued, with the mailbox's other staged mail:
+  its receipt gives them, and rule A puts the draft back from them.
+- email_mailbox `discard_queued` with a request_id drops, in one write, a mail of
+  that account that has not begun to go out (also one a stopped worker had taken),
+  also while the mailbox is signed out; its receipt stays with the mail, so replaying
+  that request_id never queues it again. To send a waiting mail from another mailbox,
+  drop it here first and then send the mail its result returns from the other
+  mailbox: it can then never go out from both. For a mail of unknown outcome not yet
+  checked it means no draft is made; such a mail may already have gone out and is
+  never offered for sending anywhere. `send_queued` sends a mail that is still queued
   or held now, under the mailbox's current confirmed sign-in.
 - New Hosts advertise presence_place_binding_version=1. The tool captures the
   applicable target binding before enqueue; delivery checks that retained binding
