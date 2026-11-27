@@ -54,7 +54,8 @@ ok. Unavailable readings show a muted “—” with the reason; unknown is not 
 
 A projection of the host's own account surface, plus a small planner on top of
 it: how much measured quota is left per agent family and limit, when it is
-reported to reset, and what happens if the recent pace continues. Cached
+reported to reset, and what happens if the 48-hour typical pool pace continues
+(or with no new use). Cached
 projection reads remain read-only. The owner's explicit Refresh button invokes
 the host's dedicated foreground quota action; the skill reads no daemon token
 and owns no quota freshness, routing, retry, pacing, or vendor policy.
@@ -120,18 +121,30 @@ it (`api.get_state_dir()`):
   a cooldown or a model reported out included whose scope governs the request
   where no window of that scope is read. An account another binding window of
   which (or its scope) is not known now is of unknown availability: counted
-  apart (`unknown_accounts`), never as restricted; a stop during which such an
-  account holds reserve (at its start, or refilled before the known return) is
-  a condition (`unknown_gap`, a warning; `unknown_at_empty` is what they hold at
-  its start, after that instant's refills), said so also as an earlier stop and
-  in Details, and Typical is held only when no account is known able to run. The strip says
-  the stop still on at the first reported reset (one that begins right at it,
-  because that refill lands only on accounts that cannot run, included), else
-  the longest: from when to when (the end is the first known event that brings
-  usable reserve back, the same on both spans), the reset's time and what is
-  left before it, an earlier stop in a few words (`earlier_empty_at`,
-  `earlier_resumes_at`), and its point marked on the drawn line. Details says
-  each stop once; only one after an earlier stop is "again". The selected
+  apart (`unknown_accounts`), never as restricted, though a known cooldown,
+  spent binding window, or other hold on that account still applies until its
+  own end before the
+  unknown window takes over; a stop during which such an account may run (holding
+  reserve at its start, or refilling or coming off a known hold before the known
+  return) is a condition (`unknown_gap`, a warning; `unknown_at_empty` is only
+  what such accounts hold ready at its start, after that instant's refills), said
+  so also as an earlier stop and in Details without claiming reserve was held at
+  the start when it arrived later, and Typical is held only when no account is
+  known able to run (naming the separate counts when reasons differ, and using
+  "every" only for a homogeneous pool). The strip keeps the total before the
+  nearest reported reset (`first_reset_at`, `before_first_reset`), checks usable
+  reserve for `tight` (distinguishing usable left from total when non-runnable
+  share remains), and judges stops up to the first event at which a
+  reported reset brings usable reserve in (so an earlier reset on a disabled or
+  still-held account never hides a stop on runnable accounts): the stop still on
+  there, else the longest, from when to when (exact seconds and the line's start
+  kept via `_instant`),
+  an earlier stop in a few words (`earlier_empty_at`, `earlier_resumes_at`), and
+  its point marked on the drawn line. Details lists all simulated stops in the
+  span once each; only one after an earlier stop is "again", and sub-0.01
+  positive values render as `<0.01`. Single-limit applicability uses the
+  engine's scope rule even when `window_seconds` is absent, while Combined
+  requires comparable window lengths across governing limits. The selected
   limit's No new use marks that limit's own resets only, and Combined names the
   next known reset even past a 24 h span. When
   Typical is unknown (fewer than 12 valid hours, history unavailable, or held)

@@ -309,6 +309,10 @@ class HistoryView:
     last_sweep_reason: str = ""
     last_failed_at: Optional[float] = None
     truncated: bool = False
+    # Per series, the newest ``last_seen`` of any run omitted by the read cap
+    # (``math.inf`` when series subjects were capped, or ``sweeps_from`` when
+    # sweeps were capped). Absent when every requested run of the series fit.
+    truncated_at: Dict[str, float] = field(default_factory=dict)
     capped_before: Optional[float] = None
     error: str = ""
     # The newest run kept per source for a (subject, series) pair, whatever
@@ -1539,7 +1543,7 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
     facts = norm.holds.get(subject, [])
     holds: List[Optional[float]] = [None] if ("disabled" in flags or "signed_out" in flags) else []
     holds.extend(end for kind, held, _desc, end in facts if kind == "cooldown" and held in ("-", scope))
-    if scoped_end is not None:
+    if scope != "-":
         holds.extend(end for kind, held, _desc, end in facts if kind == "exhaustion" and held == scope)
     holds.extend(other.resets_at for other in blockers)
     member.hold_until = (None if not holds else math.inf if any(end is None for end in holds)
@@ -2112,6 +2116,11 @@ def _forecast_mod():
     except ImportError:
         import quota_forecast as qf  # type: ignore[no-redef]
     return qf
+
+
+def typical_history_since(now: float) -> float:
+    """The oldest last sighting the 48-hour typical-pace calculation needs."""
+    return now - _forecast_mod().TYPICAL_LOOKBACK_SEC - 2 * SIGHTING_GAP_SEC
 
 
 def chart_history_since(now: float, horizon: str = "24h") -> float:
@@ -3074,9 +3083,10 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
         blocks = [m.hold_until for m in members]
         held = Counter(qf.held_why(m) for m, blk in zip(members, blocks)
                        if blk is not None and not math.isfinite(blk))
+        held_reason = next(iter(held)) if len(held) == 1 else ("mixed" if held else "")
         typical_sc = qf.build_typical_scenario(
             members, now, end, horizon, typical_info, blocked_until=blocks,
-            held_reason=held.most_common(1)[0][0] if held else "")
+            held_reason=held_reason)
         scenarios = {
             "typical": typical_sc,
             "no_new_use": no_new_use_sc,
@@ -3131,7 +3141,10 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
         }
 
     def scenario_cells(moment: float) -> Dict[str, Optional[float]]:
-        return {name: (None if total is None else round(total(moment, True), 2))
+        return {name: (None if total is None else (
+                    qf._kept(total(moment, True), 2)
+                    if name in ("scenario_typical", "scenario_no_new_use")
+                    else round(total(moment, True), 2)))
                 for name, total in totals.items()}
 
     table.append(dict({"at": iso(now), "observed": round(current, 2) if members else None,

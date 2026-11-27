@@ -82,12 +82,12 @@ def scope_groups(state: "qs.SummaryState", harness: str, model: Optional[str],
     out: List[qs.GroupCalc] = []
     unknown: List[qs.GroupCalc] = []
     for calc in state.groups:
-        if calc.harness != harness or not calc.window:
+        if calc.harness != harness:
             continue
         verdict = _applicability(calc, model, kind)
         if verdict is None:
             unknown.append(calc)
-        elif verdict:
+        elif verdict and calc.window:
             out.append(calc)
     out.sort(key=lambda c: (c.window or 0, c.key))
     return out, unknown
@@ -606,8 +606,14 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     span = qs.HORIZONS.get(horizon, qs.HORIZONS["24h"])
     start, end = now - span, float(round(now + span))
     wins, unknown = scope_groups(state, chart.harness, model, kind)
+    untimed = sorted([c for c in state.groups
+                      if c.harness == chart.harness and not c.window
+                      and _applicability(c, model, kind) is True],
+                     key=lambda c: c.key)
+    all_wins = list(wins) + untimed
     unreadable = len(unknown)
     by_key = {g.key: g for g in wins}
+    all_by_key = {g.key: g for g in all_wins}
     scope = {"model": model, "request_kind": kind, "basis": "quota_block",
              "echo": bool(echo and echo.get("stated")), "unreadable_windows": unreadable,
              "note": ("windows that govern " + ("an unspecified-model request" if model is None else f"model {model}")
@@ -615,14 +621,20 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     out: Dict[str, Any] = {"version": 1, "scope": scope, "unit_note": UNIT_NOTE, "window": None, "joint": None}
     keys = [g.key for g in wins]
     # --- the selected window alone, coupled to its account's binding windows
-    out["window"] = None if light else _window_view(state, chart, wins, by_key, now, end, horizon,
-                                                  unknown=unknown, model=model, kind=kind)
-    if len(keys) < 2:
-        out["joint"] = {"available": False, "reason": "scope_unknown" if unreadable else "one_window" if keys else "no_window",
-                        "note": "only one window governs this scope: the window's own graph is the "
-                                "whole story" if keys and not unreadable else
-                                "some window applicability is unknown" if unreadable else
-                                "no window with a known length governs this scope"}
+    out["window"] = None if light else _window_view(state, chart, all_wins, all_by_key, now, end, horizon,
+                                                    unknown=unknown, model=model, kind=kind)
+    if untimed or len(keys) < 2:
+        reason = ("scope_unknown" if unreadable
+                  else "incomparable_units" if untimed and len(all_wins) >= 2
+                  else "one_window" if len(all_wins) == 1
+                  else "no_window")
+        note = ("some window applicability is unknown" if unreadable
+                else "every governing window needs a known length for comparable units"
+                if reason == "incomparable_units"
+                else "only one window governs this scope: the window's own graph is the whole story"
+                if reason == "one_window"
+                else "no window with a known length governs this scope")
+        out["joint"] = {"available": False, "reason": reason, "note": note}
         return out
     unit = keys[0]
     accounts = _accounts(state, keys, by_key, unit, now)
@@ -720,9 +732,11 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     if not members:
         return None
     # A selected per-window chart remains visible for inspection even when a
-    # model/kind query does not bind it. Such work cannot consume that window.
-    scope_applies = chart.key in by_key
-    own_unknown = any(g.key == chart.key for g in unknown)
+    # model/kind query does not bind it, and even when the limit states no
+    # window_seconds of its own. Applicability comes from _applicability alone.
+    own_verdict = _applicability(chart, model, kind)
+    own_unknown = own_verdict is None
+    scope_applies = own_verdict is True
     # Accounts that have a window whose applicability cannot be read: that
     # window may govern their request, so their future cannot be judged.
     # An account with no reading of such a window is not held by it.
@@ -730,7 +744,7 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     keys = [chart.key] + [g.key for g in wins if g.key != chart.key]
     groups = dict(by_key)
     groups[chart.key] = chart
-    unit_key = min(keys, key=lambda key: (groups[key].window or 0, key))
+    unit_key = min(keys, key=lambda key: (groups[key].window or math.inf, key))
     current = {(m.harness, m.subject_id) for m in members}
     accounts = [a for a in _accounts(state, keys, groups, unit_key, now) if a.subject in current]
     rows: List[Tuple[List[qj.Win], str]] = []
@@ -751,22 +765,12 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                else "scope_not" if not scope_applies
                else "scope_unknown" if acct.subject in unknown_owners
                else "window_unknown" if any(x.remaining is None for x in w) else "")
-        blk: Optional[float] = None
-        if why:
-            # The account's future cannot be judged against that window: it
-            # is held at its own share of this window (no pace, nothing
-            # drained). The selected window's own scope holds the whole pool;
-            # another window of this account not known now leaves the account
-            # of unknown availability (below).
-            own = w[0]
-            w = [qj.Win(own.key, own.remaining, own.reset, None, own.k, own.unit)]
-            holds[why] += 1
-            if whole_pool:
-                blk = math.inf
-        else:
+        blk: Optional[float] = math.inf if whole_pool else None
+        if not whole_pool:
             # Respect any other binding window of this account that is already
-            # exhausted now: the account cannot burn until that window resets
-            # (or stays held if that window reports no reset).
+            # exhausted now, even when another window or scope is unknown: the
+            # account cannot run until every known spent binding window resets
+            # (or stays held if that spent window reports no reset).
             for sibling in w[1:]:
                 if sibling.remaining is not None and sibling.remaining <= qs.RATIO_EPS:
                     if sibling.reset is None:
@@ -774,6 +778,15 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                         break
                     if sibling.reset > now:
                         blk = sibling.reset if blk is None else max(blk, sibling.reset)
+        if why:
+            # The account's future cannot be judged against that window: it
+            # is held at its own share of this window (no pace, nothing
+            # drained). The selected window's own scope holds the whole pool;
+            # another window of this account not known now leaves the account
+            # of unknown availability after any known hold ends (below).
+            own = w[0]
+            w = [qj.Win(own.key, own.remaining, own.reset, None, own.k, own.unit)]
+            holds[why] += 1
         own_member = acct.members.get(chart.key)
         if own_member is not None and own_member.status == "measured":
             # The account's own known state (disabled, signed out, cooling
@@ -798,9 +811,9 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                             else "restricted" if request_end is not None and not math.isfinite(request_end)
                             else "other_limit_spent"] += 1
             elif unsure:
-                pooled_unsure[why] += 1
+                pooled_unsure["window_unknown" if why == "scope_unknown" else why] += 1
             pooled_members.append(own_member)
-            pooled_blocks.append(None if unsure else blk)
+            pooled_blocks.append(blk)
             pooled_unknown.append(unsure)
         rows.append((w, _own_pace(own_member)))
     futures: Dict[str, Any] = {}
@@ -816,7 +829,8 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
         either = pooled_held + pooled_unsure
         held_reason = ("scope_unknown" if own_unknown
                        else "scope_not" if not scope_applies
-                       else (either.most_common(1)[0][0] if either else "other_limit_spent"))
+                       else next(iter(either)) if len(either) == 1
+                       else "mixed" if either else "other_limit_spent")
         other_labels: List[str] = []
         for k in keys:
             if k == chart.key:

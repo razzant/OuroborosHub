@@ -5981,17 +5981,21 @@
                     rate: rateWords(v.rate_per_hour), hours: hoursText
                 });
             } else {
-                // Nothing is on such accounts when it starts; one refills before the known return.
+                // Nothing is on such accounts when it starts; one refills or comes off restriction before the known return.
                 sub = (lockedNow
                     ? t('verdict.blocked_gap_sub', { locked: winVal(v.locked_at_empty), rate: rateWords(v.rate_per_hour), hours: hoursText })
                     : t('verdict.runs_out_sub', { empty: emptyShort, rate: rateWords(v.rate_per_hour), hours: hoursText }))
-                    + ' · ' + t('verdict.unknown_refills');
+                    + ' · ' + t(v.unknown_refilled === false ? 'verdict.unknown_unblocks' : 'verdict.unknown_refills');
             }
         } else if (st === 'tight') {
             // Reserve stays above zero until the reset (or touches it right at the reset): a margin, not a stop.
             tone = 'warn';
-            headline = t('verdict.tight_head', { limit: limitName, reset: resetShort });
-            sub = t('verdict.tight_sub', { left: winVal(v.before_first_reset), rate: rateWords(v.rate_per_hour), hours: hoursText });
+            var tightReset = v.tight_reset_at ? shortMoment(v.tight_reset_at, shown.now) : resetShort;
+            var tightLeft = v.before_tight_reset !== undefined && v.before_tight_reset !== null ? v.before_tight_reset : v.before_first_reset;
+            headline = t('verdict.tight_head', { limit: limitName, reset: tightReset });
+            sub = v.usable_before_reset !== undefined && v.usable_before_reset !== null
+                ? t('verdict.tight_usable_sub', { usable: winVal(v.usable_before_reset), left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                : t('verdict.tight_sub', { left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText });
         } else if (st === 'lasts') {
             tone = 'ok';
             headline = t('verdict.lasts_head', { limit: limitName, reset: resetShort });
@@ -6033,11 +6037,14 @@
                 : v.held_reason === 'scope_unknown' ? 'verdict.held_scope_unknown_head'
                 : v.held_reason === 'other_limit_spent' ? 'verdict.held_other_spent_head'
                 : v.held_reason === 'restricted' ? 'verdict.held_restricted_head'
+                : v.held_reason === 'mixed' ? 'verdict.held_mixed_head'
                 : 'verdict.held_window_unknown_head';
             headline = t(hKey, { limit: limitName });
-            sub = v.rate_per_hour !== null && v.rate_per_hour !== undefined
+            var hBase = v.rate_per_hour !== null && v.rate_per_hour !== undefined
                 ? t('verdict.held_sub_rate', { rate: rateWords(v.rate_per_hour), hours: hoursText })
                 : t('verdict.held_sub_plain');
+            var hCounts = v.held_reason === 'mixed' ? heldCountsWords(v) : [];
+            sub = hCounts.length ? hCounts.join(' · ') + ' · ' + hBase : hBase;
         } else if (v.reason === 'all_observed_at_limit') {
             // The hours were watched, but every account sat at its limit: its use could not be seen. Said apart from
             // "not enough history", which a watched-hours count would wrongly suggest.
@@ -6105,7 +6112,8 @@
                 }
             } else {
                 if (v.first_reset_at) {
-                    var figTone = scenario === 'no_new_use' || tone === 'muted' ? '' : tone;
+                    var figTone = scenario === 'no_new_use' || tone === 'muted'
+                        || (st === 'tight' && v.usable_before_reset !== undefined && v.usable_before_reset !== null) ? '' : tone;
                     addFig(t('verdict.fig_before', { reset: resetShort }), winVal(v.before_first_reset), figTone);
                 }
                 if (v.empty_at !== null && st !== 'empty_now' && scenario === 'typical') {
@@ -6256,6 +6264,7 @@
     var TYPICAL_IDLE = {
         joint: { title: 'chart.typical_joint_title', legend: 'chart.legend_typical_joint' },
         held: { title: 'chart.typical_held_title', legend: 'chart.legend_typical_held' },
+        mixed: { title: 'chart.typical_mixed_title', legend: 'chart.legend_typical_held' },
         unavailable: { title: 'chart.typical_unavailable_title', legend: 'chart.legend_typical_unavailable' },
         at_limit: { title: 'chart.typical_at_limit_title', legend: 'chart.legend_typical_at_limit' },
         none: { title: 'chart.typical_idle_title', legend: 'chart.legend_typical_idle' }
@@ -6265,7 +6274,7 @@
         if (!chart) return 'none';
         if (chart.mode === 'joint') return 'joint';
         var typ = (chart.scenarios && chart.scenarios.typical) || {};
-        if (typ.status === 'held') return 'held';
+        if (typ.status === 'held') return typ.held_reason === 'mixed' ? 'mixed' : 'held';
         if (typ.status === 'unavailable') return 'unavailable';
         if (typ.reason === 'all_observed_at_limit') return 'at_limit';
         return 'none';
@@ -6422,35 +6431,48 @@
         return { lead: lead, shown: shown, notes: notes };
     }
 
+    function heldCountsWords(v) {
+        var parts = [];
+        if (v && v.held_accounts) parts.push(t('verdict.held_n_endless', { n: v.held_accounts }));
+        if (v && v.unknown_accounts) parts.push(t('verdict.held_n_unknown', { n: v.unknown_accounts }));
+        return parts;
+    }
+
     // Why Typical draws no future line, one clear reason.
     function heldWhy(chart, sc) {
         if (chart.mode === 'joint') return t('fact.r_typical_joint');
         if (chart.scope_applies === false) return t('fact.r_scope_not');
         if (chart.scope_applies === null) return t('fact.r_applic_unknown');
         var typ = (chart.scenarios && chart.scenarios.typical) || sc || {};
-        if (typ.status === 'held') return t(typ.held_reason === 'restricted' ? 'fact.r_typical_restricted' : 'fact.r_typical_held');
+        if (typ.status === 'held') {
+            if (typ.held_reason === 'mixed') {
+                var counts = heldCountsWords(typ.verdict || typ);
+                if (counts.length) return t('fact.r_typical_mixed', { counts: counts.join(', ') });
+            }
+            return t(typ.held_reason === 'restricted' ? 'fact.r_typical_restricted' : 'fact.r_typical_held');
+        }
         if (typ.status === 'unavailable') return t('fact.r_typical_unavailable');
         if (typ.reason === 'all_observed_at_limit') return t('fact.r_typical_at_limit');
         return t('fact.r_typical_insufficient', { valid: validHoursWords(typ.valid_hours, typ.min_valid_hours || 12), min: typ.min_valid_hours || 12 });
     }
 
     // When the shared pool runs out at this typical pace, inside what is drawn: its first stop, by what keeps the
-    // rest, and the next one as "again". Each stop is said once, only a stop after an earlier one is "again", and a
-    // stop that depends on accounts of unknown availability is said as that condition, first or again.
+    // rest, and every following one as "again". Each stop is said once, only a stop after an earlier one is "again",
+    // and a stop that depends on accounts of unknown availability distinguishes reserve held at the start from an
+    // unknown account becoming relevant later in the stop.
     function runsOutWords(sc, ctx) {
         var rows = sc.runs_out || [];
-        var first = rows[0];
-        if (!first) return '';
+        if (!rows.length) return '';
         // The pool's sentences have keys of their own: a translation pinned for the older per-account ones
         // ("{n} accounts would run out …") never stands in for them.
         function said(r, again) {
             var when = { when: whenWords(isoOf(r.at)) };
+            if (r.unknown_later) return t(again ? 'runs.pool_unknown_later_again' : 'runs.pool_unknown_later', when);
             if (r.unknown) return t(again ? 'runs.pool_unknown_again' : 'runs.pool_unknown', when);
             if (again) return t(r.after_refill ? 'runs.pool_again' : 'runs.pool_later', when);
             return t(r.blocked_only ? 'runs.pool_blocked' : r.reset_reported ? 'runs.pool_before' : 'runs.pool_none', when);
         }
-        var parts = [said(first, !!first.again)];
-        if (!first.again && rows[1]) parts.push(said(rows[1], true));
+        var parts = rows.map(function (r, idx) { return said(r, idx > 0 || !!r.again); });
         return t('runs.pool_lead', { parts: parts.join('; ') });
     }
 
@@ -6480,7 +6502,7 @@
             tr.appendChild(when);
             tr.appendChild(el('td', 'n', String(row.accounts)));
             tr.appendChild(el('td', 'n', row.adds === null ? t('common.unknown') : '+' + amountWords(row.adds)));
-            tr.appendChild(el('td', 'n', t('sched.total_of', { total: row.total_after === null ? t('common.unknown') : num(row.total_after, 2),
+            tr.appendChild(el('td', 'n', t('sched.total_of', { total: row.total_after === null ? t('common.unknown') : amountWords(row.total_after),
                 of: chart.y_max }) + (row.unknown_after ? ' · ' + t('sched.n_unknown', { n: row.unknown_after }) : '')));
             body.appendChild(tr);
         });
@@ -6491,7 +6513,7 @@
             moreCell.setAttribute('colspan', '4');
             var more = el('button', 'pill-btn btn-compact-wide schedule-more', scheduleAll ? t('sched.show_first', { n: SCHEDULE_ROWS })
                 : t('sched.more', { more: plural(rows.length - shown.length, 'more reset'), when: eventWhen(last),
-                    total: num(last.total_after, 2), of: chart.y_max }));
+                    total: last.total_after === null ? t('common.unknown') : amountWords(last.total_after), of: chart.y_max }));
             more.setAttribute('type', 'button');
             more.setAttribute('aria-expanded', scheduleAll ? 'true' : 'false');
             more.setAttribute('data-focus', 'schedule-all');
@@ -6569,7 +6591,7 @@
         var tiles = el('div', 'cp-tiles');
         points.forEach(function (cp) {
             var tile = el('div', 'cp-tile tile');
-            tile.appendChild(figureNode(cp.value === null ? t('common.unknown') : num(cp.value, 2), cp.value === null, { num: 'cp-num', dot: 'cp-dot' }));
+            tile.appendChild(figureNode(cp.value === null ? t('common.unknown') : amountWords(cp.value), cp.value === null, { num: 'cp-num', dot: 'cp-dot' }));
             tile.appendChild(el('span', 'meta-line cp-when', t('fact.tile_when', { when: offsetWords(cp.after_seconds), total: chart.y_max })));
             tiles.appendChild(tile);
         });
@@ -6756,7 +6778,7 @@
         thead.appendChild(head);
         table.appendChild(thead);
         var body = el('tbody');
-        function cell(value) { return value === undefined || value === null ? '' : num(value, 2); }
+        function cell(value) { return value === undefined || value === null ? '' : amountWords(value); }
         (chart.table || []).forEach(function (row) {
             if (row.sighting) return;
             var tr = el('tr');
@@ -6804,8 +6826,8 @@
             var isFuture = row.noUse !== undefined || row.typ !== undefined;
             var tr = el('tr');
             [momentWords(row.at), d ? (d.value === null ? 'gap' : num(d.value, 2) + ' of ' + d.accounts) : '',
-             !isFuture ? '' : (row.typ === null || row.typ === undefined ? t('common.unknown') : num(row.typ, 2)),
-             !isFuture ? '' : (row.noUse === null || row.noUse === undefined ? t('common.unknown') : num(row.noUse, 2)), row.event].forEach(function (text) {
+             !isFuture ? '' : (row.typ === null || row.typ === undefined ? t('common.unknown') : amountWords(row.typ)),
+             !isFuture ? '' : (row.noUse === null || row.noUse === undefined ? t('common.unknown') : amountWords(row.noUse)), row.event].forEach(function (text) {
                 tr.appendChild(el('td', null, text));
             });
             body.appendChild(tr);
@@ -6976,7 +6998,8 @@
             rows.push(['recorded', v === null || v === undefined ? null : v]);
         }
         if (t >= chart.now && (hasFutureLine(sc) || (scenario === 'typical' && chart.scenarios && chart.scenarios.no_new_use))) {
-            rows.push([scenarioName(scenario).toLowerCase(), hasFutureLine(sc) ? lineAt(sc.line, t) : null]);
+            var lineT = hasFutureLine(sc) && t === chart.now && sc.line[0][0] > t && sc.line[0][0] - t <= 0.5 ? sc.line[0][0] : t;
+            rows.push([scenarioName(scenario).toLowerCase(), hasFutureLine(sc) ? lineAt(sc.line, lineT) : null]);
         }
         return { future: t > chart.now, rows: rows };
     }
@@ -7217,9 +7240,10 @@
         });
 
         var resetSrc = hasFutureLine(sc) ? sc : (!chart.kept && chart.scenarios ? chart.scenarios.no_new_use : null);
+        var resetStart = resetSrc && resetSrc.line && resetSrc.line.length ? Math.min(now, resetSrc.line[0][0]) : now;
         var resetEnd = typeof chart.end === 'number' && isFinite(chart.end) ? chart.end : t1;
         ((resetSrc && resetSrc.schedule) || []).forEach(function (r) {
-            if (!r || typeof r.at !== 'number' || !isFinite(r.at) || r.at < now || r.at > resetEnd) return;
+            if (!r || typeof r.at !== 'number' || !isFinite(r.at) || r.at < resetStart || r.at > resetEnd) return;
             svg.appendChild(svgEl('line', { x1: x(r.at), x2: x(r.at), y1: pt, y2: bottom, 'class': 'reset-line', 'clip-path': inField }));
             svg.appendChild(svgEl('circle', { cx: x(r.at).toFixed(1), cy: bottom.toFixed(1), r: 4.5, 'class': 'reset-dot' }));
         });
@@ -7253,13 +7277,14 @@
             var futureArea = runArea(futureRuns, bottom);
             if (futureArea) svg.appendChild(svgEl('path', { d: futureArea, 'class': 'area-scenario' }));
             if (path) svg.appendChild(svgEl('path', { d: path, 'class': 'line-scenario' }));
+            var startAt = sc.line[0][0];
             if (sc.line[0][1] !== null) svg.appendChild(svgEl('circle', {
-                cx: x(now).toFixed(1), cy: y(sc.line[0][1]).toFixed(1), r: 5, 'class': 'scenario-start' }));
+                cx: x(startAt).toFixed(1), cy: y(sc.line[0][1]).toFixed(1), r: 5, 'class': 'scenario-start' }));
             var dv = sc.verdict;
             // The first stop's mark stands on the line drawn: inside the chart's own end (the axis runs on to a whole
             // hour past it), never past the line's last point.
             // A stop that depends on accounts of unknown availability is a warning, never drawn as bad.
-            if (scenario === 'typical' && chart.mode !== 'joint' && dv && dv.empty_at && dv.empty_at > now && dv.empty_at <= resetEnd
+            if (scenario === 'typical' && chart.mode !== 'joint' && dv && dv.empty_at && dv.empty_at > startAt && dv.empty_at <= resetEnd
                     && (dv.state === 'runs_out' || dv.state === 'runs_out_no_reset' || dv.state === 'blocked_gap'
                         || dv.state === 'unknown_gap')) {
                 var ex = x(dv.empty_at);

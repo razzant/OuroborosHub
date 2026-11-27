@@ -13,14 +13,18 @@ Covers:
   first sighted after old timestamp / outside watch), live refresh across all fresh
   recordable sources (rejecting expired/junk), and real/3-source/reset conflicts.
 - 80% coverage non-extrapolation and 22-account 48h synthetic pool.
+- Account-level 3-source known-reset conflicts (never masked by a resetless 3rd source).
+- Bounded history reads: 24h vs 7d Typical stability under MAX_READ_ROWS and honest
+  unavailable/history_truncated reporting when the fresh 48h window itself is truncated.
 """
 import math
+import sqlite3
 
 import plugin
 import quota_forecast as qf
 import quota_history
 import quota_summary as qs
-from test_reserve import WEEK, payload, profile
+from test_reserve import FIVE_H, WEEK, payload, profile
 
 H = 3600.0
 NOW = 1_795_700_000.0
@@ -838,3 +842,300 @@ def test_late_sighted_differing_stale_cache_does_not_veto_watched_series(tmp_pat
     )
     assert math.isclose(sum(v - u for u, v, _, _ in segs_reconf), 16 * H - 300.0, abs_tol=1.0)
     assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_reconf), 0.15, abs_tol=1e-6)
+
+
+def test_three_source_reset_conflict_cannot_be_masked_by_resetless_source(tmp_path):
+    """Account-wide known reset-date conflicts between two sources (> RESET_TOLERANCE_SEC)
+    must exclude segments from a 3rd source lacking resets_at, while preserving clean
+    controls (single reset + resetless, within-tolerance jitter, rollover, retracted reset)."""
+    reset_at = NOW + 48 * H
+    t0 = NOW - 16 * H
+    times = [t0 + k * 300.0 for k in range(16 * 12 + 1)]
+    view = qs.HistoryView(state="ok", salt="a" * 32, sweeps=times, sweep_ok=[True] * len(times))
+
+    # 1a. Direct _account_segments: s1=R, s2=R+1h, s3=None over full 16h -> 0 segments.
+    conflict_runs = [
+        run
+        for t in times
+        for r in (round(0.10 + 0.02 * ((t - t0) / H), 6),)
+        for run in (
+            qs.Run("s1", r, reset_at, PLAN, t, t, 1, t, t),
+            qs.Run("s2", r, reset_at + H, PLAN, t, t, 1, t, t),
+            qs.Run("s3", r, None, PLAN, t, t, 1, t, t),
+        )
+    ]
+    assert qf._account_segments(conflict_runs, NOW - 48 * H, NOW, view, []) == []
+
+    # 1b. End-to-end through HistoryStore + reserve_view: s1=R, s2=R+1h, s3=None across
+    #     historical sweeps (clean live reading at NOW so account is currently measured) ->
+    #     s3 cannot mask the 16h conflict; Typical never emits a rate.
+    typ_conf, _, _ = _persist_typical(
+        tmp_path / "three_src_conflict",
+        lambda _i, t: (
+            [
+                _snap("a", 0.10 + 0.02 * ((t - t0) / H), reset_at, observed_at=t, source="s1"),
+                _snap("a", 0.10 + 0.02 * ((t - t0) / H), None, observed_at=t, source="s3"),
+            ]
+            + ([_snap("a", 0.10 + 0.02 * ((t - t0) / H), reset_at + H, observed_at=t, source="s2")]
+               if t < NOW - 1e-6 else [])
+        ),
+        times,
+    )
+    assert typ_conf["status"] in ("warming_up", "insufficient")
+    assert typ_conf["rate_per_hour"] is None
+    assert typ_conf["valid_hours"] < 0.2
+    assert typ_conf["line"] == []
+
+    # 2. Partial-interval reset conflict [NOW-10h, NOW-6h] carves only those 4h from s3's 20h plateau.
+    segs_partial = qf._account_segments([
+        qs.Run("s3", 0.20, None, PLAN, NOW - 20 * H, NOW, 241, NOW - 20 * H, NOW),
+        qs.Run("s1", 0.20, reset_at, PLAN, NOW - 10 * H, NOW - 6 * H, 49, NOW - 10 * H, NOW - 6 * H),
+        qs.Run("s2", 0.20, reset_at + H, PLAN, NOW - 10 * H, NOW - 6 * H, 49, NOW - 10 * H, NOW - 6 * H),
+    ], NOW - 48 * H, NOW, view, [])
+    assert len(segs_partial) == 2
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_partial), 16 * H, abs_tol=1.0)
+
+    # 3. Single-sweep reset conflict at NOW drops touching plateau/leg on s3=None,
+    #    while leaving an earlier non-touching clean plateau intact.
+    assert qf._account_segments([
+        qs.Run("s3", 0.20, None, PLAN, t0, NOW, 193, t0, NOW),
+        qs.Run("s1", 0.20, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+        qs.Run("s2", 0.20, reset_at + H, PLAN, NOW, NOW, 1, NOW, NOW),
+    ], NOW - 48 * H, NOW, view, []) == []
+    segs_tail_only = qf._account_segments([
+        qs.Run("s3", 0.20, None, PLAN, t0, NOW - 300.0, 192, t0, NOW - 300.0),
+        qs.Run("s3", 0.30, None, PLAN, NOW, NOW, 1, NOW, NOW),
+        qs.Run("s1", 0.30, reset_at, PLAN, NOW, NOW, 1, NOW, NOW),
+        qs.Run("s2", 0.30, reset_at + H, PLAN, NOW, NOW, 1, NOW, NOW),
+    ], NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_tail_only), 16 * H - 300.0, abs_tol=1.0)
+    assert math.isclose(sum((v - u) * r for u, v, r, _ in segs_tail_only), 0.0, abs_tol=1e-6)
+
+    # 4a. Paired clean control: s1=R + s3=None -> preserved (0.02/h over 16h).
+    typ_pair, _, _ = _persist_typical(
+        tmp_path / "pair_known_and_none",
+        lambda _i, t: [
+            _snap("a", 0.10 + 0.02 * ((t - t0) / H), reset_at, observed_at=t, source="s1"),
+            _snap("a", 0.10 + 0.02 * ((t - t0) / H), None, observed_at=t, source="s3"),
+        ],
+        times,
+    )
+    assert typ_pair["status"] == "ok" and typ_pair["valid_hours"] == 16.0
+    assert math.isclose(typ_pair["rate_per_hour"], 0.02, abs_tol=2e-4)
+
+    # 4b. Paired clean control: s1=R + s2=R+60s (within 120s tolerance) + s3=None -> preserved.
+    typ_jitter, _, _ = _persist_typical(
+        tmp_path / "three_src_jitter_ok",
+        lambda _i, t: [
+            _snap("a", 0.10 + 0.02 * ((t - t0) / H), reset_at, observed_at=t, source="s1"),
+            _snap("a", 0.10 + 0.02 * ((t - t0) / H), reset_at + 60.0, observed_at=t, source="s2"),
+            _snap("a", 0.10 + 0.02 * ((t - t0) / H), None, observed_at=t, source="s3"),
+        ],
+        times,
+    )
+    assert typ_jitter["status"] == "ok" and typ_jitter["valid_hours"] == 16.0
+    assert math.isclose(typ_jitter["rate_per_hour"], 0.02, abs_tol=2e-4)
+
+    # 4c. Paired clean control: exact reset rollover at r_mid with s3=None -> no false conflict.
+    r_mid = NOW - 8 * H
+    segs_roll = qf._account_segments([
+        qs.Run("s1", 0.40, r_mid, PLAN, t0, r_mid, 97, t0, r_mid),
+        qs.Run("s2", 0.00, r_mid + WEEK, PLAN, r_mid, NOW, 97, r_mid, NOW),
+        qs.Run("s3", 0.40, None, PLAN, t0, r_mid, 97, t0, r_mid),
+        qs.Run("s3", 0.00, None, PLAN, r_mid, NOW, 97, r_mid, NOW),
+    ], NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_roll), 16 * H, abs_tol=1.0)
+
+    # 4d. Paired clean control: retracted wrong reset on s2 does not trigger a false conflict.
+    segs_retracted = qf._account_segments([
+        qs.Run("s1", 0.20, reset_at, PLAN, t0, NOW, 193, t0, NOW),
+        qs.Run("s2", 0.20, reset_at + H, PLAN, NOW - 8 * H, NOW - 8 * H, 1, NOW - 8 * H, NOW - 8 * H),
+        qs.Run("s2", 0.20, reset_at, PLAN, NOW - 8 * H, NOW - 8 * H, 1, NOW - 8 * H + 120.0, NOW - 8 * H + 120.0, after_correction=True),
+        qs.Run("s3", 0.20, None, PLAN, t0, NOW, 193, t0, NOW),
+    ], NOW - 48 * H, NOW, view, [])
+    assert math.isclose(sum(v - u for u, v, _, _ in segs_retracted), 16 * H, abs_tol=1.0)
+
+
+def test_horizon_switch_preserves_48h_typical_under_row_cap_and_discloses_48h_truncation(tmp_path, monkeypatch):
+    """Under a bounded row cap, old chart/calibration history and former accounts must not
+    crowd out the fresh 48h Typical window (24h and 7d agree identically with uncapped
+    history), while truncation of the fresh 48h window itself returns unavailable/history_truncated."""
+    store = quota_history.HistoryStore(tmp_path / "pool")
+    key_7d = qs.group_key("codex", "primary", WEEK, ())
+    key_5h = qs.group_key("codex", "secondary", FIVE_H, ())
+    profs = [profile("codex", f"cur-{a}", plan="plus") for a in range(8)]
+
+    def _dual_snap(sid, r7, res7, r5, res5, observed_at):
+        return {
+            "subject": {"harness": "codex", "subject_id": sid, "plan_label": "plus"},
+            "constraints": [
+                {"id": "primary", "label": "Weekly", "used_ratio": round(r7, 6),
+                 "window_seconds": WEEK, "resets_at": qs.iso(res7)},
+                {"id": "secondary", "label": "5h", "used_ratio": round(r5, 6),
+                 "window_seconds": FIVE_H, "resets_at": qs.iso(res5)},
+            ],
+            "availability": {"state": "available"},
+            "observed_at": qs.iso(observed_at),
+            "freshness": "fresh",
+            "source": "app",
+        }
+
+    # Initialize valid schema + salt via the real writer, then populate 7d history for
+    # 8 current accounts + 14 former accounts (6-min unbroken sweeps: ~3.85k fresh 48h rows,
+    # ~24k total rows across 7d).
+    t_origin = NOW - 7 * 86400.0
+    st_init = payload([_dual_snap("cur-0", 0.10, NOW + 3 * 86400.0, 0.10, NOW + 2 * H, t_origin)],
+                      profs, harnesses=("codex",))
+    plugin.persist_sweep(store, st_init, "", t_origin)
+
+    conn = sqlite3.connect(str(store.path))
+    try:
+        salt = conn.execute("SELECT value FROM meta WHERE key='salt'").fetchone()[0]
+        conn.execute("DELETE FROM run")
+        conn.execute("DELETE FROM sweep")
+        step_sweep = 360.0  # 6m <= SIGHTING_GAP_SEC (420s): unbroken watch across 7d
+        n_sweeps = int(7 * 86400.0 / step_sweep)
+        conn.executemany(
+            "INSERT INTO sweep (at, ok, reason) VALUES (?, 1, 'ok')",
+            [(t_origin + i * step_sweep,) for i in range(n_sweeps + 1)],
+        )
+        run_rows = []
+        # 8 current accounts: 0.005/h each (0.04/h pooled) in -48h..-16h,
+        # 0.025/h each (0.20/h pooled) in -16h..0h -> exact 48h pooled rate = 4.48 / 48.
+        for a in range(8):
+            sub = qs.pseudo_id(salt, "codex", f"cur-{a}")
+            for i in range(n_sweeps + 1):
+                t = t_origin + i * step_sweep
+                age_h = (NOW - t) / H
+                if age_h > 48.0:
+                    ratio = 0.05 + ((i % 120) * 0.002)
+                    res = NOW - 48 * H
+                elif age_h > 16.0:
+                    ratio = 0.10 + (48.0 - age_h) * 0.005
+                    res = NOW + 3 * 86400.0
+                else:
+                    ratio = 0.26 + (16.0 - age_h) * 0.025
+                    res = NOW + 3 * 86400.0
+                run_rows.append((sub, key_7d, "app", PLAN, round(ratio, 6), res, t, t, 1, t, t, 0, 0))
+                if i % 4 == 0:
+                    run_rows.append((sub, key_5h, "app", PLAN, round(0.10 + (i % 10) * 0.01, 6),
+                                     NOW + 2 * H, t, t, 1, t, t, 0, 0))
+        # 14 former accounts active only in -7d..-50h (14 * 590 = 8260 older rows).
+        former_end = int((7 * 86400.0 - 50 * H) / step_sweep)
+        for f in range(14):
+            sub = qs.pseudo_id(salt, "codex", f"former-{f}")
+            for i in range(0, former_end, 2):
+                t = t_origin + i * step_sweep
+                ratio = 0.10 + ((i % 90) * 0.003)
+                run_rows.append((sub, key_7d, "app", PLAN, round(ratio, 6), NOW - 48 * H, t, t, 1, t, t, 0, 0))
+        conn.executemany(
+            "INSERT INTO run (subject, series, source, plan, ratio, resets_at, "
+            "first_obs, last_obs, n_obs, first_seen, last_seen, after_gap, after_correction) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            run_rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    live_snaps = [_dual_snap(f"cur-{a}", 0.66, NOW + 3 * 86400.0, 0.15, NOW + 2 * H, NOW) for a in range(8)]
+    status = payload(live_snaps, profs, harnesses=("codex",))
+    expected_rate = round(4.48 / 48.0, 4)
+
+    # 1. Uncapped normal-history control: 24h and 7d both produce full 48h rate, not truncated.
+    ctrl_24 = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="24h")
+    ctrl_7d = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="7d")
+    assert ctrl_24["summary"]["history"]["truncated"] is False
+    assert ctrl_7d["summary"]["history"]["truncated"] is False
+    assert ctrl_24["chart"]["scenarios"]["typical"]["rate_per_hour"] == expected_rate
+    assert ctrl_7d["chart"]["scenarios"]["typical"]["rate_per_hour"] == expected_rate
+    assert ctrl_24["chart"]["scenarios"]["typical"]["valid_hours"] == 48.0
+    assert ctrl_7d["chart"]["scenarios"]["typical"]["valid_hours"] == 48.0
+
+    # 2. Tight cap (6000 rows: fits ~3900 fresh Pass-1 rows, truncates ~24k 7d rows):
+    #    24h and 7d agree identically with the uncapped control (both analytics=False and True),
+    #    while 7d discloses truncation and store.read strictly respects the cap.
+    monkeypatch.setattr(quota_history, "MAX_READ_ROWS", 6000)
+    for analytics in (False, True):
+        rv_24 = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="24h", analytics=analytics)
+        rv_7d = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon="7d", analytics=analytics)
+        t24 = rv_24["chart"]["scenarios"]["typical"]
+        t7d = rv_7d["chart"]["scenarios"]["typical"]
+        assert t24["status"] == t7d["status"] == "ok"
+        assert t24["rate_per_hour"] == t7d["rate_per_hour"] == expected_rate
+        assert t24["valid_hours"] == t7d["valid_hours"] == 48.0
+        assert t24["valid_seconds"] == t7d["valid_seconds"]
+        assert rv_7d["summary"]["history"]["truncated"] is True
+        if analytics:
+            a24 = rv_24["chart"]["analytics"]["window"]["scenarios"]["typical"]
+            a7d = rv_7d["chart"]["analytics"]["window"]["scenarios"]["typical"]
+            assert a24["rate_per_hour"] == a7d["rate_per_hour"] == expected_rate
+            assert a24["valid_hours"] == a7d["valid_hours"] == 48.0
+    bounded_view = store.read(
+        lambda s: {(qs.pseudo_id(s, "codex", f"cur-{a}"), key_7d): qs.chart_history_since(NOW, "7d") for a in range(8)},
+        NOW,
+        chart_series=(key_7d, qs.chart_history_since(NOW, "7d")),
+    )
+    assert sum(len(rs) for rs in bounded_view.runs.values()) <= 6000
+    assert bounded_view.truncated is True
+    assert bounded_view.truncated_at[key_7d] < qs.typical_history_since(NOW)
+
+    # 3. Fresh 48h overflow (1500 rows < ~3850 fresh 48h rows):
+    #    Must NOT emit a biased partial-window rate; returns unavailable/history_truncated.
+    monkeypatch.setattr(quota_history, "MAX_READ_ROWS", 1500)
+    for horizon in ("24h", "7d"):
+        rv_over = plugin.reserve_view(store, status, NOW, NOW, harness="codex", group=key_7d, horizon=horizon, analytics=True)
+        typ_over = rv_over["chart"]["scenarios"]["typical"]
+        an_over = rv_over["chart"]["analytics"]["window"]["scenarios"]["typical"]
+        assert rv_over["summary"]["history"]["truncated"] is True
+        for sc in (typ_over, an_over):
+            assert sc["status"] == "unavailable"
+            assert sc["reason"] == "history_truncated"
+            assert sc["verdict"]["state"] == "unavailable"
+            assert sc["verdict"]["reason"] == "history_truncated"
+            assert sc["rate_per_hour"] is None
+            assert sc["line"] == [] and sc["checkpoints"] == [] and sc["schedule"] == []
+
+    # 4. Dropped long plateau spanning into 48h (first_seen < -48h, last_seen = NOW) is caught
+    #    by exact omitted max(last_seen) and disclosed as unavailable/history_truncated.
+    store_plat = quota_history.HistoryStore(tmp_path / "long_plateau")
+    st_p0 = payload([_snap("a", 0.20, NOW + 3 * 86400.0, observed_at=NOW - 60 * H)],
+                    [profile("codex", "a")], harnesses=("codex",))
+    plugin.persist_sweep(store_plat, st_p0, "", NOW - 60 * H)
+    conn_p = sqlite3.connect(str(store_plat.path))
+    try:
+        salt_p = conn_p.execute("SELECT value FROM meta WHERE key='salt'").fetchone()[0]
+        sub_a = qs.pseudo_id(salt_p, "codex", "a")
+        conn_p.execute("DELETE FROM run")
+        conn_p.execute("DELETE FROM sweep")
+        conn_p.executemany(
+            "INSERT INTO sweep (at, ok, reason) VALUES (?, 1, 'ok')",
+            [(NOW - 60 * H + k * 300.0,) for k in range(60 * 12 + 1)],
+        )
+        conn_p.execute(
+            "INSERT INTO run (subject, series, source, plan, ratio, resets_at, "
+            "first_obs, last_obs, n_obs, first_seen, last_seen, after_gap, after_correction) "
+            "VALUES (?, ?, 's_long', ?, 0.20, ?, ?, ?, 100, ?, ?, 0, 0)",
+            (sub_a, key_7d, PLAN, NOW + 3 * 86400.0, NOW - 60 * H, NOW, NOW - 60 * H, NOW),
+        )
+        for k in range(20):
+            t = NOW - (19 - k) * H
+            conn_p.execute(
+                "INSERT INTO run (subject, series, source, plan, ratio, resets_at, "
+                "first_obs, last_obs, n_obs, first_seen, last_seen, after_gap, after_correction) "
+                "VALUES (?, ?, 'app', ?, ?, ?, ?, ?, 1, ?, ?, 0, 0)",
+                (sub_a, key_7d, PLAN, round(0.20 + 0.01 * k, 6), NOW + 3 * 86400.0, t, t, t, t),
+            )
+        conn_p.commit()
+    finally:
+        conn_p.close()
+    monkeypatch.setattr(quota_history, "MAX_READ_ROWS", 20)
+    st_plat = payload([_snap("a", 0.39, NOW + 3 * 86400.0, observed_at=NOW)],
+                      [profile("codex", "a")], harnesses=("codex",))
+    rv_plat = plugin.reserve_view(store_plat, st_plat, NOW, NOW, harness="codex", group=key_7d, horizon="7d")
+    typ_plat = rv_plat["chart"]["scenarios"]["typical"]
+    assert rv_plat["summary"]["history"]["truncated"] is True
+    assert typ_plat["status"] == "unavailable"
+    assert typ_plat["reason"] == "history_truncated"
+    assert typ_plat["rate_per_hour"] is None
+    assert typ_plat["line"] == []

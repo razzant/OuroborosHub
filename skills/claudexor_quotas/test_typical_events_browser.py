@@ -156,6 +156,55 @@ def test_a_small_positive_reserve_and_pace_read_below_the_precision(browser, tmp
         assert "<0.01 win" in got["text"] and "<0.001 win/h" in got["text"], got
         assert "0.000 win/h" not in got["text"] and not re.search(r"(?<![\d.])0\.00 win", got["text"]), got
         assert "<0.001 win/h" in got["legend"], got
+        page.click('[data-focus="chart-table"]')
+        page.click('[data-focus="chart-how"]')
+        page.wait_for_selector(".tl-block .chart-how[open] .tbl")
+        start_cells = page.evaluate("""() => {
+          const rows = [...document.querySelectorAll('.tl-block .chart-how .tbl tr')];
+          const start = rows.find((r) => r.textContent.includes('Future starts'));
+          return start ? [...start.querySelectorAll('td')].map((c) => c.textContent) : [];
+        }""")
+        assert start_cells[2:4] == ["<0.01", "<0.01"], start_cells
+        assert not errors, errors
+    finally:
+        page.close()
+
+
+def test_disabled_first_reset_does_not_hide_runnable_outage_or_mark(browser, tmp_path, monkeypatch):
+    """Disabled B resets at +2h; runnable A (0.30 left, resets +60h) empties at +3h (0.10/h): strip warns of the +3h
+    outage and marks it on the chart while keeping Before +2h (0.60 win)."""
+    def accounts(t, now):
+        return [
+            _snap("acct-a", [_con("primary", 0.70, WEEK, now + 60 * H, "Weekly")], t),
+            _snap("acct-b", [_con("primary", 0.50, WEEK, now + 2 * H, "Weekly")], t),
+        ]
+
+    views, _now_ = _views(tmp_path, monkeypatch, accounts, _rate(0.10), disabled=("acct-b",))
+    page, errors = _open(browser, views)
+    try:
+        got = page.evaluate(READ)
+        assert got["head"].startswith("No usable ") and " from ~" in got["head"], got
+        assert "bad" in got["tone"].split() and got["marks"] == 1, got
+        assert "1.00 win is on restricted accounts" in got["text"], got
+        assert any(f.startswith("Before ") and f.endswith("0.60 win") for f in got["figs"]), got["figs"]
+        assert not errors, errors
+    finally:
+        page.close()
+
+    # 0.001 usable left before +2h reset alongside 0.90 on a disabled account: distinguishes usable risk from full Before.
+    def tight_mixed(t, now):
+        return [
+            _snap("acct-a", [_con("primary", 0.799, WEEK, now + 2 * H, "Weekly")], t),
+            _snap("acct-b", [_con("primary", 0.10, WEEK, now + 24 * H, "Weekly")], t),
+        ]
+
+    views, _now_ = _views(tmp_path / "tight_mixed", monkeypatch, tight_mixed, _rate(0.10), disabled=("acct-b",))
+    page, errors = _open(browser, views)
+    try:
+        got = page.evaluate(READ)
+        assert "almost runs out before the" in got["head"] and "warn" in got["tone"].split(), got
+        assert "<0.01 win usable left before reset (0.90 win total)" in got["text"], got
+        assert any(f.startswith("Before ") and f.endswith("0.90 win") for f in got["figs"]), got["figs"]
         assert not errors, errors
     finally:
         page.close()

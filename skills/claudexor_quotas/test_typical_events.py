@@ -120,6 +120,56 @@ def test_a_short_real_stop_is_runs_out_and_a_small_margin_is_tight():
     v = qf.build_typical_scenario([_member(0.13, NOW + 65 * 60)], NOW, NOW + 86400, "24h", OK)["verdict"]
     assert v["state"] == "tight" and v["empty_at"] is None and v["gap_seconds"] is None, v
     assert 0.0 < v["before_first_reset"] <= qf.VERDICT_TIGHT_RESERVE, v
+    # Adding 0.90 on an account blocked past the reset keeps the total on the chart (0.901) without hiding "tight".
+    a, b = _member(0.201, NOW + 2 * H, "a"), _member(0.90, NOW + 24 * H, "b")
+    v = qf.build_typical_scenario([a, b], NOW, NOW + 86400, "24h", OK, blocked_until=[None, NOW + 24 * H])["verdict"]
+    assert v["state"] == "tight" and math.isclose(v["before_first_reset"], 0.901, abs_tol=1e-4), v
+    assert math.isclose(v["usable_before_reset"], 0.001, abs_tol=1e-4), v
+
+
+def test_fractional_stop_seconds_stay_before_a_subsecond_refill():
+    """Depletion at +3600.72 s with refill at +3600.88 s, and inside the very first fractional second (now=N+0.51,
+    empty=N+0.72, reset=N+0.82): exact instants and the initial polyline vertex stay ordered via qs._instant."""
+    m = _member(0.10002, NOW + 3600.88)
+    day, week = _both_spans([m], OK)
+    for sc in (day, week):
+        v = sc["verdict"]
+        assert v["state"] == "runs_out" and v["gap_seconds"] == 1, v
+        assert v["empty_at"] == pytest.approx(NOW + 3600.72, abs=1e-6), v
+        assert v["empty_at"] < v["resumes_at"] == pytest.approx(NOW + 3600.88, abs=1e-6), v
+        assert sc["runs_out"][0]["at"] == pytest.approx(NOW + 3600.72, abs=1e-6), sc["runs_out"]
+
+    now_f = NOW + 0.51
+    m_f = _member(0.1 * 0.21 / 3600.0, NOW + 0.82)
+    sc_f = qf.build_typical_scenario([m_f], now_f, round(now_f + 86400), "24h", OK)
+    vf = sc_f["verdict"]
+    assert vf["state"] == "runs_out" and vf["gap_seconds"] == 1, vf
+    assert vf["empty_at"] == pytest.approx(NOW + 0.72, abs=1e-6), vf
+    assert vf["empty_at"] < vf["resumes_at"] == pytest.approx(NOW + 0.82, abs=1e-6), vf
+    assert sc_f["runs_out"][0]["at"] == pytest.approx(NOW + 0.72, abs=1e-6), sc_f["runs_out"]
+    assert sc_f["line"][0][0] == pytest.approx(NOW + 0.51, abs=1e-6) and sc_f["line"][0][1] > 0, sc_f["line"][:4]
+    assert [(round(t - NOW, 2), val) for t, val in sc_f["line"][1:4]] == [(0.72, 0.0), (0.82, 0.0), (0.82, 1.0)], sc_f["line"][:5]
+
+
+def test_an_earlier_reset_on_an_unusable_account_never_hides_a_later_outage_or_tight_margin():
+    """Disabled B resets at +2h; runnable A (0.30 left, reset +100h) runs out at +3h. The strip keeps Before +2h (0.60)
+    and still reports the +3h..+100h outage (and continuous +2h06m outage when B is temporarily held until +5h)."""
+    a, b = _member(0.30, NOW + 100 * H, "a"), _member(0.50, NOW + 2 * H, "b")
+    for sc in _both_spans([a, b], OK, blocked_until=[None, math.inf]):
+        v = sc["verdict"]
+        assert v["state"] == "blocked_gap" and v["empty_at"] == NOW + 3 * H and v["resumes_at"] == NOW + 100 * H, v
+        assert v["locked_at_empty"] == 1.0 and v["first_reset_at"] == NOW + 2 * H and v["before_first_reset"] == 0.6, v
+    # B held by another limit until +5h while resetting at +2h, A emptying 6 min after +2h: continuous with +2h00m.
+    a2 = _member(0.21, NOW + 100 * H, "a")
+    v = qf.build_typical_scenario([a2, b], NOW, NOW + 86400, "24h", OK, blocked_until=[None, NOW + 5 * H])["verdict"]
+    assert v["state"] == "blocked_gap" and v["empty_at"] == NOW + 2 * H + 360 and v["resumes_at"] == NOW + 5 * H, v
+    assert v["locked_at_empty"] == 1.0 and v["first_reset_at"] == NOW + 2 * H and v["before_first_reset"] == 0.51, v
+    # Disabled B resets at +2h while runnable A dips to 0.02 usable right before A's own +5h reset: warns "tight".
+    a3 = _member(0.52, NOW + 5 * H, "a")
+    v = qf.build_typical_scenario([a3, b], NOW, NOW + 86400, "24h", OK, blocked_until=[None, math.inf])["verdict"]
+    assert v["state"] == "tight" and v["first_reset_at"] == NOW + 2 * H and v["before_first_reset"] == 0.82, v
+    assert v["tight_reset_at"] == NOW + 5 * H and math.isclose(v["before_tight_reset"], 1.02, abs_tol=1e-4), v
+    assert math.isclose(v["usable_before_reset"], 0.02, abs_tol=1e-4), v
 
 
 def test_the_value_after_the_first_reset_is_the_lines_vertex_at_that_instant():
@@ -317,3 +367,25 @@ def test_a_model_reported_out_on_its_own_window_stops_that_models_use_of_the_sha
     # The shared week's own summary and plain chart keep its own state: no model, no hold.
     assert not [m for m in shared.measured if m.hold_until is not None]
     assert qs.build_chart(state, shared.key, "codex", "24h")["scenarios"]["typical"]["verdict"]["empty_at"] == NOW + 3 * H
+
+
+def test_a_spent_scoped_window_keeps_a_longer_model_exhaustion_hold_across_its_own_refill():
+    """Selected model-scoped window is at 0 now (resets at +2h) while a model_scoped_exhaustion on the same scope lasts
+    until +6h: summary restrictions do not double-count the spent window, yet hold_until stays +6h so the +2h refill is
+    not burned until +6h."""
+    models = ["model-a"]
+    data = _payload([_snap("a", [_con("weekly_scoped", 1.0, WEEK, NOW + 2 * H, "Weekly model-a", models)],
+                           {"state": "available", "model_scoped_exhaustions": [
+                               {"constraint_id": "other_model_cap", "applies_to_models": models,
+                                "resets_at": qs.iso(NOW + 6 * H)}]})], [_profile("a")])
+    state = qs.compute(data, qs.HistoryView(state="empty"), NOW)
+    scoped = state.groups[0]
+    member = scoped.measured[0]
+    assert "model_exhausted" not in member.flags and member.hold_until == NOW + 6 * H, (member.flags, member.hold_until)
+    state.typical_cache[scoped.key] = dict(RATE)
+    for sc in (qs.build_chart(state, scoped.key, "codex", "7d")["scenarios"]["typical"],
+               qa.build(state, scoped, "7d", model="model-a")["window"]["scenarios"]["typical"]):
+        v = sc["verdict"]
+        assert v["state"] == "blocked_gap" and v["empty_at"] == round(NOW) and v["resumes_at"] == NOW + 6 * H, v
+        assert sc["runs_out"][0]["at"] == NOW + 26 * H, sc["runs_out"]
+        assert qf.eval_polyline(sc["line"], NOW + 4 * H) == 1.0 and qf.eval_polyline(sc["line"], NOW + 6 * H) == 1.0

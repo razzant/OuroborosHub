@@ -229,6 +229,98 @@ def test_every_account_unknown_stays_held_and_a_known_endless_hold_stays_a_hold(
     v = _window(state, _week(state))["scenarios"]["typical"]["verdict"]
     assert v["state"] == "blocked_gap" and v["locked_at_empty"] == 0.4 and v["unknown_at_empty"] is None, v
     assert (v["held_accounts"], v["unknown_accounts"]) == (1, 0), v
+    # Mixed held pool (2 disabled + 1 with stale 5h window): never "restricted" as one blanket reason.
+    snaps = [
+        _snap("a", [_con("primary", 0.5, WEEK, NOW + 60 * H, "Weekly", freshness="fresh"),
+                    _con("five_hour", 0.1, FIVE_H, NOW + 4 * H, "5 hour", freshness="fresh")], NOW),
+        _snap("b", [_con("primary", 0.5, WEEK, NOW + 60 * H, "Weekly", freshness="fresh"),
+                    _con("five_hour", 0.1, FIVE_H, NOW + 4 * H, "5 hour", freshness="fresh")], NOW),
+        _snap("c", [_con("primary", 0.5, WEEK, NOW + 60 * H, "Weekly", freshness="fresh"),
+                    _con("five_hour", 0.1, FIVE_H, NOW + 4 * H, "5 hour", freshness="stale")], NOW),
+    ]
+    mixed = _state(snaps, disabled=("a", "b"))
+    sc = _window(mixed, _week(mixed))["scenarios"]["typical"]
+    assert sc["status"] == "held" and sc["held_reason"] == "mixed", sc
+    assert (sc["verdict"]["held_accounts"], sc["verdict"]["unknown_accounts"]) == (2, 1), sc["verdict"]
+
+
+def test_a_known_cooldown_outlasting_a_stop_stays_blocked_despite_an_unread_sibling_window():
+    """A (0.20 left, runnable) empties at +2h and resets at +5h; B (0.40 left) is cooling until +8h AND has a stale
+    5-hour reading. During +2h..+5h B is provably blocked by the +8h cooldown, so the stop is blocked_gap, not
+    unknown_gap. If A instead resets at +10h (after +8h), B's cooldown lifts during the stop and makes it conditional."""
+    def state_for(a_reset):
+        return _state([
+            _snap("a", [_con("primary", 0.80, WEEK, a_reset, "Weekly", freshness="fresh"),
+                        _con("five_hour", 0.10, FIVE_H, NOW + 4 * H, "5 hour", freshness="fresh")], NOW),
+            _snap("b", [_con("primary", 0.60, WEEK, NOW + 60 * H, "Weekly", freshness="fresh"),
+                        _con("five_hour", 0.10, FIVE_H, NOW + 4 * H, "5 hour", freshness="stale")], NOW,
+                  availability={"state": "cooldown", "resets_at": qs.iso(NOW + 8 * H)}),
+        ], rate=0.10)
+
+    s5 = state_for(NOW + 5 * H)
+    sc5 = _window(s5, _week(s5))["scenarios"]["typical"]
+    v5 = sc5["verdict"]
+    assert v5["state"] == "blocked_gap" and v5["empty_at"] == NOW + 2 * H and v5["resumes_at"] == NOW + 5 * H, v5
+    assert v5["locked_at_empty"] == 0.4 and v5["unknown_at_empty"] is None, v5
+    assert sc5["runs_out"][0].get("blocked_only") and not sc5["runs_out"][0].get("unknown"), sc5["runs_out"]
+
+    s10 = state_for(NOW + 10 * H)
+    sc10 = _window(s10, _week(s10))["scenarios"]["typical"]
+    v10 = sc10["verdict"]
+    assert v10["state"] == "unknown_gap" and v10["empty_at"] == NOW + 2 * H and v10["resumes_at"] == NOW + 10 * H, v10
+    assert v10["locked_at_empty"] == 0.4 and v10["unknown_at_empty"] is None and v10["unknown_refilled"] is False, v10
+    assert sc10["runs_out"][0].get("unknown_later") is True, sc10["runs_out"]
+
+    # Same class via a fresh exhausted model-scoped sibling window (+8h) alongside a stale 5h window:
+    # for model="m-a", B provably cannot run before +8h (+2h..+5h is blocked_gap; +2h..+10h turns unknown_gap after +8h).
+    def scoped_sibling_state(a_reset):
+        return _state([
+            _snap("a", [_con("primary", 0.80, WEEK, a_reset, "Weekly", freshness="fresh")], NOW),
+            _snap("b", [_con("primary", 0.60, WEEK, NOW + 60 * H, "Weekly", freshness="fresh"),
+                        _con("five_hour", 0.10, FIVE_H, NOW + 4 * H, "5 hour", freshness="stale"),
+                        _con("daily_ma", 1.0, DAY, NOW + 8 * H, "Daily m-a", models=["m-a"], freshness="fresh")], NOW),
+        ], rate=0.10)
+
+    m5 = scoped_sibling_state(NOW + 5 * H)
+    scm5 = _window(m5, _week(m5), model="m-a")["scenarios"]["typical"]
+    vm5 = scm5["verdict"]
+    assert vm5["state"] == "blocked_gap" and vm5["empty_at"] == NOW + 2 * H and vm5["resumes_at"] == NOW + 5 * H, vm5
+    assert vm5["locked_at_empty"] == 0.4 and vm5["unknown_at_empty"] is None, vm5
+    assert scm5["runs_out"][0].get("blocked_only") and not scm5["runs_out"][0].get("unknown"), scm5["runs_out"]
+    assert qa.future_table(_window(m5, _week(m5), model="m-a")["scenarios"], NOW)[0]["scenario_typical"] == 0.6
+
+    m10 = scoped_sibling_state(NOW + 10 * H)
+    scm10 = _window(m10, _week(m10), model="m-a")["scenarios"]["typical"]
+    vm10 = scm10["verdict"]
+    assert vm10["state"] == "unknown_gap" and vm10["empty_at"] == NOW + 2 * H and vm10["resumes_at"] == NOW + 10 * H, vm10
+    assert vm10["locked_at_empty"] == 0.4 and vm10["unknown_at_empty"] is None and vm10["unknown_refilled"] is False, vm10
+    assert scm10["runs_out"][0].get("unknown_later") is True, scm10["runs_out"]
+    # Unspecified model is not bound by daily_ma, so B's stale five_hour makes +2h..+5h conditional right away.
+    v_unspec = _window(m5, _week(m5), model=None)["scenarios"]["typical"]["verdict"]
+    assert v_unspec["state"] == "unknown_gap" and v_unspec["unknown_at_empty"] == 0.4, v_unspec
+
+
+def test_single_untimed_limit_keeps_typical_when_applicable_while_combined_requires_comparable_units():
+    """A governing limit without window_seconds still gets its Typical forecast in _window_view when its scope applies,
+    stays hidden when its scope is unreadable, and prevents Combined when paired with another governing limit."""
+    untimed = _state([_snap("a", [_con("shared_cap", 0.30, None, NOW + 5 * H, "Shared cap")], NOW)], rate=0.01)
+    built = qa.build(untimed, untimed.groups[0], "24h")
+    assert built["window"]["scope_applies"] is True
+    assert built["window"]["scenarios"]["typical"]["status"] == "ok" and built["window"]["scenarios"]["typical"]["line"]
+    assert built["joint"]["available"] is False and built["joint"]["reason"] == "one_window"
+
+    paired = _state([_snap("a", [_con("shared_cap", 0.30, None, NOW + 5 * H, "Shared cap"),
+                                 _con("primary", 0.20, WEEK, NOW + 60 * H, "Weekly")], NOW)], rate=0.01)
+    both = qa.build(paired, _week(paired), "24h")
+    assert both["window"]["scope_applies"] is True and both["window"]["scenarios"]["typical"]["status"] == "ok"
+    assert both["joint"]["available"] is False and both["joint"]["reason"] == "incomparable_units"
+
+    unread = _state([_snap("a", [_con("odd_cap", 0.30, None, NOW + 5 * H, "Odd cap",
+                                      applies_to_models="unreadable")], NOW)], rate=0.01)
+    held = qa.build(unread, unread.groups[0], "24h")
+    assert held["window"]["scope_applies"] is None
+    assert held["window"]["scenarios"]["typical"]["status"] == "held"
+    assert held["window"]["scenarios"]["typical"]["held_reason"] == "scope_unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -305,14 +397,15 @@ def _now():
     return float(int(time.time() // 3600) * 3600 + 600)  # a whole hour + 10 min: the 24 h end is not an axis hour
 
 
-def _route_views(folder, snaps_at, info):
+def _route_views(folder, snaps_at, info, disabled=()):
     """The weekly limit's view on each span from three synthetic sweeps, with the given 48-hour estimate."""
     now = _now()
     store = quota_history.HistoryStore(folder)
     status = None
     for t in (now - 600.0, now - 300.0, now):
         snaps = snaps_at(t, now)
-        status = payload(snaps, [_profile(s["subject"]["subject_id"]) for s in snaps], harnesses=("codex",))
+        status = payload(snaps, [_profile(s["subject"]["subject_id"], s["subject"]["subject_id"] not in disabled)
+                                 for s in snaps], harnesses=("codex",))
         plugin.persist_sweep(store, status, "", t)
     views = {}
     with pytest.MonkeyPatch.context() as patch:
@@ -396,6 +489,16 @@ def fixture_file(tmp_path_factory):
         "coincident": _route_views(root / "coincident", lambda t, now: [
             explicit(week("acct-a", 0.20, now + 10 * H, t, (0.10, now + 4 * H))),
             explicit(week("acct-b", 0.0, now + 2 * H, t, (0.10, now + 4 * H)), stale=("five_hour",))], _rate(0.10)),
+        # A out at +2h with the whole pool empty; B (5-hour not known now) refills later at +5h before A's +10h reset.
+        "late_unknown": _route_views(root / "late_unknown", lambda t, now: [
+            explicit(week("acct-a", 0.20, now + 10 * H, t, (0.10, now + 4 * H))),
+            explicit(week("acct-b", 0.0, now + 5 * H, t, (0.10, now + 4 * H)), stale=("five_hour",))], _rate(0.10)),
+        # Mixed held pool: 2 disabled accounts + 1 active account with a stale 5-hour window.
+        "mixed_held": _route_views(root / "mixed_held", lambda t, now: [
+            explicit(week("acct-a", 0.50, now + 60 * H, t, (0.10, now + 4 * H))),
+            explicit(week("acct-b", 0.50, now + 60 * H, t, (0.10, now + 4 * H))),
+            explicit(week("acct-c", 0.50, now + 60 * H, t, (0.10, now + 4 * H)), stale=("five_hour",))],
+            _rate(0.05), disabled=("acct-a", "acct-b")),
         # A little reserve: 0.004 left.
         "tiny": _route_views(root / "tiny", lambda t, now: [week("acct-a", 0.004, now + 30 * H, t)], _rate(0.0001)),
         # 0.50 left, refilled at +1h, out at +11h with no reset ahead: one stop, not "again".
@@ -436,13 +539,14 @@ const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
   assert.match(text(strip(env)), /earlier stop ~\d\d:\d\d to ~\d\d:\d\d/, text(strip(env)));
   assert.ok(figs(env).some((f) => /^Before \d\d:\d\d0\.00 win$/.test(f)), figs(env).join(' | '));
   assert.equal(marks(env).length, 1);
-  // Details: each stop once, the next one as "again".
-  assert.match(facts(env), /usable reserve runs out while restricted accounts hold the rest \([^)]*\); the pool runs out again \(/, facts(env));
-  assert.doesNotMatch(facts(env), /before the next reported reset|after refilling/, facts(env));
+  // Details: all simulated stops in the span are listed once each, subsequent ones as "again".
+  assert.match(facts(env), /usable reserve runs out while restricted accounts hold the rest \([^)]*\); the pool runs out again \([^)]*\); the pool runs out again after refilling \(/, facts(env));
+  assert.doesNotMatch(facts(env), /before the next reported reset/, facts(env));
   const week = text(head(env));
   click(env, 'horizon:24h');
   await settle();
   assert.equal(text(head(env)), week, 'one future on both spans');
+  assert.doesNotMatch(facts(env), /after refilling/, facts(env));
   env.disposeHooks[0]();
 
   // A stop that begins at a refill landing on an account that cannot run: from when to when, and the reset's figures.
@@ -473,6 +577,27 @@ const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
   assert.match(text(strip(env)), /1\.00 win is on accounts whose other limit is not known now/, text(strip(env)));
   assert.ok(figs(env).some((x) => /^Before \d\d:\d\d0\.00 win$/.test(x)), figs(env).join(' | '));
   assert.match(facts(env), /^At typical pace, known usable reserve runs out while accounts whose other limit is not known now hold the rest/, facts(env));
+  env.disposeHooks[0]();
+
+  // Unknown account empty at the stop's start (+2h) and refilling later (+5h): first stop never says it held reserve at +2h;
+  // at +20h (after A's +10h reset runs out) B's +5h refill IS held at the second stop's start.
+  env = await open('late_unknown');
+  assert.match(text(strip(env)), /an account whose other limit is not known now refills during this stop/, text(strip(env)));
+  const parts = facts(env).split('; ');
+  assert.match(parts[0], /^At typical pace, usable reserve runs out \([^)]*\)$/, facts(env));
+  assert.doesNotMatch(parts[0], /hold the rest/, facts(env));
+  assert.equal(parts[1], 'earlier return depends on an account whose other limit is not known now');
+  assert.match(parts[2], /^known usable reserve runs out again while accounts whose other limit is not known now hold the rest \([^)]*\)\.$/, facts(env));
+  env.disposeHooks[0]();
+
+  // Mixed held pool (2 disabled + 1 unknown other limit): separate counts, never "Every ... account is restricted/held".
+  env = await open('mixed_held');
+  assert.equal(text(head(env)), 'No Weekly account is known able to run');
+  assert.doesNotMatch(text(block(env)), /Every .* account is restricted/, text(block(env)));
+  assert.equal(byFocus(env.root, 'scenario:typical').title, 'No current account is known able to run, so no Typical line is drawn');
+  assert.doesNotMatch(byFocus(env.root, 'scenario:typical').title, /Every current account is held/);
+  assert.match(text(strip(env)), /2 accounts held with no reported end · 1 account with another limit not known now/, text(strip(env)));
+  assert.match(text(classes(block(env), 'chart-legend')[0]), /2 accounts held with no reported end, 1 account with another limit not known now/, text(classes(block(env), 'chart-legend')[0]));
   env.disposeHooks[0]();
 
   // The words of a conditional stop carry into the earlier note and the Details rows (answers edited to each case).
@@ -512,13 +637,21 @@ const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
   assert.doesNotMatch(text(block(env)), /(?<![\d.])12h valid/, text(strip(env)));
   env.disposeHooks[0]();
 
-  // A little reserve under the cursor: "<0.01", never 0.00.
+  // A little reserve under the cursor, in checkpoint cards, and in the Details table: "<0.01", never 0.00.
   env = await open('tiny');
+  click(env, 'horizon:24h');
+  await settle();
   const plot = byFocus(env.root, 'chart-plot');
   plot.listeners.focus[0]();
   const values = classes(env.root, 'tip-val').map(text);
   assert.ok(values.length >= 1 && values.every((v) => v === '<0.01'), values.join(' | '));
   assert.match(text(classes(env.root, 'chart-readout')[0]), /<0\.01 of/, text(classes(env.root, 'chart-readout')[0]));
+  const cpNums = classes(block(env), 'cp-num').map(text);
+  assert.ok(cpNums.length >= 1 && cpNums.every((v) => v === '<0.01'), cpNums.join(' | '));
+  const tbls = classes(block(env), 'tbl');
+  const dataTbl = tbls[tbls.length - 1];
+  assert.match(text(dataTbl), /<0\.01/, text(dataTbl));
+  assert.doesNotMatch(text(dataTbl), /(?<![\d.])0\.00(?!\s+of)/, text(dataTbl));
   env.disposeHooks[0]();
 
   // The first stop after a refill, with none before it: said once, never "again".
