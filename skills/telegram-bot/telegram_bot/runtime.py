@@ -51,6 +51,7 @@ from .formatting import prepare_caption, prepare_text
 from .host import (
     HOLD_PLACE_NOT_CONNECTED,
     HoldNote,
+    PLACE_POLICY_UNREAD,
     PresenceHostHTTPError,
     PresenceSubmission,
     PresenceWorkResult,
@@ -150,6 +151,11 @@ _MODERATION_METHODS = {
 # once when its phase changes or it ends. Each store keeps the row's lease at least _UPLOAD_LEASE_SECONDS from then.
 _TRANSFER_RECORD_SECONDS = 1.0
 _UPLOAD_LEASE_SECONDS = 300.0
+# The condition telegram_send keeps in a conditional row (Ouroboros's whole owner direct-chat condition). It is read
+# only for a lease of the queue's conditional class (OutboxLease.conditional), never from a tool argument.
+OWNER_DM = "_owner_dm"
+# A conditional row without a usable current bot or private-chat check: unsent, held and rechecked.
+OWNER_DM_WAITS = "Held: This waits for the same bot and your confirmed direct chat."
 
 
 class PlaceHeld(RuntimeError):
@@ -157,9 +163,8 @@ class PlaceHeld(RuntimeError):
 
 
 class RetiredTarget(RuntimeError):
-    """The bot or the place connection a row was queued for ended before it was sent (another bot is this profile's
-    now, or that connection was disconnected or connected again). Nothing was sent; the row ends failed and is never
-    sent through another bot or connection."""
+    """The retained bot, place connection or owner confirmation cannot be used again. The still-unsent remainder
+    ends failed, without rebinding the row or changing what earlier parts confirmed."""
 
 
 def _hold_kind(exc: PlaceHeld) -> str:
@@ -1772,26 +1777,38 @@ class TelegramTransportRuntime:
         return True
 
     async def process_one_outbox(self) -> bool:
-        lease = self.store.claim_outbox(lease_sec=120.0)
+        lease = self.store.claim_outbox(lease_sec=120.0, supports_conditional=True)
         if lease is None:
             return False
-        if _is_reaction(lease.payload):
+        # The queue's own class decides first, before the payload is classified: a conditional row is a guarded,
+        # recorded text send whatever its payload says, so it never takes another kind's unguarded path, and a
+        # finished or unclear record settles it before any check.
+        if not lease.conditional and _is_reaction(lease.payload):
             await self._process_reaction(lease)
             return True
-        record_calls = _record_outbox_calls(lease.payload, is_owner_bot=self.is_owner_bot)
-        if record_calls and self._settled_by_record(lease):
+        calls = _ProviderCalls(
+            self.store, lease, recorded=_record_outbox_calls(lease.payload, is_owner_bot=self.is_owner_bot)
+        )
+        if calls.recorded and self._settled_by_record(lease):
             return True
-        calls = _ProviderCalls(self.store, lease, recorded=record_calls)
         # A send row's writes name this attempt (calls.fence), so after another claim of the row they change nothing.
         try:
-            client = await self._ready_client()
+            # The stored condition verifies the already pinned route. It never chooses a bot or permits a plain send.
+            condition = _owner_dm_condition(lease.payload) if lease.conditional else None
+            if condition is None:
+                client = await self._ready_client()
+            else:
+                if self.is_owner_bot or lease.payload.get("account_id") != condition["account_id"]:
+                    raise PlaceHeld(OWNER_DM_WAITS)
+                client = await self._owner_dm_client()
             if client is None:
                 raise self._unready()
             account = self._ensure_pinned_account(lease.payload)
             thread_id = str(lease.payload.get("topic_id") or "")
             owner_binding = self._owner_place_binding(lease.payload, thread_id=thread_id)
             send_client = self._bound_owner_client(client, owner_binding) if owner_binding is not None else client
-            lease = replace(lease, payload={**lease.payload, "_reporting": await self._resolved_reporting(lease.payload)})
+            reporting = await self._resolved_reporting(lease.payload, account if condition is not None else "")
+            lease = replace(lease, payload={**lease.payload, "_reporting": reporting})
             calls.checkpoint(lease.payload)
 
             async def before_send():
@@ -1803,8 +1820,11 @@ class TelegramTransportRuntime:
                     # after the place, so a held row reads nothing.
                     await asyncio.to_thread(outbox_files.verify, lease.payload)
 
-            receipt = await _deliver(send_client, lease, self.store, before_send=before_send, account_id=account,
-                                     delivered=self._note_delivered, calls=calls)
+            receipt = await _deliver(
+                send_client, lease, self.store, before_send=before_send, account_id=account,
+                delivered=self._note_delivered, calls=calls,
+                check_owner_dm=(lambda: self._check_owner_dm(send_client, condition)) if condition is not None else None,
+            )
             self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence)
             return True
         except PlaceHeld as exc:
@@ -1865,7 +1885,7 @@ class TelegramTransportRuntime:
                 payload = self.store.outbox_payload(lease.delivery_id)
                 # A recorded-call row gets here only through failures before a call and answers that Telegram did
                 # nothing; standalone B edits and moderation keep their earlier rule.
-                state = ("failed" if _record_outbox_calls(payload, is_owner_bot=self.is_owner_bot)
+                state = ("failed" if lease.conditional or _record_outbox_calls(payload, is_owner_bot=self.is_owner_bot)
                          or isinstance(exc, TelegramRequestNotSent)
                          or (isinstance(exc, TelegramApiError) and exc.error_code)
                          else "uncertain")
@@ -2081,14 +2101,14 @@ class TelegramTransportRuntime:
                 self._typing_sent_at.pop(key, None)
         return sent
 
-    async def _resolved_reporting(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _resolved_reporting(self, payload: Dict[str, Any], account_id: str = "") -> Dict[str, Any]:
         reporting = dict(payload.get("_reporting") or {"version": 0})
         discover = getattr(self.submitter, "discover_delivery_support", None)
         if reporting.get("version") == -1:
             reporting["version"] = await discover() if discover else 0
             reporting["status"] = getattr(self.submitter, "delivery_reporting_status", "unsupported")
-        if reporting.get("version") == 1 and not reporting.get("account_id"):
-            reporting["account_id"] = self._pinned_account(payload) or self._bot_id
+        if reporting.get("version") == 1 and (account_id or not reporting.get("account_id")):
+            reporting["account_id"] = account_id or self._pinned_account(payload) or self._bot_id
         if reporting.get("version") == 1:
             if _is_reaction(payload) and discover:
                 await discover()
@@ -2125,6 +2145,50 @@ class TelegramTransportRuntime:
                                  **({"thread_id": thread_id} if thread_id else {}))
             if reason:
                 raise PlaceHeld(reason)
+
+    async def _owner_dm_client(self) -> TelegramClient:
+        """Require a confirmed client for the current configuration before the ordinary pinned-bot check."""
+        try:
+            client = await self._ready_client()
+            token = str(self.token_provider() or "").strip()
+        except Exception as exc:
+            self._last_error = _error(exc)
+            raise PlaceHeld(PLACE_POLICY_UNREAD) from None
+        if (client is None or client is not self._client or not token or token != self._client_token
+                or not canonical_bot_id(self._bot_id)):
+            raise PlaceHeld(PLACE_POLICY_UNREAD)
+        return client
+
+    async def _check_owner_dm(self, client: TelegramClient, condition: Dict[str, Any]) -> None:
+        """Right before each physical POST of a conditional row: this very client is still the configured one and is
+        the bot the condition names (known from its own getMe, so no new read), Telegram's getChat names the
+        condition's private chat, and Ouroboros confirms the whole condition. A typed confirmation change retires the
+        unsent remainder. Other nonconfirmations hold before the POST and never permit a plain send."""
+        def same_bot() -> bool:
+            return (client is self._client and self._bot_id == condition["account_id"]
+                    and str(self.token_provider() or "").strip() == self._client_token)
+
+        confirm = getattr(self.submitter, "owner_dm_hold", None)
+        if confirm is None or not same_bot():
+            raise PlaceHeld(OWNER_DM_WAITS)
+        try:
+            chat = await client.get_chat(condition["conversation_id"])
+        except Exception as exc:
+            self._last_error = _error(exc)
+            raise PlaceHeld(PLACE_POLICY_UNREAD) from None
+        if not (_telegram_id(chat) == condition["conversation_id"] and chat.get("type") == "private"):
+            raise PlaceHeld(OWNER_DM_WAITS)
+        try:
+            reason = await confirm(condition)
+        except Exception:
+            raise PlaceHeld(PLACE_POLICY_UNREAD) from None  # its text may quote the condition
+        if isinstance(reason, HoldNote) and reason.kind == HOLD_BINDING_CHANGED:
+            raise RetiredTarget(str(reason))
+        if reason != "":
+            raise PlaceHeld(reason if isinstance(reason, str) and reason else OWNER_DM_WAITS)
+        # A change during these reads invalidates this client; the next claim checks the newly configured bot.
+        if not same_bot():
+            raise PlaceHeld(OWNER_DM_WAITS)
 
     async def _process_reaction(self, lease: OutboxLease) -> None:
         """One setMessageReaction row, sent at most once.
@@ -2284,6 +2348,44 @@ def _is_reaction(payload: Dict[str, Any]) -> bool:
     return payload.get("kind") == "operation" and payload.get("method") == REACTION_METHOD
 
 
+def _owner_dm_condition(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """A conditional row's stored condition, only while it still names this very text message; else the row waits."""
+    condition = payload.get(OWNER_DM)
+    if not (isinstance(condition, dict) and str(payload.get("kind") or "message") == "message"
+            and not payload.get("topic_id")
+            and (condition.get("provider"), condition.get("conversation_id"), condition.get("thread_id"))
+            == ("telegram", payload.get("chat_id"), "")
+            and isinstance(condition.get("account_id"), str) and _BOT_ID.fullmatch(condition["account_id"])):
+        raise PlaceHeld(OWNER_DM_WAITS)
+    return condition
+
+
+def _telegram_id(value: Any) -> str:
+    """A Telegram Chat's positive integer ``id`` as text; empty for anything else."""
+    ident = value.get("id") if isinstance(value, dict) else None
+    return str(ident) if type(ident) is int and ident > 0 else ""
+
+
+def _owner_dm_post(before_send: Optional[Callable[[], Awaitable[None]]], check: Callable[[], Awaitable[None]],
+                   calls: "_ProviderCalls", record: Dict[str, Any], part: int):
+    """send_text_chunk's ``perform_post`` for a conditional row. Before each physical POST, the plain retry that the
+    strict API permits included, ``before_send`` (the row's own place check, which the chunk loop already ran for the
+    first POST) and ``check`` run, and only then is the call stored as started, so a held row carries no marker.
+    Telegram's own 400 to a first POST has cleared its marker (_not_performed), so a hold before the retry leaves
+    nothing open and nothing sent twice."""
+    first = True
+
+    async def post(request: Callable[[], Awaitable[Any]]) -> Any:
+        nonlocal first
+        if not first and before_send:
+            await before_send()
+        first = False
+        await check()
+        return await calls.make(record, part, "sendMessage", request)
+
+    return post
+
+
 def _not_performed(exc: BaseException) -> bool:
     """Telegram's own answer that the call did nothing, or a request proved never to have left this machine."""
     return isinstance(exc, TelegramRequestNotSent) or (
@@ -2307,7 +2409,8 @@ class _ProviderCalls:
 
     def __init__(self, store: CustodyStore, lease: OutboxLease, *, recorded: Optional[bool] = None):
         self.store, self.lease = store, lease
-        self.recorded = recorded_calls(lease.payload) if recorded is None else bool(recorded)
+        # A conditional row always needs its attempt's fence, even when the caller passes recorded explicitly.
+        self.recorded = lease.conditional or (recorded_calls(lease.payload) if recorded is None else bool(recorded))
         self.fence: Optional[int] = lease.attempts if self.recorded else None
         self.open: Optional[Dict[str, Any]] = None
 
@@ -2495,6 +2598,7 @@ def _own_message(account_id: str, chat_id: str, topic_id: Any, result: Dict[str,
 async def _deliver(
     client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
     delivered: Callable[[str, Any], None] = lambda _chat, _topic: None, calls: Optional[_ProviderCalls] = None,
+    check_owner_dm: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     calls = calls or _ProviderCalls(store, lease)
     payload = lease.payload
@@ -2529,13 +2633,22 @@ async def _deliver(
                 await before_send()
             # The record with every chunk confirmed so far: the marker is stored with it, never in place of it.
             current = {**payload, "_sent_messages": messages} if messages or "_sent_messages" in payload else payload
-            result = await calls.make(current, index, "sendMessage", lambda: client.send_text_chunk(
-                chat_id,
-                chunk["text"],
-                parse_mode=chunk["parse_mode"],
-                topic_id=topic_id,
-                reply_to_message_id=reply_id if index == 0 else None,
-            ))
+            if check_owner_dm is None:
+                result = await calls.make(current, index, "sendMessage", lambda: client.send_text_chunk(
+                    chat_id,
+                    chunk["text"],
+                    parse_mode=chunk["parse_mode"],
+                    topic_id=topic_id,
+                    reply_to_message_id=reply_id if index == 0 else None,
+                ))
+            else:
+                # perform_post runs before_send (the first POST had it above) and the check before each physical POST,
+                # the plain retry included, and only then stores the started marker: a held row carries none, and a
+                # first POST with an unknown answer sends no second one.
+                result = await client.send_text_chunk(
+                    chat_id, chunk["text"], parse_mode=chunk["parse_mode"], topic_id=topic_id,
+                    reply_to_message_id=reply_id if index == 0 else None,
+                    perform_post=_owner_dm_post(before_send, check_owner_dm, calls, current, index))
             if not names_message(result):
                 raise UnconfirmedSend("sendMessage")  # its marker stays: the row ends uncertain
             report = delivery_report(lease.delivery_id, payload, part_id=index, state="delivered", receipt=result,

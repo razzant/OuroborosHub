@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.14.0
+version: 0.14.1
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -36,6 +36,7 @@ ui_tab:
 tools:
 - name: telegram_send
   effect: message
+  owner_dm: true
   target: [account_id, chat_id]
   conversation: chat_id
   thread: topic_id
@@ -844,6 +845,15 @@ different bots. The choice changes the name people see; topics, photos, document
   separate token the card is A's and asks for no token; with both, B's line leads and A's problems are named as A's.
   A's feed is read from Ouroboros on this computer, so its failures are reported as this computer's, never as
   Telegram's or the network's, and a feed that answers reads "Receiving through Ouroboros", never "Connected".
+
+## Owner-confirmed direct reply (0.14.1)
+
+A plain text reply to the confirmed owner's private chat can carry the core's
+recipient check when the selected bot and chat match the admitted conversation.
+The worker verifies that destination before each send. An unavailable check
+holds the send without spending a send attempt. A confirmed bot or owner-confirmation
+change ends the unsent remainder and keeps the earlier receipts. Unconditioned
+replies, groups, media, and other calls keep their ordinary delivery checks.
 
 ## Earlier upgrades
 
