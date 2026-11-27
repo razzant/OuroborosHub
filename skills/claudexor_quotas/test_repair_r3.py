@@ -377,6 +377,7 @@ const paceLines = (env) => walk(env.root).filter((n) => n.tagName === 'PATH'
   assert.match(env.root.textContent, /0\.70 of 2/);
   // The timeline is open on every mount: its chart is asked for and drawn.
   await respond(env, fx.good_chart);
+  click(env, 'scenario:no_new_use');
   assert.ok(paceLines(env) > 0, 'the future is drawn while current');
   env.clock.shift = 3 * 3600 * 1000;                   // 1 h past the reported reset
   env.poll();

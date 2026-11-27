@@ -812,16 +812,16 @@ def test_the_words_a_bar_opened_to_are_gone_with_the_opening():
 # The tiles of "what is left at a few moments ahead": a caption and one tile for each moment. The caption lost its colon (it is
 # a caption now, not the start of a line), the moment and the total are one phrase under the number ("in 24 h · of 20"), and the old
 # closing "(of {total})" is gone from both files.
-TILE_WORDS = ["fact.left_nothing", "fact.left_pace", "fact.tile_when"]
-TILE_WORDS_GONE = ["fact.of_total"]
+TILE_WORDS = ["fact.left_nothing", "fact.left_typical", "fact.tile_when"]
+TILE_WORDS_GONE = ["fact.of_total", "fact.left_pace"]
 
 
 def test_the_words_of_the_checkpoint_tiles_are_in_both_files_with_the_same_placeholders_and_the_widget_asks_for_them():
     for key in TILE_WORDS:
         assert key in STRINGS, key
         assert ("t('%s'" % key) in WIDGET, "the widget never asks for %s" % key
-    assert [STRINGS[key] for key in TILE_WORDS] == ["Left if nothing more is used", "Left at recent pace", "{when} · of {total}"]
-    assert not STRINGS["fact.left_nothing"].endswith(":") and not STRINGS["fact.left_pace"].endswith(":"), "a caption, not the start of a line"
+    assert [STRINGS[key] for key in TILE_WORDS] == ["Left if nothing more is used", "Left at typical pace", "{when} · of {total}"]
+    assert not STRINGS["fact.left_nothing"].endswith(":") and not STRINGS["fact.left_typical"].endswith(":"), "a caption, not the start of a line"
     # what the widget passes is what the phrase has
     assert _placeholders(STRINGS["fact.tile_when"]) == {"when", "total"}
     assert "t('fact.tile_when', { when: offsetWords(cp.after_seconds), total: chart.y_max })" in WIDGET

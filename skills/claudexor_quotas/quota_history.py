@@ -55,6 +55,7 @@ sweep is rolled back) and a sweep that never reaches it may still be written.
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
 import sqlite3
@@ -200,6 +201,28 @@ def _run_of(row: Tuple[Any, ...]) -> qs.Run:
         after_gap=bool(row[9]),
         after_correction=bool(row[10]),
     )
+
+
+def _fair_quotas(counts: Dict[Tuple[str, str], int], budget: int) -> Dict[Tuple[str, str], int]:
+    """Max-min fair allocation of ``budget`` rows across pairs by count.
+
+    Pairs that fit within the current fair share keep every row so empty or
+    lighter pairs never starve active ones; any surplus redistributes across
+    larger pairs and the sum never exceeds ``budget``.
+    """
+    quotas: Dict[Tuple[str, str], int] = {}
+    rem_budget = max(0, int(budget))
+    ordered = sorted(counts.items(), key=lambda item: (item[1], item[0]))
+    rem_pairs = len(ordered)
+    for pair, cnt in ordered:
+        if rem_budget <= 0 or cnt <= 0:
+            quotas[pair] = 0
+        else:
+            take = min(cnt, max(1, rem_budget // rem_pairs))
+            quotas[pair] = take
+            rem_budget -= take
+        rem_pairs -= 1
+    return quotas
 
 
 class HistoryStore:
@@ -518,7 +541,7 @@ class HistoryStore:
     # -- reader ------------------------------------------------------------
 
     def read(self, requests: Callable[[str], Dict[Tuple[str, str], float]],
-             now: float, *, max_rows: int = MAX_READ_ROWS,
+             now: float, *, max_rows: Optional[int] = None,
              latest: Optional[Callable[[str], Iterable[Tuple[str, str]]]] = None,
              roster: Optional[Callable[[str], Iterable[str]]] = None,
              chart_series: Optional[Tuple[str, float]] = None) -> qs.HistoryView:
@@ -552,6 +575,7 @@ class HistoryStore:
         except sqlite3.Error as exc:
             return qs.HistoryView(state="unavailable", error=f"history unreadable: {type(exc).__name__}")
         try:
+            conn.execute("BEGIN")
             meta = self._validate(conn)
             salt = str(meta.get("salt") or "")
             view = qs.HistoryView(state="ok", salt=salt)
@@ -587,6 +611,7 @@ class HistoryStore:
                     (series, MAX_LATEST_PAIRS + 1)).fetchall()
                 if len(subjects) > MAX_LATEST_PAIRS:
                     view.truncated = True
+                    view.truncated_at[series] = math.inf
                 for (subject,) in subjects[:MAX_LATEST_PAIRS]:
                     pair = (str(subject), series)
                     wanted[pair] = min(wanted.get(pair, float(since)), float(since))
@@ -594,35 +619,138 @@ class HistoryStore:
                 # Read before the runs: a sweep committed in between can only
                 # make a run newer than this list, never older.
                 view.sweeps_from = min(float(since) for since in wanted.values())
-                view.sweeps = [float(at) for (at,) in conn.execute(
-                    "SELECT at FROM sweep WHERE at>=? ORDER BY at DESC LIMIT ?",
-                    (view.sweeps_from, MAX_READ_SWEEPS))][::-1]
+                sweep_rows = conn.execute(
+                    "SELECT at, ok FROM sweep WHERE at>=? ORDER BY at DESC LIMIT ?",
+                    (view.sweeps_from, MAX_READ_SWEEPS)).fetchall()[::-1]
+                view.sweeps = [float(at) for at, _ok in sweep_rows]
+                view.sweep_ok = [bool(ok) for _at, ok in sweep_rows]
                 if len(view.sweeps) >= MAX_READ_SWEEPS:
                     # The newest are kept; nothing is claimed before them.
                     view.sweeps_from = view.sweeps[0]
                     view.truncated = True
-            budget = max(1, int(max_rows))
+                    for series in {s for _sub, s in wanted}:
+                        view.truncated_at[series] = max(
+                            view.truncated_at.get(series, -math.inf), view.sweeps_from
+                        )
+            budget = max(1, int(MAX_READ_ROWS if max_rows is None else max_rows))
             ordered = sorted(wanted.items())
-            for pair_index, ((subject, series), since) in enumerate(ordered):
-                if budget <= 0:
-                    view.truncated = True
-                    break
-                # A wider calibration read must not spend every later
-                # account's trailing-hour evidence. Each pair gets a fair
-                # share of the remaining cap, newest first; unused shares
-                # carry forward. Any shortened history remains disclosed.
-                allowance = max(1, budget // (len(ordered) - pair_index))
-                rows = conn.execute(
-                    f"SELECT {_RUN_FIELDS} FROM run WHERE subject=? AND series=? AND last_seen>=? "
-                    "ORDER BY first_seen DESC, id DESC LIMIT ?",
-                    (subject, series, float(since), allowance + 1),
-                ).fetchall()
-                if len(rows) > allowance:
-                    view.truncated = True
-                    rows = rows[:allowance]
-                budget -= len(rows)
-                view.runs[(subject, series)] = [_run_of(row) for row in reversed(rows)]
-                if chart_series is not None and series == chart_series[0] and budget > 0:
+            chart_key = chart_series[0] if chart_series is not None else None
+            typical_since = qs.typical_history_since(now)
+            pace_since = qs.rate_since(now)
+            collected: Dict[Tuple[str, str], List[Tuple[int, qs.Run]]] = {
+                pair: [] for pair, _since in ordered
+            }
+
+            def read_pass(specs: List[Tuple[Tuple[str, str], float, Optional[float]]]) -> None:
+                nonlocal budget
+                if not specs:
+                    return
+                counts: Dict[Tuple[str, str], int] = {}
+                for pair, lo, hi in specs:
+                    subject, series = pair
+                    if hi is None:
+                        cnt = conn.execute(
+                            "SELECT count(*) FROM run WHERE subject=? AND series=? AND last_seen>=?",
+                            (subject, series, lo),
+                        ).fetchone()[0]
+                    else:
+                        cnt = conn.execute(
+                            "SELECT count(*) FROM run WHERE subject=? AND series=? "
+                            "AND last_seen>=? AND last_seen<?",
+                            (subject, series, lo, hi),
+                        ).fetchone()[0]
+                    counts[pair] = int(cnt)
+                quotas = _fair_quotas(counts, budget)
+                for pair, lo, hi in specs:
+                    cnt = counts[pair]
+                    if cnt <= 0:
+                        continue
+                    subject, series = pair
+                    take = quotas[pair]
+                    rows = []
+                    if take > 0:
+                        if hi is None:
+                            rows = conn.execute(
+                                f"SELECT id, {_RUN_FIELDS} FROM run WHERE subject=? AND series=? "
+                                "AND last_seen>=? ORDER BY first_seen DESC, id DESC LIMIT ?",
+                                (subject, series, lo, take),
+                            ).fetchall()
+                        else:
+                            rows = conn.execute(
+                                f"SELECT id, {_RUN_FIELDS} FROM run WHERE subject=? AND series=? "
+                                "AND last_seen>=? AND last_seen<? ORDER BY first_seen DESC, id DESC LIMIT ?",
+                                (subject, series, lo, hi, take),
+                            ).fetchall()
+                        budget -= len(rows)
+                        for row in rows:
+                            collected[pair].append((int(row[0]), _run_of(row[1:])))
+                    if take < cnt:
+                        view.truncated = True
+                        if rows:
+                            last_id = int(rows[-1][0])
+                            last_first_seen = _run_of(rows[-1][1:]).first_seen
+                            if hi is None:
+                                dropped_at = conn.execute(
+                                    "SELECT max(last_seen) FROM run WHERE subject=? AND series=? "
+                                    "AND last_seen>=? AND (first_seen<? OR (first_seen=? AND id<?))",
+                                    (subject, series, lo, last_first_seen, last_first_seen, last_id),
+                                ).fetchone()[0]
+                            else:
+                                dropped_at = conn.execute(
+                                    "SELECT max(last_seen) FROM run WHERE subject=? AND series=? "
+                                    "AND last_seen>=? AND last_seen<? "
+                                    "AND (first_seen<? OR (first_seen=? AND id<?))",
+                                    (subject, series, lo, hi, last_first_seen, last_first_seen, last_id),
+                                ).fetchone()[0]
+                        elif hi is None:
+                            dropped_at = conn.execute(
+                                "SELECT max(last_seen) FROM run WHERE subject=? AND series=? "
+                                "AND last_seen>=?",
+                                (subject, series, lo),
+                            ).fetchone()[0]
+                        else:
+                            dropped_at = conn.execute(
+                                "SELECT max(last_seen) FROM run WHERE subject=? AND series=? "
+                                "AND last_seen>=? AND last_seen<?",
+                                (subject, series, lo, hi),
+                            ).fetchone()[0]
+                        if dropped_at is not None:
+                            view.truncated_at[series] = max(
+                                view.truncated_at.get(series, -math.inf), float(dropped_at)
+                            )
+
+            # Two-pass bounded read within the same row cap: protect fresh
+            # calculation windows first (48h for the charted series, trailing
+            # hour for other series), then spend the remaining budget on older
+            # chart/calibration history and left-edge seeds.
+            pass1: List[Tuple[Tuple[str, str], float, Optional[float]]] = []
+            pass2: List[Tuple[Tuple[str, str], float, Optional[float]]] = []
+            for pair, since in ordered:
+                floor = typical_since if pair[1] == chart_key else pace_since
+                p1_since = max(float(since), floor)
+                pass1.append((pair, p1_since, None))
+                if float(since) < p1_since:
+                    pass2.append((pair, float(since), p1_since))
+            read_pass(pass1)
+            read_pass(pass2)
+            for pair, _since in ordered:
+                items = collected[pair]
+                items.sort(key=lambda item: (item[1].first_seen, item[0]))
+                view.runs[pair] = [run for _row_id, run in items]
+            if chart_key is not None:
+                for (subject, series), since in ordered:
+                    if series != chart_key:
+                        continue
+                    if budget <= 0:
+                        if view.truncated:
+                            break
+                        if conn.execute(
+                            "SELECT 1 FROM run WHERE subject=? AND series=? AND last_seen<? LIMIT 1",
+                            (subject, series, float(since)),
+                        ).fetchone() is not None:
+                            view.truncated = True
+                            break
+                        continue
                     # Seed a carry at the left edge from the newest older
                     # run of each source, never from an observation after it.
                     sources = conn.execute(
@@ -632,17 +760,18 @@ class HistoryStore:
                         view.truncated = True
                     seeds = []
                     for (source,) in sources[:MAX_SOURCES_PER_PAIR]:
-                        if budget <= 0:
-                            view.truncated = True
-                            break
                         seed = conn.execute(
                             f"SELECT {_RUN_FIELDS} FROM run WHERE subject=? AND series=? "
                             "AND source=? AND last_seen<? ORDER BY last_seen DESC, id DESC LIMIT 1",
                             (subject, series, source, float(since))).fetchone()
                         if seed is not None:
+                            if budget <= 0:
+                                view.truncated = True
+                                break
                             seeds.append(_run_of(seed))
                             budget -= 1
-                    view.runs[(subject, series)] = seeds + view.runs[(subject, series)]
+                    if seeds:
+                        view.runs[(subject, series)] = seeds + view.runs[(subject, series)]
             pairs = set(latest(salt)) if (latest is not None and salt) else set()
             for subject in sorted(set(roster(salt))) if (roster is not None and salt) else []:
                 found = [str(s) for (s,) in conn.execute(
@@ -679,6 +808,11 @@ class HistoryStore:
         except (sqlite3.Error, HistoryCorrupt) as exc:
             return qs.HistoryView(state="unavailable", error=f"history unreadable: {type(exc).__name__}")
         finally:
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             conn.close()
 
     @staticmethod

@@ -103,7 +103,7 @@ const respond = (env, view) => {
 };
 
 (async () => {
-  const fx = JSON.parse(process.env.BARS_FIXTURE);
+  const fx = JSON.parse(fs.readFileSync(process.env.BARS_FIXTURE, 'utf8'));
   const mode = process.env.BARS_CASE;
   const groups = (v) => v.reserve.summary.groups.filter((g) => (g.bars || []).some((b) => b.account));
   const env = await boot(fx.views.base);
@@ -298,7 +298,7 @@ def cursor_views(tmp_path_factory):
 
 
 @pytest.mark.parametrize("case", NODE_CASES)
-def test_node_the_choice_of_the_top_bar(request, base_view, case):
+def test_node_the_choice_of_the_top_bar(request, base_view, case, tmp_path):
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
     harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
@@ -310,9 +310,11 @@ def test_node_the_choice_of_the_top_bar(request, base_view, case):
              "bare": _variant(base_view, no_account=True)}
     if case.startswith("cursor_"):
         views.update(request.getfixturevalue("cursor_views"))
+    fixture_path = tmp_path / "bars-fixture.json"
+    fixture_path.write_text(json.dumps({"views": views}), encoding="utf-8")
     result = subprocess.run(
         [str(node), "-e", harness + NODE_BARS], cwd=WIDGET.parent,
-        env={**os.environ, "WIDGET_PATH": str(WIDGET), "BARS_CASE": case, "BARS_FIXTURE": json.dumps({"views": views})},
+        env={**os.environ, "WIDGET_PATH": str(WIDGET), "BARS_CASE": case, "BARS_FIXTURE": str(fixture_path)},
         capture_output=True, text=True, timeout=90, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

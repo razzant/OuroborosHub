@@ -48,10 +48,11 @@
     // mount opens on the limit's own span — a week for a limit longer than a
     // day, else a day — until the reader picks one.
     var HORIZONS = ['24h', '7d'];
-    // The two futures the timeline can draw, both of the accounts read now.
+    // The two futures the timeline can draw, both of the accounts read now:
+    // the 48-hour typical pooled pace (default) and no new use (refills only).
     var SCENARIOS = [
-        { key: 'no_new_use' },
-        { key: 'recent_pace' }
+        { key: 'typical' },
+        { key: 'no_new_use' }
     ];
 
     var root = document.getElementById('root');
@@ -95,8 +96,8 @@
     var actionMessage = '';
     // The timeline: open on every mount. Its limit per family is the one the
     // reader picked, else the family's "lowest left"; the horizon is the
-    // reader's pick ('' = the limit's own); the scenario starts at "no new
-    // use". The last chart request asked on the reader's behalf is kept so a
+    // reader's pick ('' = the limit's own); the scenario starts at "typical".
+    // The last chart request asked on the reader's behalf is kept so a
     // mismatch is asked about once, never in a loop.
     var timelineOpen = true;
     // The timers of the pointer's and the focus's going off the card (a beat is kept so the edge does not flicker); the card the script drew last.
@@ -117,7 +118,7 @@
     var modelChoice = '';
     var kindChoice = 'text';
     var modelMenuOpen = false;
-    var scenario = 'no_new_use';
+    var scenario = 'typical';
     var detailsOpen = false;
     // The fold inside the Details ("How it is counted"), open or shut like the Details are.
     var howOpen = false;
@@ -783,6 +784,30 @@
         ".wt-controls>.tl-model{margin:0 0 0 auto}",
         ".wt-controls+.tl-model-panel{margin-top:var(--space-2)}",
         ".wt-controls~.tl-hero{margin-top:var(--space-3)}",
+        // Pre-first-reset verdict strip above the chart (typical pooled forecast and no-new-use summary).
+        ".tl-verdict{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2) var(--space-4);margin-top:var(--space-2);padding:var(--space-2) var(--space-3);border-radius:var(--radius-row);background:var(--tint-2)}",
+        ".tl-verdict-main{min-width:0;flex:1 1 auto}",
+        ".tl-verdict-head{display:flex;align-items:center;gap:var(--space-1h);font-size:var(--type-body);font-weight:var(--weight-semibold);line-height:var(--lh-ui);color:var(--text-primary)}",
+        ".tl-verdict-head>span{min-width:0;overflow-wrap:anywhere}",
+        ".tl-verdict-head.warn{color:var(--warn-text)}",
+        ".tl-verdict-head.bad{color:var(--bad-text)}",
+        ".tl-verdict-head.ok{color:var(--status-ok)}",
+        ".tl-verdict-sub{margin-top:var(--space-0);font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--text-meta);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}",
+        ".tl-verdict-figs{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-2) var(--space-4);flex:none;text-align:right;font-variant-numeric:tabular-nums}",
+        ".tl-vfig{display:flex;flex-direction:column;align-items:flex-end;gap:var(--space-0)}",
+        ".tl-vfig-k{font-size:var(--type-meta);line-height:var(--lh-tight);color:var(--text-meta);white-space:nowrap}",
+        ".tl-vfig-v{font-size:var(--type-section);font-weight:var(--weight-semibold);line-height:var(--lh-tight);color:var(--text-primary);white-space:nowrap}",
+        ".tl-vfig-v.warn{color:var(--warn-text)}",
+        ".tl-vfig-v.bad{color:var(--bad-text)}",
+        ".tl-vfig-v.ok{color:var(--status-ok)}",
+        // Active 48h typical forecast line uses the scenario ink (distinct from recorded history and idle refills); depletion markers use status inks.
+        ".tl-block[data-scenario=typical] .line-scenario,.tl-block[data-scenario=typical] .cursor-dot.line-scenario{stroke:var(--scenario-ink)}",
+        ".tl-block[data-scenario=typical] .cursor-dot.line-scenario,.tl-block[data-scenario=typical] .scenario-start{fill:var(--scenario-ink)}",
+        ".tl-block[data-scenario=typical] .area-scenario{fill:url(#qa-area-typical);opacity:.38}",
+        ".chart-svg .deplete-dot{r:var(--chart-dot-reset);fill:var(--surface);stroke:var(--warn-text);stroke-width:var(--ring-w)}",
+        ".chart-svg .deplete-dot.bad{stroke:var(--bad-text)}",
+        ".chart-svg .deplete-line{stroke:var(--bad-text);stroke-width:var(--ring-w);stroke-dasharray:var(--chart-dash-reset);opacity:.65}",
+        "@media(max-width:600px){.tl-verdict{flex-direction:column;align-items:stretch;gap:var(--space-1h)}.tl-verdict-figs{justify-content:flex-start;text-align:left;gap:var(--space-2) var(--space-4)}.tl-vfig{align-items:flex-start}.wt-controls>.tl-model{margin-left:0}}",
         "@media(max-width:520.98px){.tl-block{padding-inline:var(--space-1)}.reserve-detail{grid-template-columns:minmax(0,1fr)}.reserve-detail dt{padding-bottom:0;border-bottom:0}.reserve-detail dd{padding-top:var(--space-0)}.schedule-card{overflow-x:auto}.cp-tiles{grid-auto-flow:row}.cp-tile{padding:var(--space-2) var(--space-3)}.tl-model{max-width:100%}.tl-hero{display:block}.tl-next{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 var(--space-2);margin-top:var(--space-1);text-align:left}.tl-block .tl-controls{gap:var(--space-2)}}",
         /* capsule: account card */
         // On a narrow screen (520px and under) the stamp and the chart word take a row of their own, the words of the stamp and of the reset wrap: the card is narrower than the plate they stood in.
@@ -5475,9 +5500,21 @@
 
     // The scenario drawn: the reader's pick, from the skill's chart. None on
     // a chart with no current reading (a kept screen, or nothing current).
+    // Combined has no pooled 48h typical scenario (never silently substitutes
+    // No new use), and unknown Typical carries an empty line (never falls back
+    // to No new use's numeric curve or checkpoints).
     function scenarioOf(chart) {
         var all = chart && chart.scenarios;
-        return all && all[scenario] ? all[scenario] : null;
+        if (!all) return null;
+        if (chart.mode === 'joint' && scenario === 'typical') return null;
+        if (scenario === 'typical') return all.typical || null;
+        return all[scenario] || null;
+    }
+
+    function hasFutureLine(sc) {
+        if (!sc || !Array.isArray(sc.line) || sc.line.length === 0) return false;
+        if (sc.status && sc.status !== 'ok' && sc.status !== 'zero') return false;
+        return true;
     }
 
     // `quiet` keeps the group's name for a screen reader only: the options
@@ -5561,6 +5598,13 @@
         return jointUnit(joint, 'left');
     }
 
+    function jointUnknownList(joint) {
+        var reasons = (joint && joint.unknown_reasons) || {};
+        return Object.keys(reasons).map(function (why) {
+            return reasons[why] + ' ' + why.replace(/_/g, ' ');
+        }).join(', ');
+    }
+
     // The combined view's figures, once: the figure now and whose it is, the
     // conditional hours, who is left out and why, and what the number is not.
     // On a kept screen (`readAt`, the answer's moment) nobody is counted now:
@@ -5582,10 +5626,8 @@
                 known: hours.known, unknown: hours.unknown })));
         }
         box.appendChild(line);
-        var left = Object.keys(joint.unknown_reasons || {}).map(function (why) {
-            return joint.unknown_reasons[why] + ' ' + why.replace(/_/g, ' ');
-        });
-        if (left.length) box.appendChild(el('div', null, t('joint.left_out_why', { list: left.join(', ') })));
+        var left = jointUnknownList(joint);
+        if (left) box.appendChild(el('div', null, t('joint.left_out_why', { list: left })));
         var cal = joint.calibration || {};
         box.appendChild(el('div', null, t('joint.windows', { list: (joint.windows || []).map(function (w) { return w.label; }).join(' + ') })
             + (cal.calibrated !== undefined ? ' · ' + t('joint.calibrated', { accounts: plural(cal.calibrated, 'account') }) : '')
@@ -5771,8 +5813,12 @@
             : t('joint.counted', { known: joint.known, of: plural(joint.accounts, 'account') })
             + (joint.accounts > joint.known ? ' · ' + t('joint.left_out', { n: joint.accounts - joint.known }) : '');
         var next = null;
-        var first = sc && (sc.schedule || [])[0];
+        var schedSrc = hasFutureLine(sc) ? sc : (shown.scenarios && shown.scenarios.no_new_use);
+        var first = schedSrc && (schedSrc.schedule || [])[0];
+        // The next known reset, even past the span drawn (the 24 h chart can end before it).
+        var later = schedSrc && schedSrc.later;
         if (first) next = { iso: isoOf(first.at), accounts: first.accounts };
+        else if (later && typeof later.at === 'number') next = { iso: isoOf(later.at), accounts: later.accounts };
         var big = el('div', 'tl-num', figure);
         big.appendChild(el('span', 'meta-line tl-unit', unit));
         left.appendChild(big);
@@ -5790,15 +5836,333 @@
         return hero;
     }
 
+    // Compact local-time label for the verdict strip: clock time when within
+    // ~20 hours of now, else date and clock time so a reset days ahead is clear.
+    function shortMoment(sec, nowSec) {
+        if (typeof sec !== 'number' || !isFinite(sec)) return '';
+        var iso = isoOf(sec);
+        if (typeof nowSec === 'number' && isFinite(nowSec) && Math.abs(sec - nowSec) <= 20 * 3600) {
+            return clockAt(iso);
+        }
+        return whenWords(iso);
+    }
+
+    function gapWords(sec) {
+        var mins = Math.max(1, Math.round(sec / 60));
+        if (mins < 60) return t('ladder.in_min', { v: mins });
+        if (mins >= 24 * 60) {
+            var d = Math.floor(mins / (24 * 60));
+            var rh = Math.round((mins % (24 * 60)) / 60);
+            if (rh === 24) { d++; rh = 0; }
+            return rh ? t('ladder.in_day_hour', { d: d, h: rh }) : t('ladder.in_day', { v: d });
+        }
+        var h = Math.floor(mins / 60);
+        var m = mins % 60;
+        return m ? t('verdict.hm', { h: h, m: m }) : t('ladder.in_hour', { v: h });
+    }
+
+    // Valid hours are never said as more than were measured: floored to a tenth, and below a minimum not met
+    // (``cap``) never shown as that minimum ("11.9h valid of 12h needed", never "12h valid of 12h needed").
+    function validHoursWords(h, cap) {
+        var v = typeof h === 'number' && isFinite(h) ? Math.max(0, h) : 0;
+        var tenths = Math.floor(v * 10 + 1e-6);
+        if (typeof cap === 'number' && isFinite(cap) && cap > 0 && tenths >= cap * 10) tenths = cap * 10 - 1;
+        var label = tenths % 10 === 0 ? String(tenths / 10) : (tenths / 10).toFixed(1);
+        return t('verdict.valid_hours', { h: label });
+    }
+
+    // Account-windows to two decimals: a positive amount that rounds to 0.00 is
+    // "<0.01" (amountWords), never a zero that is not there; a real zero stays 0.00.
+    function winVal(v) {
+        return v !== null && v !== undefined ? t('verdict.win_val', { v: amountWords(v) }) : '—';
+    }
+
+    // A pace in windows per hour to three decimals, "<0.001" for a positive pace
+    // that rounds to 0.000 (the skill keeps such a pace positive).
+    function rateWords(r) {
+        if (typeof r !== 'number' || !isFinite(r)) return '';
+        var text = r.toFixed(3);
+        return text === '0.000' && r > 0 ? '<0.001' : text;
+    }
+
+    // A stop of usable reserve this long or longer is drawn as bad; a shorter
+    // real stop as a warning (quota_forecast.VERDICT_GAP_BAD_SEC).
+    var GAP_BAD_SEC = 900;
+
+    function stopTone(gap) {
+        return typeof gap === 'number' && isFinite(gap) && gap < GAP_BAD_SEC ? 'warn' : 'bad';
+    }
+
+    // Pre-first-reset verdict strip placed between the controls and the plot.
+    function forecastVerdict(shown, sc, limitName) {
+        if (!shown || shown.kept) return null;
+        if (shown.mode === 'joint') {
+            if (scenario !== 'typical') return null;
+            var jStrip = el('div', 'tl-verdict');
+            jStrip.setAttribute('role', 'status');
+            var jMain = el('div', 'tl-verdict-main');
+            var jHead = el('div', 'tl-verdict-head');
+            jHead.appendChild(stateDot('muted', false));
+            jHead.appendChild(el('span', null, t('verdict.joint_head')));
+            jMain.appendChild(jHead);
+            var hasJointRefills = !!(shown.scenarios && shown.scenarios.no_new_use);
+            var jSub;
+            if (hasJointRefills) {
+                jSub = t('verdict.joint_sub');
+            } else {
+                var jWhy = jointUnknownList(shown.joint_note);
+                jSub = jWhy
+                    ? t('verdict.joint_no_refills_sub', { why: jWhy })
+                    : t('verdict.joint_no_refills_plain_sub');
+            }
+            jMain.appendChild(el('div', 'tl-verdict-sub', jSub));
+            jStrip.appendChild(jMain);
+            return jStrip;
+        }
+        if (!sc && scenario === 'typical' && shown.scenarios && shown.scenarios.no_new_use) {
+            var legStrip = el('div', 'tl-verdict');
+            legStrip.setAttribute('role', 'status');
+            var legMain = el('div', 'tl-verdict-main');
+            var legHead = el('div', 'tl-verdict-head');
+            legHead.appendChild(stateDot('muted', false));
+            legHead.appendChild(el('span', null, t('verdict.insufficient_head', { limit: limitName })));
+            legMain.appendChild(legHead);
+            legMain.appendChild(el('div', 'tl-verdict-sub', t('verdict.insufficient_sub', { valid: validHoursWords(0), min: 12 })));
+            legStrip.appendChild(legMain);
+            return legStrip;
+        }
+        var v = sc && sc.verdict;
+        if (!v) return null;
+        var strip = el('div', 'tl-verdict');
+        strip.setAttribute('role', 'status');
+        var main = el('div', 'tl-verdict-main');
+        var resetShort = v.first_reset_at ? shortMoment(v.first_reset_at, shown.now) : '';
+        var emptyShort = v.empty_at ? shortMoment(v.empty_at, shown.now) : '';
+        var resumesShort = v.resumes_at ? shortMoment(v.resumes_at, shown.now) : '';
+        var hoursText = validHoursWords(v.valid_hours);
+        var tone = 'ok';
+        var headline = '';
+        var sub = '';
+        var st = v.state;
+        var unknownTypical = scenario === 'typical' && (st === 'insufficient' || st === 'unavailable' || st === 'held');
+
+        if (scenario === 'no_new_use' || st === 'no_new_use' || st === 'no_new_use_no_reset') {
+            tone = 'ok';
+            if (v.first_reset_at) {
+                headline = t('verdict.no_new_use_head', { left: winVal(v.before_first_reset), reset: resetShort });
+                sub = t('verdict.no_new_use_sub', {
+                    limit: limitName,
+                    when: whenWords(isoOf(v.first_reset_at)),
+                    adds: amountWords(v.first_reset_adds !== null && v.first_reset_adds !== undefined ? v.first_reset_adds : v.first_reset_accounts),
+                    after: winVal(v.after_first_reset)
+                });
+            } else {
+                headline = t('verdict.no_new_use_no_reset_head', { left: winVal(v.current) });
+                sub = t('verdict.no_new_use_no_reset_sub', { limit: limitName });
+            }
+        } else if (st === 'runs_out') {
+            // Any real stop before the reset is said as one, however short: its length sets only the tone.
+            tone = stopTone(v.gap_seconds);
+            headline = t('verdict.runs_out_head', { limit: limitName, gap: gapWords(v.gap_seconds), reset: resetShort });
+            sub = t('verdict.runs_out_sub', { empty: emptyShort, rate: rateWords(v.rate_per_hour), hours: hoursText });
+        } else if (st === 'blocked_gap') {
+            // No usable reserve for a stretch: what can run is spent, the rest is on restricted accounts, or the
+            // reset does not bring it back (that account is restricted then). It ends at the first event that brings
+            // usable reserve back, or no known event does.
+            tone = stopTone(v.gap_seconds);
+            if (v.empty_at !== null && v.empty_at <= shown.now + 1) {
+                headline = v.resumes_at
+                    ? t('verdict.blocked_now_head', { limit: limitName, resumes: resumesShort })
+                    : t('verdict.blocked_now_no_resume_head', { limit: limitName });
+            } else {
+                headline = v.resumes_at
+                    ? t('verdict.blocked_gap_head', { limit: limitName, empty: emptyShort, resumes: resumesShort })
+                    : t('verdict.blocked_gap_no_resume_head', { limit: limitName, empty: emptyShort });
+            }
+            sub = v.locked_at_empty !== null && v.locked_at_empty !== undefined
+                ? t('verdict.blocked_gap_sub', { locked: winVal(v.locked_at_empty), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                : t('verdict.runs_out_sub', { empty: emptyShort, rate: rateWords(v.rate_per_hour), hours: hoursText });
+        } else if (st === 'unknown_gap') {
+            // What the accounts known to be able to run hold is spent; the rest is on accounts another limit of which is
+            // not known now. Whether work stops then is a condition: a warning, never a confirmed outage.
+            tone = 'warn';
+            headline = v.empty_at !== null && v.empty_at <= shown.now + 1
+                ? t('verdict.unknown_now_head', { limit: limitName })
+                : t('verdict.unknown_gap_head', { limit: limitName, empty: emptyShort });
+            var lockedNow = v.locked_at_empty !== null && v.locked_at_empty !== undefined;
+            if (v.unknown_at_empty !== null && v.unknown_at_empty !== undefined) {
+                sub = t(lockedNow ? 'verdict.unknown_locked_sub' : 'verdict.unknown_gap_sub', {
+                    unknown: winVal(v.unknown_at_empty), locked: winVal(v.locked_at_empty),
+                    rate: rateWords(v.rate_per_hour), hours: hoursText
+                });
+            } else {
+                // Nothing is on such accounts when it starts; one refills or comes off restriction before the known return.
+                sub = (lockedNow
+                    ? t('verdict.blocked_gap_sub', { locked: winVal(v.locked_at_empty), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                    : t('verdict.runs_out_sub', { empty: emptyShort, rate: rateWords(v.rate_per_hour), hours: hoursText }))
+                    + ' · ' + t(v.unknown_refilled === false ? 'verdict.unknown_unblocks' : 'verdict.unknown_refills');
+            }
+        } else if (st === 'tight') {
+            // Reserve stays above zero until the reset or unlock (or touches it right there): a margin, not a stop.
+            tone = 'warn';
+            if (v.tight_unlock_at) {
+                var tightUnlock = shortMoment(v.tight_unlock_at, shown.now);
+                var unlockLeft = v.before_tight_unlock !== undefined && v.before_tight_unlock !== null ? v.before_tight_unlock : v.before_first_reset;
+                headline = t('verdict.tight_unlock_head', { limit: limitName, when: tightUnlock });
+                sub = v.usable_before_unlock !== undefined && v.usable_before_unlock !== null
+                    ? t('verdict.tight_unlock_usable_sub', { usable: winVal(v.usable_before_unlock), when: tightUnlock, left: winVal(unlockLeft), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                    : t('verdict.tight_unlock_sub', { when: tightUnlock, left: winVal(unlockLeft), rate: rateWords(v.rate_per_hour), hours: hoursText });
+            } else {
+                var tightReset = v.tight_reset_at ? shortMoment(v.tight_reset_at, shown.now) : resetShort;
+                var tightLeft = v.before_tight_reset !== undefined && v.before_tight_reset !== null ? v.before_tight_reset : v.before_first_reset;
+                headline = t('verdict.tight_head', { limit: limitName, reset: tightReset });
+                sub = v.usable_before_reset !== undefined && v.usable_before_reset !== null
+                    ? t('verdict.tight_usable_sub', { usable: winVal(v.usable_before_reset), left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                    : t('verdict.tight_sub', { left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText });
+            }
+        } else if (st === 'lasts') {
+            tone = 'ok';
+            headline = t('verdict.lasts_head', { limit: limitName, reset: resetShort });
+            sub = t('verdict.lasts_sub', { left: winVal(v.before_first_reset), rate: rateWords(v.rate_per_hour), hours: hoursText });
+        } else if (st === 'empty_now') {
+            tone = 'bad';
+            if (v.first_reset_at) {
+                headline = t('verdict.empty_now_head', { limit: limitName, reset: resetShort });
+                sub = t('verdict.empty_now_sub', {
+                    when: whenWords(isoOf(v.first_reset_at)),
+                    adds: amountWords(v.first_reset_adds !== null && v.first_reset_adds !== undefined ? v.first_reset_adds : v.first_reset_accounts),
+                    after: winVal(v.after_first_reset)
+                });
+            } else {
+                headline = t('verdict.empty_now_no_reset_head', { limit: limitName });
+                sub = t('verdict.empty_now_no_reset_sub');
+            }
+        } else if (st === 'runs_out_no_reset') {
+            tone = v.empty_at && v.empty_at <= shown.end ? 'bad' : 'warn';
+            headline = t('verdict.runs_out_no_reset_head', { limit: limitName, 'in': gapWords(Math.max(60, v.empty_at - shown.now)) });
+            sub = t('verdict.runs_out_no_reset_sub', { empty: emptyShort, rate: rateWords(v.rate_per_hour), hours: hoursText });
+        } else if (st === 'lasts_no_reset') {
+            tone = 'muted';
+            headline = t('verdict.lasts_no_reset_head', { limit: limitName, rate: rateWords(v.rate_per_hour) });
+            sub = t('verdict.lasts_no_reset_sub', { hours: hoursText });
+        } else if (st === 'zero_pace') {
+            tone = 'ok';
+            headline = v.first_reset_at
+                ? t('verdict.zero_head', { limit: limitName, reset: resetShort })
+                : t('verdict.zero_no_reset_head', { limit: limitName });
+            sub = t('verdict.zero_sub', { hours: hoursText });
+        } else if (st === 'unavailable') {
+            tone = 'muted';
+            headline = t('verdict.unavailable_head', { limit: limitName });
+            sub = t(v.reason === 'history_truncated' ? 'verdict.truncated_sub' : 'verdict.unavailable_sub');
+        } else if (st === 'held') {
+            tone = 'muted';
+            var hKey = v.held_reason === 'scope_not' ? 'verdict.held_scope_not_head'
+                : v.held_reason === 'scope_unknown' ? 'verdict.held_scope_unknown_head'
+                : v.held_reason === 'other_limit_spent' ? 'verdict.held_other_spent_head'
+                : v.held_reason === 'restricted' ? 'verdict.held_restricted_head'
+                : v.held_reason === 'mixed' ? 'verdict.held_mixed_head'
+                : 'verdict.held_window_unknown_head';
+            headline = t(hKey, { limit: limitName });
+            var hBase = v.rate_per_hour !== null && v.rate_per_hour !== undefined
+                ? t('verdict.held_sub_rate', { rate: rateWords(v.rate_per_hour), hours: hoursText })
+                : t('verdict.held_sub_plain');
+            var hCounts = v.held_reason === 'mixed' ? heldCountsWords(v) : [];
+            sub = hCounts.length ? hCounts.join(' · ') + ' · ' + hBase : hBase;
+        } else if (v.reason === 'all_observed_at_limit') {
+            // The hours were watched, but every account sat at its limit: its use could not be seen. Said apart from
+            // "not enough history", which a watched-hours count would wrongly suggest.
+            tone = 'muted';
+            headline = t('verdict.at_limit_head', { limit: limitName });
+            sub = t('verdict.at_limit_sub');
+        } else {
+            tone = 'muted';
+            headline = t('verdict.insufficient_head', { limit: limitName });
+            sub = t('verdict.insufficient_sub', { valid: validHoursWords(v.valid_hours, v.min_valid_hours || 12), min: v.min_valid_hours || 12 });
+        }
+
+        var extra = [];
+        if (!unknownTypical && v.first_reset_at && v.first_reset_in_horizon === false && shown.horizon === '24h') {
+            extra.push(t('verdict.beyond_span'));
+        }
+        if (scenario === 'typical' && !unknownTypical && st !== 'empty_now') {
+            // A shorter stop before the one said stays in view, said once and briefly.
+            // A shorter stop that depends on accounts of unknown availability is said as the condition it is.
+            if (v.earlier_empty_at && v.earlier_resumes_at) {
+                var earlierTo = { from: shortMoment(v.earlier_empty_at, shown.now), to: shortMoment(v.earlier_resumes_at, shown.now) };
+                extra.push(v.earlier_empty_at <= shown.now + 1
+                    ? t(v.earlier_unknown ? 'verdict.earlier_unknown_now' : 'verdict.earlier_stop_now', earlierTo)
+                    : t(v.earlier_unknown ? 'verdict.earlier_unknown' : 'verdict.earlier_stop', earlierTo));
+            }
+            if (v.other_binding_labels && v.other_binding_labels.length) {
+                extra.push(t('verdict.other_binding', { limits: v.other_binding_labels.join(', ') }));
+            }
+            if (v.held_accounts) extra.push(t('verdict.partial_held', { n: v.held_accounts }));
+            if (v.blocked_accounts && st !== 'blocked_gap') extra.push(t('verdict.partial_blocked', { n: v.blocked_accounts }));
+            if (v.unknown_accounts && st !== 'unknown_gap') extra.push(t('verdict.partial_unknown', { n: v.unknown_accounts }));
+        }
+        if (extra.length) sub = sub + ' · ' + extra.join(' · ');
+
+        var head = el('div', 'tl-verdict-head' + (tone === 'muted' ? '' : ' ' + tone));
+        head.appendChild(stateDot(tone, false));
+        head.appendChild(el('span', null, headline));
+        main.appendChild(head);
+        main.appendChild(el('div', 'tl-verdict-sub', sub));
+        strip.appendChild(main);
+
+        if (!unknownTypical) {
+            var figs = el('div', 'tl-verdict-figs');
+            function addFig(label, value, cls) {
+                var f = el('div', 'tl-vfig');
+                f.appendChild(el('span', 'tl-vfig-k', label));
+                f.appendChild(el('span', 'tl-vfig-v' + (cls ? ' ' + cls : ''), value));
+                figs.appendChild(f);
+            }
+            if (st === 'blocked_gap' || st === 'unknown_gap') {
+                var unsure = st === 'unknown_gap';
+                if (v.empty_at !== null && v.empty_at > shown.now + 1) {
+                    addFig(t(unsure ? 'verdict.fig_known_empty' : 'verdict.fig_usable_empty'), '~' + emptyShort, tone);
+                } else if (unsure && v.unknown_at_empty !== null && v.unknown_at_empty !== undefined) {
+                    addFig(t('verdict.fig_unknown'), winVal(v.unknown_at_empty), tone);
+                } else if (v.locked_at_empty !== null && v.locked_at_empty !== undefined) {
+                    addFig(t('verdict.fig_locked'), winVal(v.locked_at_empty), tone);
+                }
+                if (v.resumes_at) {
+                    addFig(t('verdict.fig_resumes'), '~' + resumesShort, '');
+                }
+                // The first reported reset and what is left just before it, read off the same future.
+                if (v.first_reset_at && v.before_first_reset !== null && v.before_first_reset !== undefined) {
+                    addFig(t('verdict.fig_before', { reset: resetShort }), winVal(v.before_first_reset), '');
+                }
+            } else {
+                if (v.first_reset_at) {
+                    var figTone = scenario === 'no_new_use' || tone === 'muted'
+                        || (st === 'tight' && (
+                            (v.usable_before_reset !== undefined && v.usable_before_reset !== null)
+                            || (v.usable_before_unlock !== undefined && v.usable_before_unlock !== null)
+                        )) ? '' : tone;
+                    addFig(t('verdict.fig_before', { reset: resetShort }), winVal(v.before_first_reset), figTone);
+                }
+                if (v.empty_at !== null && st !== 'empty_now' && scenario === 'typical') {
+                    addFig(t('verdict.fig_empty'), '~' + emptyShort, tone === 'muted' ? '' : tone);
+                } else if (v.first_reset_at && v.after_first_reset !== null) {
+                    addFig(t('verdict.fig_after', { reset: resetShort }), winVal(v.after_first_reset), '');
+                }
+            }
+            if (figs.childNodes.length) strip.appendChild(figs);
+        }
+        return strip;
+    }
+
     // The calm timeline of the charted limit, right under its plate and the
     // plate's own continuation, not a second plate: it has no head of its own (the
     // window is chosen in the row above and its figures stand on the plate), so it
     // opens with one row of controls — the span, the future, Combined, and the model
     // choice across from them; the combined view's headline with its nearest reset
-    // (only there: its numbers are not the plate's); the chart with one short
-    // legend. Everything longer — the combined figures' caveats, the long legend,
-    // the reset schedule, the details and data — is folded under Details, never
-    // thrown away.
+    // (only there: its numbers are not the plate's); the verdict strip; the chart
+    // with one short legend. Everything longer — the combined figures' caveats, the
+    // long legend, the reset schedule, the details and data — is folded under
+    // Details, never thrown away.
     function timelineBlock(ctx, g) {
         var box = el('div', 'tl-block');
         box.setAttribute('role', 'group');
@@ -5813,10 +6177,12 @@
         var lent = onHand || !chart || !familyOf(chart.group_key) || !familyOf(g.key) || familyOf(chart.group_key) === familyOf(g.key);
         var joint = jointOf(lent ? chart && chart.analytics : null);
         var menu = modelMenu(ctx);
-        // What the plot draws is known before the row of controls is: the row says when a pace nobody has measured
-        // makes Recent pace the same line as No new use.
+        // What the plot draws is known before the row of controls is: the row says when Typical
+        // draws no forecast line (insufficient 48h history, unavailable, held, or Combined).
         var shown = onHand ? drawnChart(chart) : null;
-        var idle = paceIdle(shown);
+        var idle = typicalIdle(shown);
+        var activeTypical = scenario === 'typical' && hasFutureLine(scenarioOf(shown)) && !!shown && shown.mode !== 'joint';
+        box.setAttribute('data-scenario', activeTypical ? 'typical' : 'no_new_use');
 
         box.appendChild(el('h4', 'q-hist-title', t('chart.history')));
         var controls = el('div', 'tl-controls wt-controls');
@@ -5830,12 +6196,12 @@
         }));
         controls.appendChild(segControl(t('chart.future'), SCENARIOS.map(function (s) {
             var said = scenarioName(s.key);
-            if (s.key === 'recent_pace' && idle) {
-                var why = t(PACE_IDLE[paceIdleWhy(shown)].title);
+            if (s.key === 'typical' && idle) {
+                var why = t(TYPICAL_IDLE[typicalIdleWhy(shown)].title);
                 return { key: s.key, name: said, idle: true, title: why, spoken: said + ' — ' + why };
             }
             return { key: s.key, name: said, title: t(s.key === 'no_new_use' ? 'chart.future_title_no_new_use'
-                : 'chart.future_title_recent_pace') };
+                : 'chart.future_title_typical') };
         }), scenario, 'scenario:', function (picked) {
             scenario = picked;
             rerender();
@@ -5874,6 +6240,10 @@
         var updating = scopeStale(chart);
         var sc = scenarioOf(shown);
         if (shown.joint_note) box.appendChild(timelineHero(shown, sc));
+        // While the answer for a newly chosen model or request kind is read, the verdict of the previous choice is
+        // neither shown nor spoken (the note below says the graph is still the previous one).
+        var verdictNode = updating ? null : forecastVerdict(shown, sc, name);
+        if (verdictNode) box.appendChild(verdictNode);
         var body = el('div', 'tl-body' + (updating ? ' is-updating' : ''));
         if (updating) {
             body.setAttribute('aria-busy', 'true');
@@ -5895,7 +6265,7 @@
             facts.shown.forEach(function (f) { said.appendChild(el('div', f[1] || null, f[0])); });
             front.push(said);
         }
-        if (sc) {
+        if (hasFutureLine(sc)) {
             var cp = checkpointLine(sc, shown);
             if (cp) front.push(cp);
             front.push(scheduleTable(sc, shown, horizon));
@@ -5906,29 +6276,51 @@
         return box;
     }
 
-    // Whether the pace line of what the plot draws is no line of its own: no
-    // account runs at a measured pace, so Recent pace holds every account and
-    // is the same line as No new use. Read from the scenarios drawn (the
-    // window's or Combined's), never from the mode.
-    function paceIdle(chart) {
-        var pace = chart && chart.scenarios && chart.scenarios.recent_pace;
-        return !!pace && pace.at_pace === 0;
+    // Whether Typical cannot draw a forecast line (Combined view, insufficient
+    // 48h valid pool history, history unavailable, or all accounts held by scope
+    // or another unknown/unreset binding window). Measured zero pace IS drawn.
+    function typicalIdle(chart) {
+        if (!chart || chart.kept) return false;
+        if (chart.mode === 'joint') return true;
+        if (!chart.scenarios) return false;
+        var typ = chart.scenarios.typical;
+        if (!typ) return true;
+        return !hasFutureLine(typ);
     }
 
-    // Why an idle pace line is the line of No new use, as the skill counted it
-    // (pace_held, zero_growth): a pace is measured but a limit or the request's
-    // scope holds those accounts; the measured pace shows no growth; or no
-    // account has a measured pace at all. An answer without these counts says
-    // the last.
-    var PACE_IDLE = {
-        held: { title: 'chart.pace_held_title', legend: 'chart.condition_held' },
-        zero: { title: 'chart.pace_zero_title', legend: 'chart.condition_zero' },
-        none: { title: 'chart.pace_idle_title', legend: 'chart.condition_idle' }
+    var TYPICAL_IDLE = {
+        joint: { title: 'chart.typical_joint_title', legend: 'chart.legend_typical_joint' },
+        held: { title: 'chart.typical_held_title', legend: 'chart.legend_typical_held' },
+        mixed: { title: 'chart.typical_mixed_title', legend: 'chart.legend_typical_held' },
+        truncated: { title: 'chart.typical_truncated_title', legend: 'chart.legend_typical_truncated' },
+        unavailable: { title: 'chart.typical_unavailable_title', legend: 'chart.legend_typical_unavailable' },
+        at_limit: { title: 'chart.typical_at_limit_title', legend: 'chart.legend_typical_at_limit' },
+        none: { title: 'chart.typical_idle_title', legend: 'chart.legend_typical_idle' }
     };
 
-    function paceIdleWhy(chart) {
-        var pace = (chart && chart.scenarios && chart.scenarios.recent_pace) || {};
-        return pace.pace_held ? 'held' : pace.zero_growth ? 'zero' : 'none';
+    function typicalIdleWhy(chart) {
+        if (!chart) return 'none';
+        if (chart.mode === 'joint') return 'joint';
+        var typ = (chart.scenarios && chart.scenarios.typical) || {};
+        if (typ.status === 'held') return typ.held_reason === 'mixed' ? 'mixed' : 'held';
+        if (typ.status === 'unavailable') return typ.reason === 'history_truncated' ? 'truncated' : 'unavailable';
+        if (typ.reason === 'all_observed_at_limit') return 'at_limit';
+        return 'none';
+    }
+
+    // Reported reset events actually plotted on the chart (from the active
+    // scenario when drawn, else from No new use so calmLegend and drawChart agree).
+    function drawnResets(chart, sc, fallbackEnd) {
+        var resetSrc = hasFutureLine(sc) ? sc : (!chart.kept && chart.scenarios ? chart.scenarios.no_new_use : null);
+        if (!resetSrc || !(resetSrc.schedule && resetSrc.schedule.length)) return [];
+        var now = chart.now;
+        var resetStart = resetSrc.line && resetSrc.line.length ? Math.min(now, resetSrc.line[0][0]) : now;
+        var resetEnd = typeof chart.end === 'number' && isFinite(chart.end)
+            ? chart.end
+            : (typeof fallbackEnd === 'number' && isFinite(fallbackEnd) ? fallbackEnd : Math.ceil((now || 0) / 3600) * 3600);
+        return resetSrc.schedule.filter(function (r) {
+            return !!(r && typeof r.at === 'number' && isFinite(r.at) && r.at >= resetStart && r.at <= resetEnd);
+        });
     }
 
     // One short line under the plot: only what is drawn, each in a few words.
@@ -5946,14 +6338,24 @@
         if (drawn) item(legendSwatch('line-observed'), t('chart.recorded'));
         if (carried) item(legendSwatch('line-carried'), t('chart.carried'));
         if (!drawn && !carried) item(null, t('chart.no_record'));
-        if (sc) {
-            item(legendSwatch('line-scenario'), t(scenario === 'recent_pace' && paceIdle(chart)
-                ? PACE_IDLE[paceIdleWhy(chart)].legend : 'chart.condition',
-                { name: scenarioName(scenario).toLowerCase() }));
-            if ((sc.schedule || []).length) item(resetSwatch(), t('chart.reported_reset'));
+        if (hasFutureLine(sc)) {
+            var scText;
+            if (scenario === 'no_new_use') {
+                scText = t('chart.legend_no_new_use');
+            } else if (sc.status === 'zero') {
+                scText = t('chart.legend_typical_zero');
+            } else {
+                scText = t('chart.legend_typical', { rate: rateWords(sc.rate_per_hour) });
+            }
+            item(legendSwatch('line-scenario'), scText);
+        } else if (!chart.kept && scenario === 'typical' && (chart.mode === 'joint' || (chart.scenarios && chart.scenarios.no_new_use))) {
+            item(null, t(TYPICAL_IDLE[typicalIdleWhy(chart)].legend, { name: scenarioName(scenario).toLowerCase() }));
+        } else if (!chart.kept && chart.mode === 'joint' && !(chart.scenarios && chart.scenarios.no_new_use)) {
+            item(null, t('chart.no_future_joint'));
         } else {
             item(null, t('chart.no_future'));
         }
+        if (drawnResets(chart, sc).length) item(resetSwatch(), t('chart.reported_reset'));
         return legend;
     }
 
@@ -5984,7 +6386,7 @@
         } else {
             item('', t('chart.no_record'));
         }
-        item(sc ? 'line-scenario' : '', lead);
+        item(hasFutureLine(sc) ? 'line-scenario' : '', lead);
         return legend;
     }
 
@@ -6006,8 +6408,8 @@
     }
 
     // The future line's legend entry (lead): its name, whom it covers and what
-    // it assumes, in one line — the only place that says so; in pace mode one
-    // more line: who runs out, when. Every longer caveat is a note under
+    // it assumes, in one line — the only place that says so; in typical mode
+    // one more line if the pool runs out. Every longer caveat is a note under
     // Details. With no future drawn, the lead says why.
     function timelineFacts(g, chart, sc, ctx) {
         var shown = [];
@@ -6015,39 +6417,47 @@
         var lead;
         var notCurrent = Math.max(0, (chart.y_max || 0) - (chart.accounts || 0));
         if (!sc) {
-            lead = chart.kept
-                ? t('fact.no_future_kept', { when: clockAt(isoOf(chart.now)) })
-                : chart.history ? t('fact.no_future_history')
-                    : t('fact.no_future_record', { accounts: plural(chart.past_accounts || 0, 'account') });
+            if (!chart.kept && chart.mode === 'joint' && scenario === 'typical') {
+                lead = scenarioName(scenario).toLowerCase() + ' · ' + heldWhy(chart, sc);
+            } else {
+                lead = chart.kept
+                    ? t('fact.no_future_kept', { when: clockAt(isoOf(chart.now)) })
+                    : chart.history ? t('fact.no_future_history')
+                        : t('fact.no_future_record', { accounts: plural(chart.past_accounts || 0, 'account') });
+            }
             return { lead: lead, shown: shown, notes: notes };
         }
-        var span = chart.pace_words
-            || spanWords((g.recent_pace || {}).span_min_seconds, (g.recent_pace || {}).span_max_seconds);
         var scenarioWord = scenarioName(scenario).toLowerCase() + ' · ';
-        if (scenario === 'no_new_use') {
+        if (scenario === 'no_new_use' && hasFutureLine(sc)) {
             lead = scenarioWord + (sc.accounts === 1
                 ? t('fact.keeps_one', { accounts: plural(sc.accounts, 'current account') })
                 : t('fact.keeps_many', { accounts: plural(sc.accounts, 'current account') }));
-        } else if (!sc.at_pace) {
-            lead = scenarioWord + (sc.accounts === 1
-                ? t('fact.held_one', { accounts: plural(sc.accounts, 'current account') })
-                : t('fact.held_many', { accounts: plural(sc.accounts, 'current account') })) + ' '
-                + heldWhy(g, chart, sc);
+        } else if (!hasFutureLine(sc)) {
+            if (scenario === 'typical' && chart.scenarios && chart.scenarios.no_new_use) {
+                lead = scenarioWord + heldWhy(chart, sc);
+                notes.push(t('fact.note_typical'));
+            } else {
+                lead = chart.kept
+                    ? t('fact.no_future_kept', { when: clockAt(isoOf(chart.now)) })
+                    : chart.history ? t('fact.no_future_history')
+                        : t('fact.no_future_record', { accounts: plural(chart.past_accounts || 0, 'account') });
+                return { lead: lead, shown: shown, notes: notes };
+            }
+        } else if (sc.status === 'zero') {
+            lead = scenarioWord + t('fact.typical_zero_lead', {
+                hours: validHoursWords(sc.valid_hours),
+                accounts: plural(sc.accounts, 'current account')
+            });
+            notes.push(t('fact.note_typical'));
         } else {
-            // The skill's own split of the accounts not drained (pace_unknown and the rest): the ones whose measured
-            // pace showed no growth are said apart from the held ones. An older answer counts them among its at_pace.
-            var counted = typeof sc.pace_unknown === 'number';
-            var zero = counted ? sc.zero_growth || 0 : 0;
-            var heldN = Math.max(0, (sc.held || 0) - zero);
-            lead = scenarioWord + t(chart.pace_words ? 'fact.pace_over' : 'fact.pace_last', { at_pace: sc.at_pace,
-                accounts: sc.accounts, span: span,
-                held: (zero ? ', ' + t('fact.zero_count', { n: zero }) : '') + (heldN ? ', ' + t('fact.held_count', { n: heldN }) : '') });
+            lead = scenarioWord + t('fact.typical_lead', {
+                rate: rateWords(sc.rate_per_hour),
+                hours: validHoursWords(sc.valid_hours),
+                accounts: plural(sc.accounts, 'current account')
+            });
             var runs = runsOutWords(sc, ctx);
             if (runs) shown.push([runs, 'warn']);
-            notes.push(t('fact.note_pace'));
-            if (sc.zero_growth) {
-                notes.push(t('fact.note_zero', { accounts: plural(sc.zero_growth, 'account') }));
-            }
+            notes.push(t('fact.note_typical'));
         }
         notes.push(t('fact.note_reset'));
         if (notCurrent) {
@@ -6066,42 +6476,52 @@
         return { lead: lead, shown: shown, notes: notes };
     }
 
-    // Why no account is drained in the future drawn, one reason. With the skill's split (pace_held, zero_growth,
-    // pace_unknown) it says what the accounts' own paces were: measured but held, measured with no growth, or not
-    // measured; an older answer keeps the older order of reasons.
-    function heldWhy(g, chart, sc) {
+    function heldCountsWords(v) {
+        var parts = [];
+        if (v && v.held_accounts) parts.push(t('verdict.held_n_endless', { n: v.held_accounts }));
+        if (v && v.unknown_accounts) parts.push(t('verdict.held_n_unknown', { n: v.unknown_accounts }));
+        return parts;
+    }
+
+    // Why Typical draws no future line, one clear reason.
+    function heldWhy(chart, sc) {
+        if (chart.mode === 'joint') return t('fact.r_typical_joint');
         if (chart.scope_applies === false) return t('fact.r_scope_not');
         if (chart.scope_applies === null) return t('fact.r_applic_unknown');
-        if (typeof sc.pace_unknown === 'number') {
-            if (chart.mode === 'joint') return t(sc.zero_growth && !sc.pace_unknown ? 'fact.r_zero' : 'fact.r_joint');
-            if (sc.pace_held) return t('fact.r_pace_held');
-            if (sc.zero_growth) return t('fact.r_zero');
-            return t('fact.r_no_pace', { why: paceStateWords(g) });
+        var typ = (chart.scenarios && chart.scenarios.typical) || sc || {};
+        if (typ.status === 'held') {
+            if (typ.held_reason === 'mixed') {
+                var counts = heldCountsWords(typ.verdict || typ);
+                if (counts.length) return t('fact.r_typical_mixed', { counts: counts.join(', ') });
+            }
+            return t(typ.held_reason === 'restricted' ? 'fact.r_typical_restricted' : 'fact.r_typical_held');
         }
-        return chart.held_to_other_windows ? t('fact.r_binding_unknown')
-            : chart.mode === 'joint' ? t('fact.r_joint')
-            : (g.recent_pace || {}).state === 'ok' ? t('fact.r_no_positive')
-            : t('fact.r_no_pace', { why: paceStateWords(g) });
+        if (typ.status === 'unavailable') {
+            return t(typ.reason === 'history_truncated' ? 'fact.r_typical_truncated' : 'fact.r_typical_unavailable');
+        }
+        if (typ.reason === 'all_observed_at_limit') return t('fact.r_typical_at_limit');
+        return t('fact.r_typical_insufficient', { valid: validHoursWords(typ.valid_hours, typ.min_valid_hours || 12), min: typ.min_valid_hours || 12 });
     }
 
-    function paceStateWords(g) {
-        var pace = g.recent_pace || {};
-        if (pace.state === 'warming_up') return t('pace.why_warming');
-        if (pace.state === 'unavailable') return t('pace.why_unavailable');
-        if (pace.state === 'ok') return t('pace.why_ok');
-        return t('pace.why_none');
-    }
-
-    // When accounts run out at this pace, inside what is drawn.
+    // Future moments inside what is drawn when the shared pool runs out at this typical pace (an already-active stop
+    // at now is shown in the verdict strip): each stop is said once, by what keeps the rest, and every following one
+    // (including one after an active stop at now) as "again". A stop that depends on accounts of unknown availability
+    // distinguishes reserve held at the start from an unknown account becoming relevant later in the stop.
     function runsOutWords(sc, ctx) {
-        var before = (sc.runs_out || []).filter(function (r) { return !r.after_refill && r.reset_reported; });
-        var none = (sc.runs_out || []).filter(function (r) { return !r.reset_reported; });
-        var again = (sc.runs_out || []).filter(function (r) { return r.after_refill; });
-        var parts = [];
-        if (before.length) parts.push(t('runs.before', { n: before.length, when: whenWords(isoOf(before[0].at)) }));
-        if (none.length) parts.push(t('runs.none', { n: none.length, when: whenWords(isoOf(none[0].at)) }));
-        if (again.length) parts.push(t('runs.again', { n: again.length, when: whenWords(isoOf(again[0].at)) }));
-        return parts.length ? t('runs.lead', { parts: parts.join('; ') }) : '';
+        var rows = sc.runs_out || [];
+        if (!rows.length) return '';
+        // The pool's sentences have keys of their own: a translation pinned for the older per-account ones
+        // ("{n} accounts would run out …") never stands in for them.
+        function said(r, again) {
+            var when = { when: whenWords(isoOf(r.at)) };
+            if (r.unknown_later) return t(again ? 'runs.pool_unknown_later_again' : 'runs.pool_unknown_later', when);
+            if (r.unknown) return t(again ? 'runs.pool_unknown_again' : 'runs.pool_unknown', when);
+            if (r.blocked_only) return t(again ? 'runs.pool_blocked_again' : 'runs.pool_blocked', when);
+            if (again) return t(r.after_refill ? 'runs.pool_again' : 'runs.pool_later', when);
+            return t(r.reset_reported ? 'runs.pool_before' : 'runs.pool_none', when);
+        }
+        var parts = rows.map(function (r, idx) { return said(r, idx > 0 || !!r.again); });
+        return t('runs.pool_lead', { parts: parts.join('; ') });
     }
 
     // The reset schedule of the scenario drawn: when, how many accounts,
@@ -6130,7 +6550,7 @@
             tr.appendChild(when);
             tr.appendChild(el('td', 'n', String(row.accounts)));
             tr.appendChild(el('td', 'n', row.adds === null ? t('common.unknown') : '+' + amountWords(row.adds)));
-            tr.appendChild(el('td', 'n', t('sched.total_of', { total: row.total_after === null ? t('common.unknown') : num(row.total_after, 2),
+            tr.appendChild(el('td', 'n', t('sched.total_of', { total: row.total_after === null ? t('common.unknown') : amountWords(row.total_after),
                 of: chart.y_max }) + (row.unknown_after ? ' · ' + t('sched.n_unknown', { n: row.unknown_after }) : '')));
             body.appendChild(tr);
         });
@@ -6141,7 +6561,7 @@
             moreCell.setAttribute('colspan', '4');
             var more = el('button', 'pill-btn btn-compact-wide schedule-more', scheduleAll ? t('sched.show_first', { n: SCHEDULE_ROWS })
                 : t('sched.more', { more: plural(rows.length - shown.length, 'more reset'), when: eventWhen(last),
-                    total: num(last.total_after, 2), of: chart.y_max }));
+                    total: last.total_after === null ? t('common.unknown') : amountWords(last.total_after), of: chart.y_max }));
             more.setAttribute('type', 'button');
             more.setAttribute('aria-expanded', scheduleAll ? 'true' : 'false');
             more.setAttribute('data-focus', 'schedule-all');
@@ -6211,7 +6631,7 @@
         // A caption and one white tile for each moment: the number whole in its node (the point in a span of its own, as the plate's figure
         // has it), under it the moment and what it is of. The caption names the group for a reader that has no eyes: the tiles read in order,
         // "1.47", "in 24 h · of 20", so the scenario, the moment, the value and the total are all said.
-        var caption = scenario === 'no_new_use' ? t('fact.left_nothing') : t('fact.left_pace');
+        var caption = scenario === 'no_new_use' ? t('fact.left_nothing') : t('fact.left_typical');
         var box = el('div', 'checkpoints');
         box.setAttribute('role', 'group');
         box.setAttribute('aria-label', caption);
@@ -6219,7 +6639,7 @@
         var tiles = el('div', 'cp-tiles');
         points.forEach(function (cp) {
             var tile = el('div', 'cp-tile tile');
-            tile.appendChild(figureNode(cp.value === null ? t('common.unknown') : num(cp.value, 2), cp.value === null, { num: 'cp-num', dot: 'cp-dot' }));
+            tile.appendChild(figureNode(cp.value === null ? t('common.unknown') : amountWords(cp.value), cp.value === null, { num: 'cp-num', dot: 'cp-dot' }));
             tile.appendChild(el('span', 'meta-line cp-when', t('fact.tile_when', { when: offsetWords(cp.after_seconds), total: chart.y_max })));
             tiles.appendChild(tile);
         });
@@ -6397,7 +6817,7 @@
         box.appendChild(el('p', 'chart-notes', t('table.changes', { n: rows.length, total: recorded })));
         var table = el('table', 'tbl');
         var head = el('tr');
-        [t('table.time'), t('table.recorded'), t('table.no_new_use'), t('table.recent_pace'), t('table.event')].forEach(function (h) {
+        [t('table.time'), t('table.recorded'), t('table.typical'), t('table.no_new_use'), t('table.event')].forEach(function (h) {
             var th = el('th', null, h);
             th.setAttribute('scope', 'col');
             head.appendChild(th);
@@ -6406,15 +6826,15 @@
         thead.appendChild(head);
         table.appendChild(thead);
         var body = el('tbody');
-        function cell(value) { return value === undefined || value === null ? '' : num(value, 2); }
+        function cell(value) { return value === undefined || value === null ? '' : amountWords(value); }
         (chart.table || []).forEach(function (row) {
             if (row.sighting) return;
             var tr = el('tr');
             var at = Date.parse(String(row.at || ''));
             [isFinite(at) ? momentWords(at / 1000) : row.at,
              row.observed === undefined ? '' : (row.observed === null ? 'gap' : num(row.observed, 2)),
+             cell(row.scenario_typical),
              cell(row.scenario_no_new_use),
-             cell(row.scenario_recent_pace),
              (row.event || '') + (row.until ? ' (to ' + clockAt(row.until) + ')' : '')
             ].forEach(function (text) { tr.appendChild(el('td', null, text)); });
             body.appendChild(tr);
@@ -6436,25 +6856,26 @@
         (chart.table || []).forEach(function (row) {
             var at = Date.parse(String(row.at || '')) / 1000;
             if (!isFinite(at) || at < chart.now
-                    || (row.scenario_no_new_use === undefined && row.scenario_recent_pace === undefined)) return;
-            rows.push({ at: at, noUse: row.scenario_no_new_use, pace: row.scenario_recent_pace,
+                    || (row.scenario_no_new_use === undefined && row.scenario_typical === undefined)) return;
+            rows.push({ at: at, typ: row.scenario_typical, noUse: row.scenario_no_new_use,
                 event: row.event === 'now' ? t('table.future_starts') : (row.event || '') });
         });
         rows.sort(function (a, b) { return a.at - b.at; });
         var box = el('div');
         box.appendChild(el('p', 'chart-notes', t('table.changes', { n: recorded.length, total: details.length }) + ' ' + t('table.carried')));
         var table = el('table', 'tbl'), thead = el('thead'), head = el('tr');
-        [t('table.time'), t('table.history'), t('table.no_new_use'), t('table.recent_pace'), t('table.context')].forEach(function (text) {
+        [t('table.time'), t('table.history'), t('table.typical'), t('table.no_new_use'), t('table.context')].forEach(function (text) {
             var th = el('th', null, text); th.setAttribute('scope', 'col'); head.appendChild(th);
         });
         thead.appendChild(head); table.appendChild(thead);
         var body = el('tbody');
         rows.forEach(function (row) {
             var d = row.history;
+            var isFuture = row.noUse !== undefined || row.typ !== undefined;
             var tr = el('tr');
             [momentWords(row.at), d ? (d.value === null ? 'gap' : num(d.value, 2) + ' of ' + d.accounts) : '',
-             row.noUse === null ? 'unknown' : num(row.noUse, 2),
-             row.pace === null ? 'unknown' : num(row.pace, 2), row.event].forEach(function (text) {
+             !isFuture ? '' : (row.typ === null || row.typ === undefined ? t('common.unknown') : amountWords(row.typ)),
+             !isFuture ? '' : (row.noUse === null || row.noUse === undefined ? t('common.unknown') : amountWords(row.noUse)), row.event].forEach(function (text) {
                 tr.appendChild(el('td', null, text));
             });
             body.appendChild(tr);
@@ -6624,7 +7045,10 @@
             var v = observedAt(chart, t);
             rows.push(['recorded', v === null || v === undefined ? null : v]);
         }
-        if (sc && t >= chart.now) rows.push([scenarioName(scenario).toLowerCase(), lineAt(sc.line, t)]);
+        if (t >= chart.now && (hasFutureLine(sc) || (scenario === 'typical' && chart.scenarios && chart.scenarios.no_new_use))) {
+            var lineT = hasFutureLine(sc) && t === chart.now && sc.line[0][0] > t && sc.line[0][0] - t <= 0.5 ? sc.line[0][0] : t;
+            rows.push([scenarioName(scenario).toLowerCase(), hasFutureLine(sc) ? lineAt(sc.line, lineT) : null]);
+        }
         return { future: t > chart.now, rows: rows };
     }
 
@@ -6642,10 +7066,10 @@
         var words = at.rows.map(function (r) {
             if (r[0] === 'recorded') {
                 return r[1] === null ? t('chart.readout_recorded_gap')
-                    : t('chart.readout_recorded', { value: num(r[1], 2), accounts: plural(recordedCount(chart, secs), 'account') });
+                    : t('chart.readout_recorded', { value: amountWords(r[1]), accounts: plural(recordedCount(chart, secs), 'account') });
             }
             return r[1] === null ? t('chart.readout_not_drawn', { name: r[0] })
-                : t('chart.readout_scenario_value', { name: r[0], value: num(r[1], 2), accounts: plural(sc.accounts, 'current account') });
+                : t('chart.readout_scenario_value', { name: r[0], value: amountWords(r[1]), accounts: plural(sc.accounts, 'current account') });
         });
         if (!words.length) words.push(at.future ? t('chart.readout_no_future') : t('chart.tip_no_record'));
         var provenance = secs <= chart.now ? historyWords(historyDetailAt(chart, secs), secs) : [];
@@ -6808,7 +7232,7 @@
         plot.setAttribute('tabindex', '0');
         plot.setAttribute('data-focus', 'chart-plot');
         plot.setAttribute('role', 'group');
-        plot.setAttribute('aria-label', sc
+        plot.setAttribute('aria-label', hasFutureLine(sc)
             ? t('chart.aria_plot_ahead', { name: name, unit: chartUnitText(chart), scenario: scenarioName(scenario).toLowerCase() })
             : t('chart.aria_plot', { name: name, unit: chartUnitText(chart) }));
         var svg = svgCanvas('0 0 ' + W + ' ' + H, W, H);
@@ -6819,6 +7243,10 @@
         fade.appendChild(svgEl('stop', { offset: '0', style: 'stop-color:var(--calm-a);stop-opacity:.30' }));
         fade.appendChild(svgEl('stop', { offset: '1', style: 'stop-color:var(--calm-a);stop-opacity:.02' }));
         defs.appendChild(fade);
+        var fadeTyp = svgEl('linearGradient', { id: 'qa-area-typical', x1: 0, y1: 0, x2: 0, y2: 1 });
+        fadeTyp.appendChild(svgEl('stop', { offset: '0', style: 'stop-color:var(--scenario-ink);stop-opacity:.28' }));
+        fadeTyp.appendChild(svgEl('stop', { offset: '1', style: 'stop-color:var(--scenario-ink);stop-opacity:.02' }));
+        defs.appendChild(fadeTyp);
         // The plot area's rounded corners: a clip of the area's rectangle (a line wider each way, so a base line and a cap line keep their whole
         // width), which only the background layers wear - the tint of the future, the lines of the axes and of the days, the marks of the
         // resets. The labels, the ticks, the record and the scenario stand outside it, so nothing of them is cut. The corner is the token
@@ -6859,12 +7287,11 @@
             svg.appendChild(label);
         });
 
-        if (sc) {
-            (sc.schedule || []).forEach(function (r) {
-                svg.appendChild(svgEl('line', { x1: x(r.at), x2: x(r.at), y1: pt, y2: bottom, 'class': 'reset-line', 'clip-path': inField }));
-                svg.appendChild(svgEl('circle', { cx: x(r.at).toFixed(1), cy: bottom.toFixed(1), r: 4.5, 'class': 'reset-dot' }));
-            });
-        }
+        var resetEnd = typeof chart.end === 'number' && isFinite(chart.end) ? chart.end : t1;
+        drawnResets(chart, sc, t1).forEach(function (r) {
+            svg.appendChild(svgEl('line', { x1: x(r.at), x2: x(r.at), y1: pt, y2: bottom, 'class': 'reset-line', 'clip-path': inField }));
+            svg.appendChild(svgEl('circle', { cx: x(r.at).toFixed(1), cy: bottom.toFixed(1), r: 4.5, 'class': 'reset-dot' }));
+        });
         svg.appendChild(svgEl('line', { x1: x(now), x2: x(now), y1: pt, y2: bottom + 4, 'class': 'now-line' }));
         var nowLab = svgEl('text', { x: x(now), y: H - 6, 'text-anchor': 'middle', 'class': 'axis-text now' });
         // A kept chart stays on the time axis of its own answer.
@@ -6879,7 +7306,7 @@
         if (d) svg.appendChild(svgEl('path', { d: d, 'class': 'line-observed' }));
         var carried = runPath(history.carried);
         if (carried) svg.appendChild(svgEl('path', { d: carried, 'class': 'line-carried' }));
-        if (sc && sc.line && sc.line.length) {
+        if (hasFutureLine(sc)) {
             // Futures can lose a known zero at an uncalibrated refill. Null
             // breaks the line/fill, just as it breaks the record; y(null)
             // would silently paint a numeric zero and the cursor must not
@@ -6895,8 +7322,26 @@
             var futureArea = runArea(futureRuns, bottom);
             if (futureArea) svg.appendChild(svgEl('path', { d: futureArea, 'class': 'area-scenario' }));
             if (path) svg.appendChild(svgEl('path', { d: path, 'class': 'line-scenario' }));
+            var startAt = sc.line[0][0];
             if (sc.line[0][1] !== null) svg.appendChild(svgEl('circle', {
-                cx: x(now).toFixed(1), cy: y(sc.line[0][1]).toFixed(1), r: 5, 'class': 'scenario-start' }));
+                cx: x(startAt).toFixed(1), cy: y(sc.line[0][1]).toFixed(1), r: 5, 'class': 'scenario-start' }));
+            var dv = sc.verdict;
+            // The first stop's mark stands on the line drawn: inside the chart's own end (the axis runs on to a whole
+            // hour past it), never past the line's last point.
+            // A stop that depends on accounts of unknown availability is a warning, never drawn as bad.
+            if (scenario === 'typical' && chart.mode !== 'joint' && dv && dv.empty_at && dv.empty_at > startAt && dv.empty_at <= resetEnd
+                    && (dv.state === 'runs_out' || dv.state === 'runs_out_no_reset' || dv.state === 'blocked_gap'
+                        || dv.state === 'unknown_gap')) {
+                var ex = x(dv.empty_at);
+                var stays = (dv.locked_at_empty || 0) + (dv.unknown_at_empty || 0);
+                var ey = stays > 0 ? y(stays) : bottom;
+                var badDeplete = dv.state !== 'unknown_gap' && (dv.state === 'runs_out_no_reset' || stopTone(dv.gap_seconds) === 'bad');
+                if (badDeplete) {
+                    svg.appendChild(svgEl('line', { x1: ex, x2: ex, y1: pt, y2: bottom, 'class': 'deplete-line', 'clip-path': inField }));
+                }
+                svg.appendChild(svgEl('circle', { cx: ex.toFixed(1), cy: ey.toFixed(1), r: 4.5,
+                    'class': badDeplete ? 'deplete-dot bad' : 'deplete-dot' }));
+            }
         }
 
         var cursor = svgEl('line', { x1: 0, x2: 0, y1: pt, y2: bottom, 'class': 'cursor-line', visibility: 'hidden' });
@@ -6940,8 +7385,11 @@
                 var row = el('span', 'tip-row');
                 var none = r[1] === null || r[1] === undefined;
                 var detail = r[0] === 'recorded' ? historyDetailAt(chart, secs) : null;
-                row.appendChild(legendSwatch(r[0] === 'recorded' ? (detail && detail.carried ? 'line-carried' : 'line-observed') : 'line-scenario'));
-                row.appendChild(el('span', 'tip-val', none ? (r[0] === 'recorded' ? t('chart.tip_no_record') : t('chart.tip_not_drawn')) : num(r[1], 2)));
+                if (r[0] === 'recorded' || !none) {
+                    row.appendChild(legendSwatch(r[0] === 'recorded' ? (detail && detail.carried ? 'line-carried' : 'line-observed') : 'line-scenario'));
+                }
+                // A little reserve reads "<0.01", never a zero that is not there.
+                row.appendChild(el('span', 'tip-val', none ? (r[0] === 'recorded' ? t('chart.tip_no_record') : t('chart.tip_not_drawn')) : amountWords(r[1])));
                 if (!none) row.appendChild(el('span', 'tip-of', t('chart.tip_of', { n: ymax })));
                 row.appendChild(el('span', 'tip-name', r[0] === 'recorded' ? (detail && detail.carried ? t('chart.tip_carried') : t('chart.recorded')) : r[0]));
                 tip.appendChild(el('span', 'tip-sep', '·'));

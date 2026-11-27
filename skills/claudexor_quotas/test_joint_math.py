@@ -228,6 +228,37 @@ def test_total_line_matches_a_brute_force_sum():
         assert got == pytest.approx(expect, abs=2e-3), (t, got, expect)
 
 
+def test_tiny_positive_balance_is_preserved_at_zero_spend_and_partial_drain():
+    now, end = 1_900_000_000.0, 1_900_000_000.0 + 10 * H
+    tiny = 5e-8  # strictly positive (EPS < tiny <= 1e-7)
+
+    # 1. No new use (pace=False): tiny positive balance survives to end and into Jump.left.
+    nnu = qj.simulate([qj.Win("5h", tiny, reset=now + 6 * H, rate=0.0, unit=True),
+                       qj.Win("7d", tiny, reset=now + 20 * H, rate=0.0, k=1.0)], now, end, pace=False)
+    assert nnu.value("5h", now, True) == pytest.approx(tiny, rel=1e-9)
+    assert nnu.value("5h", now + 6 * H, False) == pytest.approx(tiny, rel=1e-9)
+    assert nnu.jumps and nnu.jumps[0].left == pytest.approx(tiny, rel=1e-9)
+    assert nnu.value("7d", end, True) == pytest.approx(tiny, rel=1e-9)
+
+    # 2. Zero measured spend on one window (rate=0.0) while another window actively drains.
+    zero_rate = qj.simulate([qj.Win("5h", tiny, reset=now + 20 * H, rate=0.0, unit=True),
+                             qj.Win("7d", 0.5, reset=now + 2 * H, rate=0.1 / H, k=1.0)], now, end, pace=True)
+    assert zero_rate.value("5h", now + 2 * H, True) == pytest.approx(tiny, rel=1e-9)
+    assert zero_rate.value("5h", end, True) == pytest.approx(tiny, rel=1e-9)
+
+    # 3. Frozen at zero slope while another binding window is exhausted until reset.
+    frozen = qj.simulate([qj.Win("5h", tiny, reset=now + 20 * H, rate=1e-12, unit=True),
+                          qj.Win("7d", 0.0, reset=now + 4 * H, rate=0.1 / H, k=1.0)], now, end, pace=True)
+    assert frozen.value("5h", now + 4 * H, False) == pytest.approx(tiny, rel=1e-9)
+    assert frozen.value("5h", end, True) == pytest.approx(tiny - 1e-12 * 6 * H, rel=1e-6)
+    assert frozen.value("5h", end, True) > 0.0
+
+    # 4. Active depletion to zero still snaps cleanly to exact 0.0 without spinning.
+    dep = qj.simulate([qj.Win("5h", 0.5, reset=now + 20 * H, rate=0.5 / H, unit=True)], now, end, pace=True)
+    assert dep.value("5h", now + 1 * H, True) == 0.0
+    assert dep.value("5h", end, True) == 0.0
+
+
 def _interp(line, t):
     for (t0, v0), (t1, v1) in zip(line, line[1:]):
         if t0 <= t <= t1 and t1 > t0:

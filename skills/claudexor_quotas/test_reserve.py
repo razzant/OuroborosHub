@@ -926,13 +926,15 @@ def test_a_reset_cluster_straddling_the_horizon_is_split_at_it():
 
 
 def test_the_shown_assumptions_are_the_drawn_scenarios_and_the_legacy_ones_are_apart():
-    """The notes the widget shows describe what it draws: the recent-pace
-    future runs every account read now to the horizon. The older cohort line's
-    wording (stopping at the first reset) and the refill scenario's are kept
-    only under ``legacy_assumptions``, by field."""
+    """The notes the widget shows describe what it draws: the 48-hour typical
+    pooled pace and no-new-use futures run every account read now to the
+    horizon. The older cohort line's wording (stopping at the first reset)
+    and the refill scenario's are kept only under ``legacy_assumptions``, by
+    field."""
     chart = qs.build_chart(forecast_state(), horizon="24h")
     shown = " ".join(chart["assumptions"])
-    assert "Recent pace: every account read now" in shown
+    assert "Typical: continues the 48-hour observed pooled hourly burn rate" in shown
+    assert "No new use: each account keeps its current reading" in shown
     assert "stops at the first reported reset" not in shown
     assert "Refill scenario" not in shown and "(mixed)" not in shown
     legacy = chart["legacy_assumptions"]
@@ -983,9 +985,12 @@ def test_restricted_accounts_stay_in_the_scenarios():
     summary = qs.build_summary(data, state.view, NOW, state=state)
     assert summary["groups"][0]["restrictions"]["cooling"]["accounts"] == 1
     chart = qs.build_chart(state, horizon="24h")
-    for sc in chart["scenarios"].values():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         assert sc["accounts"] == 2
         assert sc["line"][0][1] == summary["groups"][0]["measured"]["windows"] == 1.2
+    assert chart["scenarios"]["typical"]["accounts"] == 2
+    assert chart["scenarios"]["typical"]["line"] == []
 
 
 def test_with_no_current_reading_no_future_is_drawn(tmp_path):
@@ -1008,8 +1013,10 @@ def test_a_moving_reported_reset_is_read_as_reported_now(tmp_path):
     sweep(store, {"a": [(-3000, 0.30, 3 * 3600)]}, -3000, -1500)
     now_data = host_at(NOW, {"a": [(-60, 0.32, 5 * 3600)]})
     chart = plugin.reserve_view(store, now_data, NOW, NOW)["chart"]
-    for sc in chart["scenarios"].values():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         assert [e["at"] for e in sc["schedule"]] == [round(NOW + 5 * 3600)]
+    assert chart["scenarios"]["typical"]["schedule"] == []
     assert "Reset times are as reported now and may move" in " ".join(chart["assumptions"])
 
 
@@ -1681,10 +1688,17 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(describedBy(env.root, tightName), new RegExp('next reset .*\\+' + tight.next_reset_returns.toFixed(2) + ' if unused'));
   assert.ok(classes(env.root, 'q-step').length >= 1, 'the ladder has the next reset');
 
-  // 2. The timeline: the record behind now and one future ahead of it, from
-  // the row's own figure, with its reset schedule and checkpoints; no estimate
-  // cohort, no refill toggle, no point marks or hatching, no "no new use"
-  // line hidden away.
+  // 2. The timeline: the record behind now and one future ahead of it.
+  // With only 1h of fixture history, default Typical is honestly unknown: NO future line,
+  // NO fake checkpoints, NO fake schedule — switch to No new use for the refill-only future.
+  assert.ok(paths(env).includes('line-observed'));
+  assert.ok(!paths(env).includes('line-scenario'), 'insufficient Typical draws no future line');
+  assert.equal(classes(env.root, 'checkpoints').length, 0);
+  assert.equal(classes(env.root, 'schedule').length, 0);
+  assert.match(classes(env.root, 'chart-legend')[0].textContent,
+               /typical · Needs at least 12h of valid pool history in the last 48 h/);
+  click(env, 'scenario:no_new_use');
+  assert.equal(env.calls.length, 1);
   assert.ok(paths(env).includes('line-observed'));
   assert.ok(paths(env).includes('line-scenario'));
   assert.ok(!paths(env).some((c) => /line-pace|line-hold|line-cohort|line-refill|gap-band/.test(c)), paths(env).join());
@@ -1745,16 +1759,11 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   plot.listeners.keydown[0]({ key: 'Home', preventDefault() {} });
   assert.match(readout.textContent, /recorded /);
 
-  // The future is a choice beside the chart: recent pace is the same chart's
-  // other scenario — drawn at once, nothing asked — with its own schedule.
-  click(env, 'scenario:recent_pace');
+  // Switching back to Typical (with only 1h history) hides the refill-only line cleanly, with nothing asked.
+  click(env, 'scenario:typical');
   assert.equal(env.calls.length, 1);
-  assert.match(env.root.textContent, /Reported resets · recent pace/);
-  const pace = chart.scenarios.recent_pace;
-  assert.match(classes(env.root, 'chart-legend')[0].textContent,
-               new RegExp('recent pace · ' + pace.at_pace + ' of ' + pace.accounts + ' current'));
-  assert.match(env.root.textContent, new RegExp(pace.at_pace + ' of ' + pace.accounts + ' current at their pace of the last '));
-  click(env, 'scenario:no_new_use');
+  assert.ok(!paths(env).includes('line-scenario'));
+  assert.match(classes(env.root, 'chart-legend')[0].textContent, /typical · Needs at least 12h/);
 
   // Choosing another limit (its row's name) asks once, with reuse, for that
   // limit's chart, and its timeline stands under its own row.
@@ -1797,7 +1806,7 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(text, /Only each account’s next reported reset is applied/);
   // The notes describe the futures drawn, never the older cohort line that
   // stopped at the first reset (kept apart, by field, and not shown).
-  assert.match(text, /Recent pace: every account read now/);
+  assert.match(text, /Typical divides this limit’s comparable burn over the preceding 48 hours by its valid hours/);
   assert.doesNotMatch(text, /stops at the first reported reset|Refill scenario|\(mixed\)/);
   assert.ok(!details.open);
   details.open = true;
@@ -1831,9 +1840,8 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   env = await boot(fixture.warming);
   assert.match(classes(env.root, 'chart-table')[0].textContent, /warming up/);
   assert.match(classes(env.root, 'chart-table')[0].textContent, /at least 15 minutes.*trailing hour/);
-  click(env, 'scenario:recent_pace');
   assert.match(classes(env.root, 'chart-legend')[0].textContent,
-               /recent pace · 2 current accounts held at their shares; each refilled once at its next reported reset; no later reset is assumed\. No account has a measured pace yet \(warming up: .*\): the same as no new use/);
+               /typical · Needs at least 12h of valid pool history in the last 48 h.*no forecast drawn/);
   env = await boot(fixture.failed);
   assert.match(env.root.textContent, /Reserve overview unavailable/);
   assert.match(env.root.textContent, /The account list below is unaffected/);
@@ -1886,27 +1894,33 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(classes(env.root, 'chart-legend')[0].textContent,
                new RegExp('recorded · ' + lc.past_accounts + ' accounts?'));
 
-  // Zero qualified pace still draws a future of all current accounts. Its
-  // visible legend must name that count and the held/refill assumptions even
-  // when a different cohort produced the recorded line.
+  // Insufficient 48h history draws NO future line under Typical (never substitutes No new use),
+  // while switching to No new use names the current-account cohort honestly.
   for (const count of [1, 2]) {
     const noPace = JSON.parse(JSON.stringify(fixture.warming));
     const c = noPace.reserve.chart;
     delete c.history; // Older API response still renders its named cohort.
-    c.scenarios.recent_pace.accounts = count;
-    c.scenarios.recent_pace.held = count;
-    assert.equal(c.scenarios.recent_pace.at_pace, 0);
+    c.scenarios.typical.accounts = count;
+    c.scenarios.typical.held = count;
+    c.scenarios.typical.status = 'insufficient';
+    c.scenarios.typical.valid_hours = 0;
+    c.scenarios.typical.line = [];
+    c.scenarios.no_new_use.accounts = count;
+    assert.equal(c.scenarios.typical.at_pace, 0);
     c.past_accounts = count + 1;
     c.past = [[c.now - 600, 1], [c.now, 1]];
     env = await boot(noPace);
-    click(env, 'scenario:recent_pace');
     const legend = classes(env.root, 'chart-legend')[0].textContent;
     assert.ok(legend.includes('recorded · ' + (count + 1) + ' accounts'), legend);
-    assert.ok(legend.includes('recent pace · ' + count + ' current account'
-      + (count === 1 ? ' held at its share' : 's held at their shares')), legend);
-    assert.match(legend, /each refilled once at its next reported reset; no later reset is assumed/);
-    assert.match(legend, /No account has a measured pace yet/);
-    assert.equal((legend.match(/refilled once/g) || []).length, 1);
+    assert.ok(!paths(env).includes('line-scenario'), 'insufficient Typical draws no line');
+    assert.match(legend, /typical · Needs at least 12h of valid pool history in the last 48 h.*no forecast drawn/);
+    click(env, 'scenario:no_new_use');
+    const nnuLegend = classes(env.root, 'chart-legend')[0].textContent;
+    assert.ok(paths(env).includes('line-scenario'), 'No new use draws its refill line');
+    assert.ok(nnuLegend.includes('no new use · ' + count + ' current account'
+      + (count === 1 ? ' keeps its share' : 's keep their share')), nnuLegend);
+    assert.match(nnuLegend, /refilled once at its next reported reset; no later reset is assumed/);
+    assert.equal((nnuLegend.match(/refilled once/g) || []).length, 1);
   }
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
@@ -2937,13 +2951,14 @@ async function bootThemed(view) {
   const groups = view.reserve.summary.groups.filter((g) => g.harness === 'codex');
   const tight = groups.find((g) => g.tightest);
 
-  // 1. Each new mount (0.8.0 defaults, never saved): the limits, the timeline
-  // of the lowest-left limit open under its row with "no new use" and the
+  // 1. Each new mount (0.14.0 defaults, never saved): the limits, the timeline
+  // of the lowest-left limit open under its row with "Typical" and the
   // limit's own span, the account list folded, the top account of the row picked (its card stands under the plate), About shut.
   let env = await bootThemed(view);
   assert.ok(hasSvg(env.root), 'timeline open by default');
   assert.doesNotMatch(env.calls[0].url, /chart=0/);
-  assert.equal(byFocus(env.root, 'scenario:no_new_use').getAttribute('aria-pressed'), 'true');
+  assert.equal(byFocus(env.root, 'scenario:typical').getAttribute('aria-pressed'), 'true');
+  assert.equal(byFocus(env.root, 'scenario:no_new_use').getAttribute('aria-pressed'), 'false');
   assert.equal(byFocus(env.root, 'horizon:' + (tight.window_seconds > 86400 ? '7d' : '24h')).getAttribute('aria-pressed'), 'true');
   // The word "Accounts · N" over the bars is a pressed word (aria-pressed), not an expander; About stays an expander.
   assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
@@ -3011,6 +3026,7 @@ async function bootThemed(view) {
   assert.doesNotMatch(env.calls.at(-1).url, /chart=0/);
   env.theme('light');
   assert.ok(hasSvg(env.root));
+  click(env, 'scenario:no_new_use');
   const block = classes(env.root, 'tl-block')[0].textContent;
   assert.match(block, /no later reset is assumed/);
   assert.match(block, /no additional unreported resets/);
@@ -3019,6 +3035,7 @@ async function bootThemed(view) {
   assert.equal(walk(env.root).filter((n) => /^line-end|region-text/.test(String(n.getAttribute('class') || ''))).length, 0);
   // The table is a sample of the line and says so.
   assert.match(classes(env.root, 'chart-table')[0].textContent, /of \d+ recorded changes/);
+  click(env, 'scenario:typical');
 
   // 4. A new mount starts with the defaults again: nothing of the last
   // session is kept.
@@ -3711,15 +3728,17 @@ def _chart_read_at(now, resets, horizon):
 def _published_at_horizon(chart, now, horizon_end, total):
     """Everything the chart says at its horizon says ``total`` there."""
     assert chart["end"] == horizon_end
-    for sc in chart["scenarios"].values():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         assert sc["line"][-1] == [horizon_end, total]
         assert sc["checkpoints"][-1]["at"] == horizon_end and sc["checkpoints"][-1]["value"] == total
         # Every checkpoint is the whole second of the original now plus its offset.
         assert [cp["at"] for cp in sc["checkpoints"]] == [round(now + cp["after_seconds"])
                                                           for cp in sc["checkpoints"]]
+    assert chart["scenarios"]["typical"]["line"] == [] and chart["scenarios"]["typical"]["checkpoints"] == []
     rows = [row for row in chart["table"] if row["at"] == qs.iso(horizon_end)]
     assert rows and all(row["scenario_no_new_use"] == total and row["scenario_recent_pace"] == total
-                        for row in rows)
+                        and row["scenario_typical"] is None for row in rows)
 
 
 @pytest.mark.parametrize("horizon", ["24h", "7d"])
@@ -3734,11 +3753,13 @@ def test_fractional_now_above_half_a_reset_at_the_published_horizon_is_inside(ho
     chart = _chart_read_at(now, [end], horizon)
     # The original now and the figure at it stay as read.
     assert chart["now"] == round(now) and chart["current_windows"] == 0.6
-    for sc in chart["scenarios"].values():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         assert sc["line"][0] == [round(now), 0.6]
         assert [(e["at"], e["accounts"], e["total_after"]) for e in sc["schedule"]] == [(end, 1, 1.0)]
         assert sc["later"] is None
         assert sc["line"][-2:] == [[end, 0.6], [end, 1.0]]     # refilled at the horizon, not before
+    assert chart["scenarios"]["typical"]["line"] == [] and chart["scenarios"]["typical"]["schedule"] == []
     _published_at_horizon(chart, now, end, 1.0)
     assert chart["resets"] == [{"at": end, "accounts": 1}]
     assert [row["event"] for row in chart["table"] if row["at"] == qs.iso(end) and row.get("event")] \
@@ -3757,13 +3778,15 @@ def test_fractional_now_below_half_a_reset_past_the_published_horizon_is_not_app
     end = round(NOW + span)
     chart = _chart_read_at(now, [end, end + 0.2], horizon)
     assert chart["now"] == round(now) and chart["current_windows"] == 1.2
-    for sc in chart["scenarios"].values():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         assert sc["line"][0] == [round(now), 1.2]
         assert [(e["at"], e["accounts"], e["total_after"]) for e in sc["schedule"]] == [(end, 1, 1.6)]
         # Its own time, to the second it is published at (here the same
         # second as the horizon): when, never applied.
         assert sc["later"] == {"at": round(end + 0.2), "accounts": 1, "more_events": 0, "more_accounts": 0}
         assert max(v for _t, v in sc["line"]) == 1.6
+    assert chart["scenarios"]["typical"]["line"] == [] and chart["scenarios"]["typical"]["schedule"] == []
     _published_at_horizon(chart, now, end, 1.6)
     assert chart["resets"] == [{"at": end, "accounts": 1}]
     # A whole-second now is unchanged by any of it.
@@ -3803,7 +3826,8 @@ def test_a_reset_with_a_fraction_of_a_second_is_never_applied_before_it(fraction
     checkpoint = round(now + 6 * 3600)
     expected = 0.6 if before else 1.0
     chart = _chart_read_at(now, [NOW + offset], "24h")
-    for name, sc in chart["scenarios"].items():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         # The reset at its own time, in the schedule and on the line.
         assert [(e["at"], e["last"]) for e in sc["schedule"]] == [(reset, reset)], name
         assert [[t, v] for t, v in sc["line"] if t == reset] == [[reset, 0.6], [reset, 1.0]], name
@@ -3814,6 +3838,7 @@ def test_a_reset_with_a_fraction_of_a_second_is_never_applied_before_it(fraction
         for cp in sc["checkpoints"]:
             assert _cursor_at(sc["line"], cp["at"]) == cp["value"], (name, cp)
         assert (_cursor_at(sc["line"], reset - 0.05), _cursor_at(sc["line"], reset)) == (0.6, 1.0), name
+    assert chart["scenarios"]["typical"]["line"] == [] and chart["scenarios"]["typical"]["schedule"] == []
 
     # The table: its reset row at the reset's own instant, every row in time
     # order by the instant it says — the 6-hour row of the same second before
@@ -3826,14 +3851,17 @@ def test_a_reset_with_a_fraction_of_a_second_is_never_applied_before_it(fraction
     assert reset_row["at"] == qs.iso_exact(reset)
     span_row = next(row for row in table if row["at"] == qs.iso(checkpoint) and not row.get("event"))
     assert span_row["scenario_no_new_use"] == span_row["scenario_recent_pace"] == expected
+    assert span_row["scenario_typical"] is None
     if before:
         assert table.index(span_row) < table.index(reset_row)
     for row in table:
         if "scenario_no_new_use" not in row or row.get("event") == "now":
             continue
         at = qs.parse_instant(row.get("until") or row["at"])
-        for name, sc in chart["scenarios"].items():
+        for name in ("no_new_use", "recent_pace"):
+            sc = chart["scenarios"][name]
             assert row["scenario_" + name] == round(_cursor_at(sc["line"], at), 2), (name, row)
+        assert row["scenario_typical"] is None
 
 
 def test_one_event_of_resets_a_fraction_apart_keeps_both_instants():
@@ -3842,12 +3870,14 @@ def test_one_event_of_resets_a_fraction_apart_keeps_both_instants():
     now = NOW + 0.25
     first, last = (qs.parse_instant(_iso_exact(NOW + offset)) for offset in (21600.2, 21600.7))
     chart = _chart_read_at(now, [NOW + 21600.2, NOW + 21600.7], "24h")
-    for name, sc in chart["scenarios"].items():
+    for name in ("no_new_use", "recent_pace"):
+        sc = chart["scenarios"][name]
         assert [(e["at"], e["last"], e["accounts"], e["adds"], e["total_after"]) for e in sc["schedule"]] \
             == [(first, last, 2, 0.8, 2.0)], name
         line = sc["line"]
         assert [_cursor_at(line, t) for t in (NOW + 21600, first, last)] == [1.2, 1.6, 2.0], name
         assert next(cp for cp in sc["checkpoints"] if cp["after_seconds"] == 6 * 3600)["value"] == 1.2
+    assert chart["scenarios"]["typical"]["line"] == [] and chart["scenarios"]["typical"]["schedule"] == []
     row = next(row for row in chart["table"] if row.get("event", "").startswith("reported reset"))
     assert (row["at"], row["until"]) == (qs.iso_exact(first), qs.iso_exact(last))
     assert row["scenario_no_new_use"] == 2.0
@@ -3868,7 +3898,9 @@ def test_the_widgets_own_lineat_agrees_with_the_checkpoints_around_a_fractional_
     cases = []
     for fraction, offset, _before in FRACTIONAL_RESETS:
         reset = qs.parse_instant(_iso_exact(NOW + offset))
-        for sc in _chart_read_at(NOW + fraction, [NOW + offset], "24h")["scenarios"].values():
+        scenarios = _chart_read_at(NOW + fraction, [NOW + offset], "24h")["scenarios"]
+        for name in ("no_new_use", "recent_pace"):
+            sc = scenarios[name]
             checks = [[cp["at"], cp["value"]] for cp in sc["checkpoints"]] + [[reset - 0.05, 0.6], [reset, 1.0]]
             cases.append({"line": sc["line"], "checks": checks})
     script = body + textwrap.dedent("""

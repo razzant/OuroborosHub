@@ -43,27 +43,33 @@ def _variant(base, moments=None, unknown=None, resets=5):
     """The fixture view with `resets` events in the schedule, `moments` checkpoints (the first ones, or more of the last) and the checkpoint
     at index `unknown` not known."""
     view = json.loads(json.dumps(base))
-    sc = view["reserve"]["chart"]["scenarios"]["no_new_use"]
-    first = sc["schedule"][0]
-    sc["schedule"] = [dict(first, at=first["at"] + 3600 * i, last=first["at"] + 3600 * i, total_after=min(3.0, first["total_after"] + .1 * i))
-                      for i in range(resets)]
-    if moments is not None:
-        cps = sc["checkpoints"]
-        while len(cps) < moments:
-            cps.append(dict(cps[-1], after_seconds=cps[-1]["after_seconds"] + 3600, at=cps[-1]["at"] + 3600))
-        sc["checkpoints"] = cps[:moments]
-    if unknown is not None:
-        sc["checkpoints"][unknown]["value"] = None
+    scenarios = view["reserve"]["chart"]["scenarios"]
+    for key in ("no_new_use", "typical"):
+        sc = scenarios.get(key)
+        if not sc or not sc.get("schedule"):
+            continue
+        first = sc["schedule"][0]
+        sc["schedule"] = [dict(first, at=first["at"] + 3600 * i, last=first["at"] + 3600 * i, total_after=min(3.0, first["total_after"] + .1 * i))
+                          for i in range(resets)]
+        if moments is not None and sc.get("checkpoints"):
+            cps = sc["checkpoints"]
+            while len(cps) < moments:
+                cps.append(dict(cps[-1], after_seconds=cps[-1]["after_seconds"] + 3600, at=cps[-1]["at"] + 3600))
+            sc["checkpoints"] = cps[:moments]
+        if unknown is not None and sc.get("checkpoints"):
+            sc["checkpoints"][unknown]["value"] = None
     return view
 
 
-def _open(browser, view, width, height=1000, details=True):
+def _open(browser, view, width, height=1000, details=True, use_no_new_use=True):
     page = browser.new_page(viewport={"width": width, "height": height})
     page.set_content('<!doctype html><html><head></head><body><div id="root"></div></body></html>')
     page.evaluate(STUB, view)
     page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
     page.wait_for_selector('[data-focus="refresh"]:not([disabled])')
     page.wait_for_selector(".tl-block .chart-svg")
+    if use_no_new_use:
+        page.click('[data-focus="scenario:no_new_use"]')
     if details:
         page.click('[data-focus="chart-table"]')
         page.wait_for_selector(".checkpoints .cp-tile")
@@ -321,10 +327,12 @@ IDLE_INK = """() => {
 
 @pytest.mark.parametrize("theme", ["dark", "light"])
 def test_the_idle_option_keeps_the_ink_of_a_live_button_and_is_told_by_its_outline(browser, base_view, theme):
-    # A pace nobody has measured draws what No new use draws, but the button works: its words read as the other options' do (4.5:1 at least, both themes), and it is told by a dashed outline.
+    # A typical pace without enough 48h history draws no line, yet the button works: its words read as the other options' do (4.5:1 at least, both themes), and it is told by a dashed outline.
     view = json.loads(json.dumps(base_view))
-    view["reserve"]["chart"]["scenarios"]["recent_pace"]["at_pace"] = 0  # no account has a measured pace: the option draws what No new use draws
-    page = _open(browser, view, 1120, details=False)
+    view["reserve"]["chart"]["scenarios"]["typical"]["status"] = "insufficient"
+    view["reserve"]["chart"]["scenarios"]["typical"]["at_pace"] = 0
+    page = _open(browser, view, 1120, details=False, use_no_new_use=False)
+    page.click('[data-focus="scenario:no_new_use"]')
     if theme == "light":
         page.evaluate("() => document.documentElement.setAttribute('data-theme', 'light')")
     page.wait_for_timeout(200)

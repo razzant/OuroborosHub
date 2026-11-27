@@ -3,7 +3,7 @@
     "ouroboros"
   ],
   "description": "Claudexor quota dashboard and read-only quota_summary: measured reserve, reported resets, watched pace and dated resources. Eligible hosts may show a brief advisory snapshot. No automatic provider refresh or routing changes.",
-  "digest": "d37dbb1de24ed4efdab5703d1e7398dd865cac8047858fc582cba4995bf92185",
+  "digest": "10f8555b8abc9e8546f29cae7911567de01bc06e9cb5039ca2f02eb225ad327b",
   "mark": "linked account",
   "name": "claudexor_quotas",
   "needs": "needs an account already connected to Claudexor",
@@ -16,7 +16,7 @@
   },
   "title": "Claudexor Quotas",
   "type": "extension",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "when_to_use": "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change.",
   "withdrawn": null
 }

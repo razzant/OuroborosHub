@@ -126,8 +126,11 @@ function keptWindow(env) {
   // Every read answers the view until the poll that fails: an answer that is not a view (the widget's "unreadable").
   const env = await boot(() => (fail ? null : view));
   await settle();
-  // The owner picks the five-hour limit (the widget opens on the family's tightest one).
+  // The owner picks the five-hour limit (the widget opens on the family's tightest one)
+  // and switches to No new use so both window and Combined draw refill-only futures before failing.
   click(env, 'ring:claude:' + view.reserve.chart.group_key);
+  await settle();
+  click(env, 'scenario:no_new_use');
   await settle();
 
   // The answer as read: the window's futures with their resets, and Combined's figure, hours and next reset.
@@ -233,6 +236,7 @@ def test_a_real_browser_keeps_both_views_of_the_chart_without_anything_current(b
         page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
         page.wait_for_selector('[data-focus="refresh"]:not([disabled])')
         page.click(f'[data-focus="ring:claude:{GROUP}"]')
+        page.click('[data-focus="scenario:no_new_use"]')
         page.wait_for_selector(".tl-block .chart-svg path.line-scenario")
         _pick(page, True)
         page.wait_for_selector(".tl-block .tl-hero")

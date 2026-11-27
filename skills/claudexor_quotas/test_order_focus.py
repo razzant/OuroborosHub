@@ -250,11 +250,11 @@ function showLimit(env, g) {
     assert.ok(before, 'the timed reading is in the air');
     const groups = fx.view.reserve.summary.groups;
     const other = groups.find((g) => !g.tightest);
-    click(env, 'scenario:recent_pace');
+    click(env, 'scenario:no_new_use');
     click(env, 'horizon:24h');
     showLimit(env, other);
     before.resolve(response(fx.view)); await settle();
-    assert.deepEqual(pressed(env, 'scenario:'), ['scenario:recent_pace']);
+    assert.deepEqual(pressed(env, 'scenario:'), ['scenario:no_new_use']);
     assert.deepEqual(pressed(env, 'horizon:'), ['horizon:24h']);
     assert.deepEqual(pressed(env, 'ring:'), ['ring:' + other.harness + ':' + other.key]);
     // The widget asks for the chart it now shows, once, from the same read.
@@ -268,7 +268,7 @@ function showLimit(env, g) {
     env.interval()(); await settle();
     pending.filter((p) => p.call.method === 'GET').at(-1).resolve(response(fx.view));
     await settle();
-    assert.deepEqual(pressed(env, 'scenario:'), ['scenario:recent_pace']);
+    assert.deepEqual(pressed(env, 'scenario:'), ['scenario:no_new_use']);
     assert.deepEqual(pressed(env, 'horizon:'), ['horizon:24h']);
     assert.ok(env.calls.every((call) => !/\/prefs$/.test(call.url)), 'no display choice is saved');
     // Every read still in the air (the chart asked for the limit on screen)

@@ -298,6 +298,9 @@ class HistoryView:
     # between two sightings of one source that did not see it is a recorded
     # hole in that source's watch, whichever writer stored the runs.
     sweeps: List[float] = field(default_factory=list)
+    # Parallel ok flags for ``sweeps`` when populated by HistoryStore.read();
+    # None keeps legacy callers (which pass good sweeps only) working as before.
+    sweep_ok: Optional[List[bool]] = None
     sweeps_from: Optional[float] = None
     collecting_since: Optional[float] = None
     oldest_at: Optional[float] = None
@@ -306,6 +309,10 @@ class HistoryView:
     last_sweep_reason: str = ""
     last_failed_at: Optional[float] = None
     truncated: bool = False
+    # Per series, the newest ``last_seen`` of any run omitted by the read cap
+    # (``math.inf`` when series subjects were capped, or ``sweeps_from`` when
+    # sweeps were capped). Absent when every requested run of the series fit.
+    truncated_at: Dict[str, float] = field(default_factory=dict)
     capped_before: Optional[float] = None
     error: str = ""
     # The newest run kept per source for a (subject, series) pair, whatever
@@ -545,6 +552,17 @@ class Normalized:
     cached: Dict[str, float] = field(default_factory=dict)
     # account -> resolved shared limits that are spent, including groups not shown.
     spent: Dict[Tuple[str, str], Dict[str, Reading]] = field(default_factory=dict)
+    # account -> every resolved current limit that is spent (shared, model-scoped,
+    # prefix-scoped, or kind-restricted), recorded before MAX_GROUPS display trimming
+    # so request-scoped analytics never lose an offscreen binding exhausted window.
+    spent_windows: Dict[Tuple[str, str], Dict[str, Reading]] = field(default_factory=dict)
+    # Every cooldown and live model exhaustion above as reported, per account:
+    # (``cooldown`` | ``exhaustion``, hold scope, its scope as sent, its own end;
+    # None: no end reported or readable). An account is held until the last one
+    # that binds it has ended, never the earliest, and a model's hold binds that
+    # model's requests where no window of that model is read (quota_analytics).
+    holds: Dict[Tuple[str, str], List[Tuple[str, str, Optional[quota_scope.Scope], Optional[float]]]] = \
+        field(default_factory=dict)
 
     @property
     def accounts_cached(self) -> bool:
@@ -1071,6 +1089,7 @@ def normalize(payload: Any, now: float,
     readings: List[Reading] = []
     cooldown_ends: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
     exhaustion_ends: Dict[Tuple[str, str], Dict[str, float]] = {}
+    holds: Dict[Tuple[str, str], List[Tuple[str, str, Optional[quota_scope.Scope], Optional[float]]]] = {}
 
     for hid, sid, row in attributed.rows:
         if hid not in harness_order:
@@ -1086,6 +1105,7 @@ def normalize(payload: Any, now: float,
             previous = ends.setdefault(cooldown.scope, cooldown.until)
             if cooldown.until is not None and (previous is None or cooldown.until < previous):
                 ends[cooldown.scope] = cooldown.until
+            holds.setdefault((hid, sid), []).append(("cooldown", cooldown.scope, cooldown.desc, cooldown.until))
         for exhaustion in exhaustions_of(row, hid, sid, now):
             # A model's limit, never the account: one that names no model
             # cannot hold any window.
@@ -1093,6 +1113,7 @@ def normalize(payload: Any, now: float,
                 ends = exhaustion_ends.setdefault((hid, sid), {})
                 at = exhaustion.resets_at
                 ends[exhaustion.scope] = min(ends.get(exhaustion.scope, at), at)
+                holds.setdefault((hid, sid), []).append(("exhaustion", exhaustion.scope, exhaustion.desc, at))
         constraints = row.get("constraints")
         for constraint in (constraints if isinstance(constraints, list) else [])[:MAX_CONSTRAINTS]:
             if not isinstance(constraint, dict):
@@ -1108,7 +1129,7 @@ def normalize(payload: Any, now: float,
         reads=reads, unified=attributed.unified, harness_order=harness_order,
         families=families, accounts=accounts, accounts_known=attributed.accounts_known,
         quota_known=attributed.quota_known, readings=readings, cooldown_ends=cooldown_ends,
-        exhaustion_ends=exhaustion_ends,
+        exhaustion_ends=exhaustion_ends, holds=holds,
         unattributed=attributed.unattributed,
         superseded=attributed.superseded, malformed=malformed,
         cached={k: float(v) for k, v in (cached or {}).items() if k in FACETS},
@@ -1163,6 +1184,11 @@ class Member:
     last_known: Optional["LastKnown"] = None
     # Earliest reported end of evidence behind this member's time-limited flags.
     restriction_boundary: Optional[float] = None
+    # When every restriction known now ends, so the account can run again: None
+    # when nothing known holds it now (an account state not read holds nothing),
+    # math.inf when one has no reported end. A forecast holds the share until
+    # then instead of draining it; it is not a reset and not a share.
+    hold_until: Optional[float] = None
     # Earliest known end of a competing current source; not a reset prediction.
     conflict_boundary: Optional[float] = None
 
@@ -1419,14 +1445,18 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
     # unknown timing, not the absence of a restriction. A reading of an ended
     # cycle (reset passed), a stale or an unreadable one blocks nothing.
     spent: Dict[Tuple[str, str], Dict[str, Reading]] = {}
+    spent_windows: Dict[Tuple[str, str], Dict[str, Reading]] = {}
     for key, members in resolved.items():
         for member in members:
             reading = member.reading
-            if member.status == "measured" and reading is not None and not _scoped(reading) \
-                    and member.remaining <= RATIO_EPS and (reading.desc is None or any(
+            if member.status == "measured" and reading is not None and member.remaining <= RATIO_EPS:
+                subject = (member.harness, member.subject_id)
+                spent_windows.setdefault(subject, {})[key] = reading
+                if not _scoped(reading) and (reading.desc is None or any(
                         quota_scope.account_wide(reading.desc, kind) for kind in quota_scope.REQUEST_KINDS)):
-                spent.setdefault((member.harness, member.subject_id), {})[key] = reading
+                    spent.setdefault(subject, {})[key] = reading
     norm.spent = spent
+    norm.spent_windows = spent_windows
     groups: List[GroupCalc] = []
     for key, subjects in by_key.items():
         # Every reading of one key has one applicability (quota_scope.key_token);
@@ -1514,6 +1544,18 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
         boundaries.extend(other.resets_at for other in blockers)
     member.restriction_boundary = min((end for end in boundaries if end is not None), default=None)
     member.flags = tuple(flags)
+    # The holds known now and when each ends (None: no reported end). A failed
+    # check alone, or an account state that was not read, is no hold. Each
+    # reported hold counts to its own end: of two cooldowns of one scope the
+    # later end holds (``ends`` keeps the earliest, for the validity bound).
+    facts = norm.holds.get(subject, [])
+    holds: List[Optional[float]] = [None] if ("disabled" in flags or "signed_out" in flags) else []
+    holds.extend(end for kind, held, _desc, end in facts if kind == "cooldown" and held in ("-", scope))
+    if scope != "-":
+        holds.extend(end for kind, held, _desc, end in facts if kind == "exhaustion" and held == scope)
+    holds.extend(other.resets_at for other in blockers)
+    member.hold_until = (None if not holds else math.inf if any(end is None for end in holds)
+                         else max(holds))
 
 
 def _shared_identities(norm: Normalized, members: List[Member]) -> int:
@@ -2061,6 +2103,7 @@ class SummaryState:
     groups: List[GroupCalc]
     view: Optional[HistoryView]
     now: float
+    typical_cache: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 def rate_since(now: float) -> float:
@@ -2075,6 +2118,27 @@ def prepare(payload: Any, now: float,
     return norm, resolve_groups(norm, now)
 
 
+def _forecast_mod():
+    try:
+        from . import quota_forecast as qf
+    except ImportError:
+        import quota_forecast as qf  # type: ignore[no-redef]
+    return qf
+
+
+def typical_history_since(now: float) -> float:
+    """The oldest last sighting the 48-hour typical-pace calculation needs."""
+    return now - _forecast_mod().TYPICAL_LOOKBACK_SEC - 2 * SIGHTING_GAP_SEC
+
+
+def chart_history_since(now: float, horizon: str = "24h") -> float:
+    """The oldest last sighting a chart read needs: at least the chart's own
+    horizon and the 48-hour typical-pace lookback plus one trailing rate hour."""
+    lookback = _forecast_mod().TYPICAL_LOOKBACK_SEC
+    span = max(HORIZONS.get(horizon, HORIZONS["24h"]), lookback + RATE_WINDOW_SEC)
+    return now - span - 2 * SIGHTING_GAP_SEC
+
+
 def history_requests(groups: Sequence[GroupCalc], salt: str, now: float,
                      chart: Optional[GroupCalc] = None,
                      horizon: str = "24h",
@@ -2083,9 +2147,10 @@ def history_requests(groups: Sequence[GroupCalc], salt: str, now: float,
 
     Every measured account needs the last hour for its pace; every account
     the charted limit may apply to — whatever its reading now, and with
-    ``norm`` each roster account that reports none of it — needs the whole
-    horizon behind ``now``, so the record drawn does not change with what
-    is fresh at this moment.
+    ``norm`` each roster account that reports none of it — needs at least
+    the chart's horizon and the 48-hour typical-pace lookback behind ``now``,
+    so the record drawn and the typical pace do not change with what is fresh
+    at this moment or with the 24 h / 7 d span choice.
     """
     if not salt:
         return {}
@@ -2094,7 +2159,7 @@ def history_requests(groups: Sequence[GroupCalc], salt: str, now: float,
         for member in calc.measured:
             wanted[(pseudo_id(salt, member.harness, member.subject_id), calc.key)] = rate_since(now)
     if chart is not None:
-        since = now - HORIZONS.get(horizon, HORIZONS["24h"]) - 2 * SIGHTING_GAP_SEC
+        since = chart_history_since(now, horizon)
         for member in chart.members:
             wanted[(pseudo_id(salt, member.harness, member.subject_id), chart.key)] = since
         for harness, subject_id in (_roster_missing(norm, chart) if norm is not None else []):
@@ -2794,7 +2859,8 @@ def _scenario_line(total, now: float, end: float, breaks: Iterable[float]) -> Li
             out.append([at, right])
     if not times or times[-1] < end:
         out.append([round(end), total(end, False)])
-    return [[t, round(v, 4)] for t, v in out]
+    kept = _forecast_mod()._kept
+    return [[t, kept(v)] for t, v in out]
 
 
 def _scenario_functions(members: List[Member], paced: List[Member], now: float):
@@ -2858,6 +2924,7 @@ def _scenario(members: List[Member], paced: List[Member], now: float, end: float
                 runs_out.append({"at": round(again), "reset_reported": True, "after_refill": True})
     runs_out.sort(key=lambda row: row["at"])
 
+    kept = _forecast_mod()._kept
     schedule: List[Dict[str, Any]] = []
     # Split at the horizon first (horizon_events): an event ends by ``end``,
     # and an account resetting just past it is only in ``later``.
@@ -2872,9 +2939,9 @@ def _scenario(members: List[Member], paced: List[Member], now: float, end: float
             "at": _instant(at), "last": _instant(last), "accounts": len(group),
             # What each refill gives back is what the account has used by
             # then in this scenario: never the "no new use" amount reused.
-            "adds": round(sum(value(member, member.reading.resets_at, True)
-                              - value(member, member.reading.resets_at, False) for member in group), 4),
-            "total_after": round(total(last, True), 4),
+            "adds": kept(sum(value(member, member.reading.resets_at, True)
+                             - value(member, member.reading.resets_at, False) for member in group)),
+            "total_after": kept(total(last, True)),
         })
     checkpoints = []
     for offset in CHECKPOINTS.get(horizon, CHECKPOINTS["24h"]):
@@ -2884,7 +2951,7 @@ def _scenario(members: List[Member], paced: List[Member], now: float, end: float
         moment = round(now + offset)
         if moment <= end:
             checkpoints.append({"after_seconds": round(offset), "at": moment,
-                                "value": round(total(moment, True), 4)})
+                                "value": kept(total(moment, True))})
     return {
         "line": _scenario_line(total, now, end, breaks),
         "accounts": len(members),
@@ -3011,14 +3078,30 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
             "no estimate line is drawn."
         )
 
-    # 0.8.0: the two futures the widget draws, both of the accounts read now
-    # — the row's figure, from its own value at now — and both to the
-    # horizon: no new use, and the qualified accounts at their recent pace
-    # with the others held. With no current reading there is no future.
+    # The futures drawn from the accounts read now — the row's figure, from its
+    # own value at now — to the horizon: the 48-hour typical pooled pace, no new
+    # use (refills only), and legacy recent_pace kept for API compatibility.
+    # With no current reading there is no future.
+    qf = _forecast_mod()
     scenarios = None
     if members:
-        scenarios = {"no_new_use": _scenario(members, [], now, end, horizon),
-                     "recent_pace": _scenario(members, known, now, end, horizon)}
+        typical_info = qf.estimate_typical_pace(calc, state)
+        no_new_use_sc = _scenario(members, [], now, end, horizon)
+        no_new_use_sc["verdict"] = qf.build_no_new_use_verdict(members, now, end)
+        # Each account's known restrictions hold its share out of the usable
+        # reserve until they end; the measured balance is not changed by them.
+        blocks = [m.hold_until for m in members]
+        held = Counter(qf.held_why(m) for m, blk in zip(members, blocks)
+                       if blk is not None and not math.isfinite(blk))
+        held_reason = next(iter(held)) if len(held) == 1 else ("mixed" if held else "")
+        typical_sc = qf.build_typical_scenario(
+            members, now, end, horizon, typical_info, blocked_until=blocks,
+            held_reason=held_reason)
+        scenarios = {
+            "typical": typical_sc,
+            "no_new_use": no_new_use_sc,
+            "recent_pace": _scenario(members, known, now, end, horizon),
+        }
 
     def at_time(line: Optional[List[List[float]]], moment: float) -> Optional[float]:
         if not line:
@@ -3052,16 +3135,27 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
                       "sighting": True,
                       "event": ("seen at this sweep only" if point[1] is not None
                                 else "sources disagree at this sweep")})
-    # The scenarios the widget draws (``scenario_no_new_use``,
-    # ``scenario_recent_pace``) are read off their own functions just after
-    # anything at that moment — after the last reset of an event, so a row
-    # says the same as the schedule. ``no_new_use`` and ``recent_pace`` stay
-    # the older lines, kept for compatibility.
-    totals = ({"scenario_no_new_use": _scenario_functions(members, [], now)[1],
-               "scenario_recent_pace": _scenario_functions(members, known, now)[1]} if members else {})
+    # The scenarios the widget draws (``scenario_typical``, ``scenario_no_new_use``,
+    # plus ``scenario_recent_pace`` for compatibility) are read off their own
+    # functions just after anything at that moment — after the last reset of an
+    # event, so a row says the same as the schedule. ``no_new_use`` and
+    # ``recent_pace`` stay the older lines, kept for compatibility.
+    totals: Dict[str, Any] = {}
+    if members and scenarios is not None:
+        typical_line = scenarios["typical"]["line"]
+        totals = {
+            "scenario_typical": (lambda moment, right, _line=typical_line: qf.eval_polyline(_line, moment, right))
+            if typical_line else None,
+            "scenario_no_new_use": _scenario_functions(members, [], now)[1],
+            "scenario_recent_pace": _scenario_functions(members, known, now)[1],
+        }
 
     def scenario_cells(moment: float) -> Dict[str, Optional[float]]:
-        return {name: round(total(moment, True), 2) for name, total in totals.items()}
+        return {name: (None if total is None else (
+                    qf._kept(total(moment, True), 2)
+                    if name in ("scenario_typical", "scenario_no_new_use")
+                    else round(total(moment, True), 2)))
+                for name, total in totals.items()}
 
     table.append(dict({"at": iso(now), "observed": round(current, 2) if members else None,
                        "no_new_use": round(current, 2) if members else None,
@@ -3167,12 +3261,18 @@ def build_chart(state: SummaryState, key: str = "", harness: str = "",
             "Membership changes break the line and are not consumption. The current figure and "
             "future use only fresh readings; carry never enters measured pace.",
             history["membership_note"],
+            "Typical: continues the 48-hour observed pooled hourly burn rate "
+            "(this limit's comparable burn over the preceding 48 hours divided "
+            "by its valid hours: watched time when the limit had reserve, a "
+            "measured zero burn included, at least 12 of them; they say nothing "
+            "of other limits then) across the current accounts, with each account "
+            "refilling to a full window once at its next reported reset. An account "
+            "that cannot run now keeps its share, not drawn on until it can; one "
+            "whose other limit is not known now is counted apart, as a condition. "
+            "When history is insufficient, unavailable or held, no Typical line is "
+            "drawn. A conditional scenario, not a dispatch guarantee.",
             "No new use: each account keeps its current reading and refills to "
             "a full window only at its own next reported reset.",
-            "Recent pace: every account read now, the ones whose pace "
-            "qualified continuing it (refilled once at their next reported reset, "
-            "then at the same pace), the others held at their share and refilled "
-            "at their reset. A condition, not an estimate of use nobody observed.",
             "The scenarios assume no additional unreported resets: only each "
             "account's next reported reset is applied, so a limit shorter than "
             "the horizon is not refilled again in them, and an account with no "

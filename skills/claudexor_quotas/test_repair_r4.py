@@ -279,6 +279,7 @@ NODE_R4 = r"""
     // at now names its own accounts (including carried), separately from the fresh-only future.
     env = bootClock();
     await respond(env, fx.k1_chart);
+    click(env, 'scenario:no_new_use');
     byFocus(env.root, 'chart-plot').listeners.focus[0]();
     const readout = classes(env.root, 'chart-readout')[0].textContent;
     const nowHistory = fx.k1_chart.reserve.chart.history.details.at(-1);

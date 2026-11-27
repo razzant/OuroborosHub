@@ -209,9 +209,11 @@ def simulate(wins: Sequence[Win], now: float, end: float, pace: bool) -> Traject
         t_next = max(t, min(candidates))
         traj.segments.append(Segment(t, t_next, dict(rem), slope))
         for k in rem:
-            rem[k] = max(0.0, rem[k] + slope[k] * (t_next - t))
-            if rem[k] <= 1e-7:
-                rem[k] = 0.0
+            if slope[k] != 0.0:
+                hit = (t + rem[k] / rate[k]) if rate[k] > EPS else float("inf")
+                rem[k] = max(0.0, rem[k] + slope[k] * (t_next - t))
+                if rem[k] <= EPS or t_next >= hit - 1e-6:
+                    rem[k] = 0.0
         t = t_next
         while pending and pending[0][0] <= t + 1e-6:
             moment, k = pending.pop(0)

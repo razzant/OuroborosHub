@@ -1,7 +1,7 @@
 ---
 name: claudexor_quotas
 description: "Claudexor quota dashboard and read-only quota_summary: measured reserve, reported resets, watched pace and dated resources. Eligible hosts may show a brief advisory snapshot. No automatic provider refresh or routing changes."
-version: 0.13.2
+version: 0.14.0
 type: extension
 runtime: python3
 entry: plugin.py
@@ -34,7 +34,7 @@ ui_tab:
     page: costs
 ---
 
-# Claudexor Quotas (v0.13.2)
+# Claudexor Quotas (v0.14.0)
 
 The composer quota chip opens this widget. `GET chip` uses the same passive
 cached read as `quotas?reuse=1&chart=0`; it never requests provider refresh.
@@ -54,7 +54,8 @@ ok. Unavailable readings show a muted “—” with the reason; unknown is not 
 
 A projection of the host's own account surface, plus a small planner on top of
 it: how much measured quota is left per agent family and limit, when it is
-reported to reset, and what happens if the recent pace continues. Cached
+reported to reset, and what happens if the 48-hour typical pool pace continues
+(or with no new use). Cached
 projection reads remain read-only. The owner's explicit Refresh button invokes
 the host's dedicated foreground quota action; the skill reads no daemon token
 and owns no quota freshness, routing, retry, pacing, or vendor policy.
@@ -83,6 +84,81 @@ it (`api.get_state_dir()`):
 - `quota_collector.lock` — an empty lease file, never removed while the skill
   runs. Its OS lock serializes collector cycles across unload/reload; it holds
   no account or quota data. SQLite may also keep its standard WAL/SHM files.
+
+## What changed in 0.14.0
+
+- **48-hour pooled Typical forecast (default) and No new use only.** The
+  timeline's Future control offers exactly two choices: **Typical** (`typical`,
+  default) and **No new use** (`no_new_use`). Typical lives in its own module
+  (`quota_forecast.py`) and computes the selected limit pool's observed
+  48-hour burn rate: its comparable positive burn over the preceding 48 hours
+  divided by its valid hours (`valid_seconds`, `valid_hours`): comparable
+  watched time when the selected limit had reserve, a measured zero burn
+  included, where the current pool and the active historical cohort both meet
+  80% coverage (100% for 1–4 accounts, >=80% for 5+, no 5-account minimum).
+  At least 12 such hours are needed; fewer is no evidence of no use, and those
+  hours say nothing about other binding limits at the time.
+  Comparable transitions require the same account, source, plan and reset cycle
+  (tolerating reset jitter within `RESET_TOLERANCE_SEC` without counting real
+  resets, plan changes, ratio drops, corrections, gaps, failed sweeps, frozen
+  single-observation caches or source disagreements as burn or idle time, and
+  deduplicating multi-source accounts). One pooled simulation drives the chart
+  line, the pre-first-reset verdict, Details checkpoints, reset schedule and
+  depletion instants so demand continues across remaining accounts when one
+  hits zero while each account refills at most once at its next reported reset.
+  Both `24 h` and `7 days` spans read the full 48-hour history window so the
+  typical rate and verdict do not depend on the selected span.
+- **Pre-first-reset verdict strip and honest unsupported states.** Directly
+  above the chart, a compact verdict strip names the selected limit, units
+  (`win`), time, and reserve before the first reported reset (conditional
+  estimate, never a dispatch guarantee), and surfaces open binding-window
+  caveats with Details closed whenever another governing limit (such as a
+  5-hour window) can still stop accounts earlier. An account that cannot run
+  now (another spent limit, or its own known state: disabled, signed out,
+  cooling down, the selected model reported out; a state not read holds
+  nothing) keeps its share in the total but is neither drained nor counted as
+  usable until every known hold of the request has ended: the latest of them,
+  a cooldown or a model reported out included whose scope governs the request
+  where no window of that scope is read. An account another binding window of
+  which (or its scope) is not known now is of unknown availability: counted
+  apart (`unknown_accounts`), never as restricted, though a known cooldown,
+  spent binding window, or other hold on that account still applies until its
+  own end before the
+  unknown window takes over; a stop during which such an account may run (holding
+  reserve at its start, or refilling or coming off a known hold before the known
+  return) is a condition (`unknown_gap`, a warning; `unknown_at_empty` is only
+  what such accounts hold ready at its start, after that instant's refills), said
+  so also as an earlier stop and in Details without claiming reserve was held at
+  the start when it arrived later, and Typical is held only when no account is
+  known able to run (naming the separate counts when reasons differ, and using
+  "every" only for a homogeneous pool). The strip keeps the total before the
+  nearest reported reset (`first_reset_at`, `before_first_reset`), checks usable
+  reserve for `tight` (distinguishing usable left from total when non-runnable
+  share remains), and judges stops up to the first event at which a
+  reported reset brings usable reserve in (so an earlier reset on a disabled or
+  still-held account never hides a stop on runnable accounts): the stop still on
+  there, else the longest, from when to when (exact seconds and the line's start
+  kept via `_instant`),
+  an earlier stop in a few words (`earlier_empty_at`, `earlier_resumes_at`), and
+  its point marked on the drawn line. Details lists each future simulated stop
+  in the span once (a stop already active at `now` is shown in the verdict
+  strip); only one after an earlier stop (including an active stop at `now`) is
+  "again", and sub-0.01 positive values render as `<0.01`. Single-limit
+  applicability uses the
+  engine's scope rule even when `window_seconds` is absent, while Combined
+  requires comparable window lengths across governing limits. The selected
+  limit's No new use marks that limit's own resets only, and Combined names the
+  next known reset (by distinct accounts) even past a 24 h span. When
+  Typical is unknown (fewer than 12 valid hours, history unreadable or 48 h
+  history input capped/truncated, or held)
+  or when **Combined** (`joint`) is active, Typical draws **no** numeric future
+  line, checkpoints or schedule under Typical's name and explains why, while
+  **No new use** remains a working refill-only option. Combined preserves all
+  existing measured figures.
+- **Separation of surfaces.** The trailing-hour watched `recent_pace` in
+  `quota_summary`, `quota_context` snapshots, the collector, routing and the
+  Details panel remains untouched; legacy `scenarios.recent_pace` is kept in
+  the backend JSON for API compatibility.
 
 ## What changed in 0.13.2
 
@@ -1033,14 +1109,30 @@ fitted to the lines.
 - *the future* (`scenarios`) — of the accounts read now, the row's own
   figure (`current_windows`), restricted ones included (measured quota is not
   a dispatch verdict), drawn from now to the horizon:
-  - *no new use* (`no_new_use`, the default) — each account keeps its
-    current share and refills to one full window once, at its own next
-    reported reset;
-  - *recent pace* (`recent_pace`) — the accounts whose own pace qualified
-    continue their observed net change (staying at zero once they reach it),
-    refill once at their next reported reset and then continue it from full;
-    the other accounts are held as with no new use (`at_pace` of `accounts`,
-    `held`). A condition, not an estimate of use nobody observed.
+  - *typical* (`typical`, the default) — continues the selected limit pool's
+    48-hour observed pooled hourly burn rate (comparable positive burn over the
+    preceding 48 hours divided by the valid hours when the limit had reserve,
+    at least 12 of them, with 80% pool coverage — 100% for 1–4 accounts — using
+    only the common relevant interval `[now - 48h - 2 * SIGHTING_GAP_SEC, now]`
+    prioritized by `HistoryStore.read` Pass 1 so 24 h and 7 d agree identically
+    under row caps)
+    across the currently measured accounts so pooled demand shifts onto
+    remaining accounts when one hits zero, refilling each account once at its
+    next reported reset. When fewer than 12 valid hours exist, accounts sat at
+    their limit so their use could not be seen (`reason`:
+    `all_observed_at_limit`), history cannot be read or the 48-hour input hit
+    the read cap (`history_truncated`), or all accounts are held
+    (scope, another unknown/unreset limit, or their own restriction with no
+    reported end), Typical draws no numeric future line, checkpoints or
+    schedule and explains why (a measured zero with sufficient pool coverage
+    and non-exhausted capacity is distinct and drawn as 0.000 win/h). Combined
+    (`joint`) emits no `typical` scenario and draws no Typical line; switching
+    to *no new use* draws refills only;
+  - *no new use* (`no_new_use`) — each account keeps its current share and
+    refills to one full window once, at its own next reported reset;
+  - *recent pace* (`recent_pace`, kept in the chart payload for API
+    compatibility and no longer offered as a separate button) — the legacy
+    per-account trailing-hour scenario.
 
   An account with no reported reset is never refilled (`no_reset`), and **no
   additional unreported resets** are assumed: only each account's next
@@ -1058,12 +1150,19 @@ fitted to the lines.
   last of them (`total_after`) — `later` (the first reported reset past the
   span: when and for how many, never how much), `checkpoints` (the total an
   hour, 6 and 12 hours and a day ahead; a day, 3 days and a week on the
-  7-day span) and, at the recent pace, `runs_out` (when accounts reach zero
-  inside the span: before their reported reset, with none reported, or again
-  after their refill). Every one of them is read off the same functions the
-  line is drawn from; a reset exactly at the horizon is drawn with its
-  refill. The horizon is one instant: the whole second published as `end`
-  (now plus the span, rounded to the second). Which resets fall inside it,
+  7-day span) and, at a pace, `runs_out` (future moments strictly after `now`
+  inside the span when the reserve that can run reaches zero, Typical's pool or
+  each recent-pace account — an already-active stop at `now` is shown in the
+  verdict strip rather than `runs_out`:
+  before a reported reset, with none reported, or after a refill; Typical's
+  entries say what holds the rest, `blocked_only` or `unknown`, and `again`
+  only after an earlier stop, including one active at `now`). A selected limit's own future (the window view)
+  schedules that limit's resets only; another binding window's refill is no
+  reset of it.
+  Every one of them is read off the same functions the line is drawn from;
+  a reset exactly at the horizon is drawn with its refill. The horizon is one
+  instant: the whole second published as `end` (now plus the span, rounded to
+  the second). Which resets fall inside it,
   both lines and the older ones, `later`, `runs_out`, the checkpoints (each
   read off at the whole second it is published at) and the table's rows are
   all decided against that instant, never a fraction of a second either side
@@ -1095,17 +1194,25 @@ field, in `legacy_assumptions` and never shown.
 A cursor carries the numbers: a hairline, a dot on each line and one tooltip,
 driven by the pointer or by arrow keys on the focused plot, with a spoken
 read-out of the historical total and its membership at that moment, carried
-counts and age/source, plus the separate fresh-only scenario. Under the chart:
-one compact legend explains solid/dashed history and what the future assumes,
-including its current account count when no pace qualifies;
-then, at the recent pace, who runs out and when; the checkpoints; the first
-two reported resets with the rest on request, and "Details, notes and data" —
-the limit's details (scope, restrictions with the unrestricted windows, what
-is not counted, plans, shared sign-ins, resets, even use and recent pace), every
-caveat, the record and watch, the time zone, and a bounded table of the same
-display history with carried counts and provenance, followed by the scenarios
-at reported resets and checkpoints. The older strict-series table and paged
-single-sweep sightings remain only as a renderer fallback for answers without
+counts and age/source, plus the separate fresh-only scenario. Above the chart
+the verdict strip reads the chosen future up to the first reported reset: for
+*Typical* whether the pool lasts to it, what is left just before and after it,
+and from when to when no usable reserve is left: the stop still on at the
+reset, else the longest, an earlier one in short (a stop is said as one, never
+as "almost"; one that depends on accounts of unknown availability is a
+condition), or why no line is drawn; for *No new use* what is left before
+the reset if nothing more is used. It is not shown while the answer for a newly
+chosen model or request kind is read. Under the chart one compact legend
+explains solid/dashed history and the line drawn; "Details, notes and data"
+holds the full legend, future stops when the pool runs out at the typical pace
+(any stop already active at `now` stays in the verdict strip), the
+checkpoints, the first two reported resets with the rest on request, the
+limit's details (scope, restrictions with the unrestricted windows, what is
+not counted, plans, shared sign-ins, resets, even use and the trailing-hour
+recent pace), every caveat, the record and watch, the time zone, and a bounded
+table of the same display history with carried counts and provenance, followed
+by the scenarios at reported resets and checkpoints. The older strict-series
+table and paged single-sweep sightings remain only as a renderer fallback for answers without
 `chart.history`. The timeline, span, future, details, keyboard focus and cursor
 survive the automatic 30-second redraw.
 Refresh is disabled while a read is in the air, and a disabled button cannot
@@ -1308,10 +1415,11 @@ exhausted window is never reported as the default login's.
   cycles allow, and no timeline. It is a cycle's allowance, not a window, and
   never a statement that a request can run.
 - **The timeline** under the selected row: its span (24 h, 7 days) and
-  future (No new use, Recent pace) controls; the chart; then the legend
-  with each line's accounts and the future's assumptions, the checkpoints,
-  the first two reported resets (the rest on request), and "Details, notes
-  and data" folded. See "The timeline" above.
+  future (Typical, No new use) controls; the verdict strip; the chart (with
+  depletion marker when Typical empties inside the span); then the calm legend,
+  and "Details, notes and data" folded (full legend, checkpoints, reported
+  resets, limit details including trailing-hour watched pace, caveats and
+  table). See "The timeline" above.
 - **One selected account**: a bar, a step or a row of the account list selects
   it; its card (above) stands beside the bars. "Account details" unfolds its
   check, login kind and quota age, its verdict, a line per limit (share left,
