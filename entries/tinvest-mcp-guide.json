@@ -1,0 +1,19 @@
+{
+  "category": [
+    "business"
+  ],
+  "description": "Connect T-Bank's official T-Invest MCP server from Settings → Extensions → MCP servers. Read portfolio and market data or use a trading token to place and manage orders. Includes sandbox setup and the Russian Trusted Root CA prerequisite.",
+  "digest": "fc4f6669e13f88aa8f02cd75790d78bd88b15a6a57c59c81995095743d00ce8b",
+  "name": "tinvest-mcp-guide",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/tinvest-mcp-guide"
+  },
+  "title": "T-Invest MCP: portfolios, markets and orders",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "The user wants to connect T-Bank's T-Invest MCP server in Ouroboros, understand the bank's access-token options, or fix a certificate verification error when adding or testing the server. Covers the Extra certificate bundle setting for the Russian Trusted Root CA. Not for trading advice; the token is always the user's own, created in T-Bank.",
+  "withdrawn": null
+}
