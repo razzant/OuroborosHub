@@ -6,7 +6,7 @@
     "Email"
   ],
   "description": "Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.",
-  "digest": "23ee0c22ae983f0473be59ebb4b98c5e01facfad4efcf5e9ba1e92e1958eada5",
+  "digest": "a5fe04630a5eb9efd9b20a70349170751577004d0a9bfcdef808d87d3e095422",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -27,7 +27,7 @@
   },
   "title": "Email inbox",
   "type": "extension",
-  "version": "0.10.11",
+  "version": "0.11.0",
   "when_to_use": "User wants to read, compose, organize or configure mailboxes, or receive and reply to incoming mail through a Place.",
   "withdrawn": null
 }

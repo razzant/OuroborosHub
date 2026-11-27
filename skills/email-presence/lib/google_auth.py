@@ -11,7 +11,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 
-from .accounts import AccountError
+from .accounts import AccountError, bearer_mark
 
 MAIL_SCOPES = ("openid", "email", "https://www.googleapis.com/auth/gmail.modify")
 # Filters, forwarding and send-as management. Requested by default; an owner whose Workspace administrator approved
@@ -117,7 +117,12 @@ def _connect(store, pending, code, http):
     except AccountError:
         pass
     old_tokens = (previous or {}).get("tokens") or {}
-    same_client = (previous or {}).get("connected") and ((previous or {}).get("oauth") or {}).get("client_id") == pending["client_id"]
+    previous = previous or {}
+    host = store.sign_in
+    local = host is None or host.mode() == "legacy"
+    same_client = (local and previous.get("connected") and not previous.get("gmail_host")
+                   and not previous.get("gmail_transfer")
+                   and (previous.get("oauth") or {}).get("client_id") == pending["client_id"])
     refresh = str(tokens.get("refresh_token") or (old_tokens.get("refresh_token") if same_client else "") or "")
     if not refresh:
         raise AccountError("Google did not grant offline access; reconnect with consent to allow token refresh")
@@ -126,7 +131,9 @@ def _connect(store, pending, code, http):
               "label": (previous or {}).get("label") or address, "senders": [address], "sender": address, "config": {},
               "oauth": {"client_id": pending["client_id"], "client_secret": pending["client_secret"]},
               "tokens": {"access_token": access, "refresh_token": refresh,
-                         "expires_at": time.time() + int(tokens.get("expires_in") or 3600)},
+                         "expires_at": time.time() + int(tokens.get("expires_in") or 3600),
+                         # this bearer's own permissions, as Google named them (gmail_host.bearer_scopes)
+                         **({"scope": tokens["scope"], "scope_of": bearer_mark(access)} if isinstance(tokens.get("scope"), str) else {})},
               "scopes": scopes, "sending": (previous or {}).get("sending", "on"),
               "folder": (previous or {}).get("folder", "INBOX"), "words": (previous or {}).get("words", []),
               "poll_interval_sec": (previous or {}).get("poll_interval_sec", 30)}
@@ -143,6 +150,23 @@ def _connect(store, pending, code, http):
         record["senders_checked_at"] = (previous or {}).get("senders_checked_at")
     if (previous or {}).get("sender") in record["senders"]:
         record["sender"] = previous["sender"]
-    account = store.save(record)
+    redirect = urlsplit(pending["redirect_uri"])
+    try:
+        loopback = ipaddress.ip_address(redirect.hostname or "").is_loopback
+    except ValueError:
+        loopback = redirect.hostname == "localhost"
+    if redirect.scheme == "https" or (redirect.scheme == "http" and loopback):
+        # The exact return Google accepted for this client and consent: a host may register the client with it.
+        record["oauth"]["return_hint"] = "exact:" + pending["redirect_uri"]
+    from .gmail_host import local_withdrawals_seen  # gmail_host imports this module
+    reused = not tokens.get("refresh_token") and refresh == old_tokens.get("refresh_token")
+    if not reused:  # a borrowed token keeps the count saved with that token at the write
+        record["oauth"]["withdrawals_seen"] = local_withdrawals_seen(store)
+    # Every explicitly passed consent starts another local connection, also when Google kept the saved refresh token
+    # (`reused`): mail queued before it is never sent automatically. That token is borrowed as stored at the write.
+    account = store.save_gmail_consent(record, local=local, new_connection=True, borrowed=reused)
+    if not local:  # a host that manages sign-in keeps the active one on its card
+        return {"ok": False, "code": "consent_saved", "account_id": account_id,
+                "error": "This Google consent was saved. Check the email-presence card in Extensions › Skills for the active sign-in."}
     return {"ok": True, "account_id": account_id, "address": address, "account": store.public(account),
             "message": "Mailbox connected. Local disconnect preserves mail history; revoking Google project access can also disconnect Calendar."}

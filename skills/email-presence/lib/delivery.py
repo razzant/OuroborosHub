@@ -9,6 +9,11 @@ class DeliveryRejected(RuntimeError):
         super().__init__(str(cause))
 
 
+class FinalHold(str):
+    """The words of a hold nothing can lift on its own, for a mail whose access can never be confirmed. The outbox keeps
+    the mail, its words and its held receipt and leaves it out of its passes; the owner sends it again."""
+
+
 def tool_origin(ctx):
     origin = {"kind": "tool"}
     if getattr(ctx, "task_id", None):

@@ -13,6 +13,8 @@ let notice = '';
 let noticeError = false;
 let authLink = '';
 let googleSettingsChoice = true; // survives re-renders until the owner changes it
+let googleAuth = 'checking';
+const googleCard = 'Extensions › Skills › email-presence › Sign-ins';
 const unsubscribe = window.OuroborosWidget?.onTheme?.(theme => { document.documentElement.dataset.theme = theme; });
 window.__ouroWidgetOnDispose?.(() => { disposed = true; abort.abort(); unsubscribe?.(); });
 
@@ -43,6 +45,11 @@ async function request(path, body) {
 async function refresh() {
     const result = await request('accounts');
     accounts = result.accounts || [];
+    googleAuth = result.google_auth_mode || 'checking';
+    if (googleAuth !== 'legacy') {
+        if (selectedForm?.kind === 'google') selectedForm = null;
+        authLink = '';
+    }
     if (!disposed) render();
 }
 
@@ -99,7 +106,7 @@ function googleForm() {
     field(fields, 'origin', 'Ouroboros address for the return', originForReturn(), 'url');
     form.append(fields);
     const full = node('input', {type:'checkbox', name:'permanent_delete'});
-    form.append(node('label', {class:'check'}, [full, node('span', {text:'Also request permanent deletion that skips Trash. Ordinary reading, drafting, sending and organizing do not need this permission.'})]));
+    form.append(node('label', {class:'check'}, [full, node('span', {text:'Also request full Gmail access (https://mail.google.com/): permanent deletion that skips Trash, and Gmail settings even when the settings choice below is cleared. Ordinary reading, drafting, sending and organizing do not need it.'})]));
     const manage = node('input', {type:'checkbox', name:'manage_settings', checked:googleSettingsChoice,
                                    onchange:() => { googleSettingsChoice = manage.checked; }});
     form.append(node('label', {class:'check'}, [manage, node('span', {text:'Also allow managing Gmail settings: filters, forwarding, vacation replies and sender addresses. Clear this when Google refuses the sign-in with admin_policy_enforced because your Workspace administrator approved only mail access; reading, drafting, sending and organizing mail work without it.'})]));
@@ -199,7 +206,8 @@ function queueView(account) {
     const outgoing = {...(queue.outbox || {})};
     const held = queue.outbox_held || 0;
     if (held) {
-        outgoing.retry = Math.max(0, (outgoing.retry || 0) - held);
+        // `held` counts every held row: the ones still retrying (taken off retry) and the ones held for good (their own state).
+        outgoing.retry = Math.max(0, (outgoing.retry || 0) - (held - (outgoing.held || 0)));
         outgoing.held = held;
     }
     const counts = rows => Object.entries(rows || {}).filter(([, count]) => count > 0)
@@ -227,9 +235,10 @@ function queueView(account) {
 
 function card(account) {
     const card = node('section', {class:'account'});
+    const connectionState = account.connected ? 'Configured' : ({unavailable:'Sign-in not checked', needs_sign_in:'Check sign-in'}[account.gmail_auth_state] || 'Disconnected');
     card.append(node('div', {class:'address', text:account.label || account.address}),
                 node('div', {text:account.address}),
-                node('p', {class:'secondary', text:`${account.provider === 'gmail' ? 'Gmail API' : account.provider === 'ews' ? 'Exchange (EWS)' : 'IMAP / SMTP'} · ${account.connected ? 'Configured' : 'Disconnected'} · sends as ${account.sender || account.address}` }));
+                node('p', {class:'secondary', text:`${account.provider === 'gmail' ? 'Gmail API' : account.provider === 'ews' ? 'Exchange (EWS)' : 'IMAP / SMTP'} · ${connectionState} · sends as ${account.sender || account.address}` }));
     if (account.runtime_error) card.append(node('p', {class:'notice error', text:`Worker stopped: ${account.runtime_error}. Check the connection or update its configuration.`}));
     const controls = node('div', {class:'actions'});
     if (account.runtime_error && account.connected) controls.append(button('Retry worker', async () => {
@@ -243,22 +252,40 @@ function card(account) {
     }));
     if (!account.environment_config) controls.append(button('Preferences', async () => { selectedForm = {kind:'preferences', account}; }));
     if (['imap', 'ews'].includes(account.provider) && !account.environment_config) controls.append(button(account.connected ? 'Edit connection' : 'Reconnect', async () => { selectedForm = {kind:account.provider, account}; }));
-    if (account.provider === 'gmail') controls.append(button(account.connected ? 'Refresh sender addresses' : 'Reconnect Google', async () => {
+    const managed = account.provider === 'gmail' && (account.auth_owner === 'host' || googleAuth !== 'legacy');
+    if (managed) {
+        const state = {signed_in:'Google sign-in is managed on the skill card.',
+                       disconnected:'Google sign-in was disconnected; history is retained.',
+                       needs_sign_in:'Check this mailbox’s sign-in on the skill card.',
+                       unavailable:'Google sign-in could not be checked. Refresh to try again.'};
+        // Not moved yet: its earlier sign-in serves it until the owner signs in on the card or the host can take it.
+        const kept = account.auth_owner === 'legacy' && account.connected;
+        card.append(node('p', {class:'note', text:kept ? 'This mailbox still uses its earlier Google sign-in. To move it now, sign in on the skill card.'
+            : state[account.gmail_auth_state] || 'Use the skill card to manage this Google sign-in.'}));
+        if (account.oauth_client_label) card.append(node('p', {class:'secondary', text:`Google client: ${account.oauth_client_label}`}));
+    } else if (account.provider === 'gmail' && account.gmail_auth_state === 'needs_sign_in') {
+        card.append(node('p', {class:'note', text:'Its saved Google sign-in cannot be used on this Ouroboros version. Sign in again with Reconnect Google.'}));
+    }
+    if (account.provider === 'gmail' && (account.connected || !managed)) controls.append(button(account.connected ? 'Refresh sender addresses' : 'Reconnect Google', async () => {
         if (!account.connected) { selectedForm = {kind:'google'}; return; }
         await request('accounts/refresh-senders', {account_id:account.id}); notice = 'Sender addresses refreshed.'; noticeError = false; await refresh();
     }));
     if (account.environment_config && !account.connected) controls.append(button('Reconnect using Settings', async () => {
         await request('accounts/resume-legacy', {account_id:account.id}); notice = 'Legacy mailbox enabled again.'; noticeError = false; await refresh();
     }));
-    if (account.connected) controls.append(button('Disconnect locally', async () => {
-        await request('accounts/disconnect', {account_id:account.id}); notice = 'Disconnected locally. Mail history and receipts were retained; Google project grants were not revoked.'; noticeError = false; await refresh();
+    // A mailbox its earlier Google sign-in still serves is not on the card: it is disconnected here.
+    if (account.connected && (!managed || account.auth_owner === 'legacy')) controls.append(button('Disconnect locally', async () => {
+        await request('accounts/disconnect', {account_id:account.id});
+        notice = 'Disconnected locally. Mail history and receipts were retained; Google project grants were not revoked.'
+            + (account.provider === 'gmail' ? ' Mail queued before stays unsent after a new sign-in.' : '');
+        noticeError = false; await refresh();
     }, 'danger'));
     card.append(controls, queueView(account));
     const details = node('details', {}, [node('summary', {text:`${account.senders.length} sender address${account.senders.length === 1 ? '' : 'es'} · account details`})]);
     details.append(node('p', {class:'secondary', text:`Account id: ${account.id}`}),
                    node('pre', {text:account.senders.join('\n')}));
     if (account.provider === 'gmail' && account.senders_status !== 'verified') details.append(node('p', {class:'note', text:'The complete sender list was not verified on this connection. Previously known addresses remain visible; Refresh sender addresses checks Google again.'}));
-    if (account.provider === 'gmail') details.append(node('p', {class:'secondary', text:account.scope_status === 'known' ? 'Granted Google scopes:' : 'Google did not report its scope list; operations report actual provider permission failures.'}),
+    if (account.provider === 'gmail') details.append(node('p', {class:'secondary', text:account.scope_status === 'known' ? 'Granted Google scopes:' : 'Current Google scopes are not confirmed.'}),
                                                         node('pre', {text:account.scopes.join('\n')}));
     if (account.environment_config) details.append(node('p', {class:'note', text:'This mailbox uses EMAIL_* settings. Use the connector settings for its preferences; disconnect here disables local use but does not erase granted installation settings.'}));
     card.append(details);
@@ -270,14 +297,16 @@ function render() {
     root.append(node('div', {class:'toolbar'}, [node('h2', {text:'Email accounts'}), button('Refresh', refresh)]));
     root.append(node('p', {class:'note', text:'Accounts are ordinary tools. Connect a Place separately for incoming mail and presence; an account without a Place is still usable by tasks and permitted autonomous work.'}));
     if (notice) root.append(node('div', {class:`notice${noticeError ? ' error' : ''}`, role:'status', text:notice}));
-    if (authLink) root.append(button('Continue in Google', async () => { await window.OuroborosWidget.openExternal(authLink); }, 'primary'));
-    root.append(node('div', {class:'actions'}, [button('Add Google mail', async () => { selectedForm = {kind:'google'}; authLink = ''; }),
+    if (googleAuth === 'host') root.append(node('p', {class:'note', text:`Add, reconnect or disconnect Google mail on ${googleCard}.`}));
+    if (googleAuth === 'unavailable') root.append(node('p', {class:'note', text:'Google sign-in could not be checked. Refresh when Ouroboros is available.'}));
+    if (authLink && googleAuth === 'legacy') root.append(button('Continue in Google', async () => { await window.OuroborosWidget.openExternal(authLink); }, 'primary'));
+    root.append(node('div', {class:'actions'}, [googleAuth === 'legacy' ? button('Add Google mail', async () => { selectedForm = {kind:'google'}; authLink = ''; }) : null,
                                               button('Add IMAP / Proton Bridge', async () => { selectedForm = {kind:'imap'}; }),
                                               button('Add Exchange', async () => { selectedForm = {kind:'ews'}; })]));
     if (selectedForm) root.append(selectedForm.kind === 'google' ? googleForm() : selectedForm.kind === 'preferences' ? preferences(selectedForm.account) : connectionForm(selectedForm.kind, selectedForm.account));
     if (!accounts.length) root.append(node('p', {class:'note', text:'No mail accounts configured yet.'}));
     for (const account of accounts) root.append(card(account));
-    root.append(node('p', {class:'note', text:'Credentials stay in this skill’s private local state. Disconnect preserves captured mail and delivery receipts. Removing the skill or explicitly deleting its local data is different.'}));
+    root.append(node('p', {class:'note', text:'Disconnect preserves captured mail and delivery receipts. Removing the skill or explicitly deleting its local data is different.'}));
 }
 
 render();

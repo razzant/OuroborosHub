@@ -1,8 +1,10 @@
 import asyncio
 import importlib.util
 import json
+import sqlite3
 from pathlib import Path
 
+import pytest
 from starlette.testclient import TestClient
 
 from lib.accounts import AccountStore
@@ -100,6 +102,32 @@ def test_one_worker_failure_does_not_stop_other_accounts_or_spin_restarts(tmp_pa
     assert not running and len(closed) == 2
 
 
+@pytest.mark.parametrize('defect', [KeyError('fixture defect'), sqlite3.OperationalError('no such table: fixture')])
+def test_following_the_host_retries_a_busy_registry_and_ends_the_companion_on_any_other_failure(tmp_path, monkeypatch, defect):
+    path = Path(__file__).resolve().parents[1] / "scripts/email_daemon.py"
+    spec = importlib.util.spec_from_file_location("mail_manager_follow_fixture", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    snapshot = sqlite3.OperationalError("fixture busy snapshot")
+    snapshot.sqlite_errorcode = 517  # SQLITE_BUSY_SNAPSHOT, an extended code as Python 3.11 reports it
+    failures = [sqlite3.OperationalError("database is locked"), snapshot, defect]
+
+    def sync(_accounts):
+        raise failures.pop(0)
+
+    monkeypatch.setattr(module, "sync_gmail", sync)
+    monkeypatch.setattr(module, "_SYNC_SECONDS", .005)
+
+    async def exercise():
+        stop = asyncio.Event()
+        with pytest.raises(type(defect)) as ended:
+            await asyncio.wait_for(module.manage_accounts(tmp_path, stop, refresh_seconds=.005), 10)
+        assert ended.value is defect and stop.is_set()  # broken SQL ends it like any other defect
+
+    asyncio.run(exercise())
+    assert failures == []  # the busy registry was retried; the unknown failure was not swallowed
+
+
 def test_account_discovery_retains_counts_and_addressable_receipts_after_disconnect(tmp_path):
     from types import SimpleNamespace
     from lib.service import MailService
@@ -167,3 +195,47 @@ def test_google_sign_in_route_keeps_the_settings_permission_unless_the_owner_cle
         assert http.post("/oauth/begin", json={"origin": "http://127.0.0.1:8765", "manage_settings": False}).status_code == 200
     # An older widget that never sends the choice keeps the permission; only an explicit false leaves it out.
     assert seen == [True, False]
+
+
+def test_google_connection_uses_the_card_only_when_the_host_advertises_it(tmp_path, monkeypatch):
+    import sys
+
+    import httpx
+
+    app = _settings_app(tmp_path)
+    module = sys.modules['email_settings_fixture.lib.gmail_host']
+    available = True
+
+    def identity(request):
+        assert request.url.path == '/identity'
+        if available:
+            return httpx.Response(200, json={'ok': True, 'sign_in_version': 1})
+        return httpx.Response(503, json={'ok': False})
+
+    with httpx.Client(transport=httpx.MockTransport(identity)) as transport, TestClient(app) as client:
+        monkeypatch.setattr(module.GmailSignIn, 'environment', classmethod(
+            lambda cls: cls('http://127.0.0.1:1', 'fixture-mail-host', http=transport)))
+        response = client.post('/oauth/begin', json={})
+        assert response.status_code == 409 and response.json()['code'] == 'use_sign_in_card'
+        assert 'Extensions › Skills' in response.json()['error']
+        available = False
+        response = client.post('/oauth/begin', json={})
+        assert response.status_code == 503 and response.json()['code'] == 'sign_in_unavailable'
+    assert not (tmp_path / 'accounts.sqlite3').exists()
+
+
+def test_the_status_line_names_an_intake_failure_beside_held_mail(tmp_path):
+    from lib.store import EmailStore
+
+    accounts = AccountStore(tmp_path)
+    account = accounts.save_imap(imap_values())
+    store = EmailStore(accounts.mail_dir(account))
+    store.enqueue_outbox(request_id='owed', to=['reader@example.invalid'], body='owed',
+                         hold_reason=place_refusal_hold({'state': 'disconnected', 'code': 'place_disconnected'}))
+    store.put('poll_health', {'ok': False, 'checked_at': 1.0, 'error': 'Exchange: TlsFailure'})
+    with TestClient(_settings_app(tmp_path)) as http:
+        status = http.get('/status', params={'account_id': account['id']}).json()
+    assert status['text'] == 'Mail intake failed: Exchange: TlsFailure; 1 held' and status['tone'] == 'warn'
+    store.put('poll_health', {'ok': True, 'checked_at': 2.0, 'new_messages': 0})
+    with TestClient(_settings_app(tmp_path)) as http:
+        assert http.get('/status', params={'account_id': account['id']}).json()['text'] == '1 held'

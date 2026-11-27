@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from lib.accounts import AccountError
+from lib.accounts import AccountError, bearer_mark
 from lib.gmail import GmailClient, GmailError
 from lib.service import MailService, register_tools
 from test_accounts import gmail_account
@@ -19,6 +19,8 @@ def mailbox(tmp_path, monkeypatch):
     accounts = svc.accounts
     account = gmail_account(accounts)
     account["scopes"].append("https://mail.google.com/")
+    account["tokens"]["scope"] = " ".join(account["scopes"])  # the permissions Google named for this bearer
+    account["tokens"]["scope_of"] = bearer_mark(account["tokens"]["access_token"])
     accounts.save(account)
     data = SimpleNamespace(message={"id": "7b", "labelIds": ["DRAFT"], "payload": {"headers": [
                                {"name": "Message-ID", "value": "<delete-fixture@example.invalid>"}]}}, label_name="Receipts",

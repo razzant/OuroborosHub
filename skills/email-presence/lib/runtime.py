@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from .delivery import DeliveryRejected, email_report
+from .delivery import DeliveryRejected, FinalHold, email_report
 from .accounts import AccountError
 from .host_adapter import (_BINDINGS_CORRUPT, _TARGETS_DIFFER, LEGACY_REPLY_HELD, MATCH_SCOPE, PLACE_MATCH,
                            RECIPIENT_PLACES, HostBindingTerminalError, HostRetryError, HostTurnStatus,
@@ -181,8 +181,26 @@ class EmailRuntime:
         return target
 
     def remember_reply_targets(self, item):
-        """Record the ``reply_targets`` this transport's event for ``item`` carries, before it is submitted."""
-        self.store.put(_submitted_targets_key(item), {"reply_targets": automatic_reply_targets(item)})
+        """Record, before the event is submitted, the ``reply_targets`` this transport's event for ``item`` carries and, for
+        Gmail, in the same write, the access the mailbox has as the event begins: an automatic reply to it is queued under
+        that access only (_reply), whenever its words are ready.
+
+        A record already kept for the event stays as it is and is never added to: a turn may have begun under it, and an
+        event of an earlier version has no access recorded, so its reply is queued without one and held with its content.
+        What is not confirmed is not guessed (GmailClient.intake_link): a host that cannot be read for now raises here, the
+        event has not begun, and its claim is retried before anything is submitted. A mailbox that can be read but has no
+        confirmed outgoing access is recorded without one: its mail goes on, and only the sending of its reply lacks the
+        basis."""
+        key = _submitted_targets_key(item)
+        record = {"reply_targets": automatic_reply_targets(item)}
+        if getattr(self.client, "transport", None) != "gmail_api":
+            self.store.put(key, record)
+            return
+        if self.store.get(key) is not None:
+            return  # no need to ask the host again
+        link = self.client.intake_link()
+        # The first record stays, whichever process writes next. The host is not asked inside this write.
+        self.store.put_first(key, {**record, **({"gmail_connection": link} if link else {})})
 
     def _seen_targets(self, item, anchor):
         """The ``reply_targets`` the Host read before Safety for this output: from the selected anchor's message,
@@ -215,6 +233,11 @@ class EmailRuntime:
                          "origin": {"kind": "automatic", "task_id": turn_ref, "source_event_id": item.provider_event_key}}
             if getattr(self.client, "transport", None) == "gmail_api" and target.context.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = target.context["provider_thread_id"]
+            if getattr(self.client, "transport", None) == "gmail_api":
+                kept = self.store.get(_submitted_targets_key(target))
+                if isinstance(kept, Mapping) and isinstance(kept.get("gmail_connection"), Mapping):
+                    # The access its mail began under, never today's: only it delivers this reply. Without one it is held.
+                    reporting["gmail_connection"] = dict(kept["gmail_connection"])
             # The recipients whose Places the Host read before Safety must be exactly this reply's envelope. Absent
             # (prepared before they were checked), malformed or different targets keep the words held, never sent.
             seen = self._seen_targets(item, anchor)
@@ -306,7 +329,7 @@ class EmailRuntime:
             if not item.host_reference:
                 # The event carries these reply_targets (email_presence_event); remembered so an output without an
                 # anchor (the wake event) is compared with what the Host actually read.
-                self.remember_reply_targets(item)
+                await asyncio.to_thread(self.remember_reply_targets, item)  # for Gmail it also names the access the event begins under
             ref = item.host_reference or await self.host.submit(item)
             observe = True
             if not item.host_reference:
@@ -374,6 +397,8 @@ class EmailRuntime:
             release(reference, self.store.active_host_references())
 
     def _delivery_hold(self, item):
+        if getattr(self.client, "transport", None) == "gmail_api" and (reason := self.client.connection_hold(item)):
+            return reason  # queued under an earlier connection of this mailbox: a Disconnect came between
         try:
             modes = binding_modes(item.reporting)
         except ValueError:
@@ -445,13 +470,19 @@ class EmailRuntime:
             return False
         sending = False
         try:
+            # No access on record in the row itself: it can never go, whatever Sending says, so it is not asked about every
+            # 5 seconds behind a Sending-off hold (read from the row alone: no network, no setting, no account).
+            unrecorded = getattr(self.client, "unrecorded_hold", None)
+            if unrecorded is not None and (reason := unrecorded(item)):
+                self.store.hold_outbox(item, reason, final=True)
+                return True
             # A disconnected account raises AccountError, held below; Sending off holds the same item.
             if self._sending_off():
                 self.store.hold_outbox(item, SENDING_OFF_HOLD)
                 return True
             reason = self._delivery_hold(item)
             if reason:
-                self.store.hold_outbox(item, reason)
+                self.store.hold_outbox(item, reason, final=isinstance(reason, FinalHold))
                 return True
             message = self.client.message(item)
             reporting = dict(item.reporting)
@@ -468,7 +499,9 @@ class EmailRuntime:
                                  "cc": str(message["Cc"] or "")}
             self.store.set_reporting(item, reporting)
             item = replace(item, reporting=reporting)
-            delivery = getattr(self.client, "delivery", None) or self.client.smtp
+            gmail = getattr(self.client, "transport", None) == "gmail_api"
+            delivery = ((lambda: self.client.delivery(item)) if gmail
+                        else getattr(self.client, "delivery", None) or self.client.smtp)
             with delivery() as smtp:
                 # The account and Place policy may have changed while the provider connection opened. Nothing
                 # was submitted yet, so a hold here is certain and the same item stays queued for release.
@@ -477,7 +510,7 @@ class EmailRuntime:
                     return True
                 reason = self._delivery_hold(item)
                 if reason:
-                    self.store.hold_outbox(item, reason)
+                    self.store.hold_outbox(item, reason, final=isinstance(reason, FinalHold))
                     return True
                 if not self.store.mark_sending(item):
                     return True

@@ -16,6 +16,7 @@ from .accounts import AccountError, AccountStore, SETTING_KEYS, public_message_r
 from .client import MailClient
 from .delivery import tool_origin
 from .gmail import GmailClient
+from .gmail_host import GmailSignIn, read_view
 from .host_adapter import (MATCH_SCOPE, PLACE_MATCH, RECIPIENT_PLACES, LoopbackPresenceHostAdapter, capture_recipients,
                            place_refusal_hold)
 from .mime import (AmbiguousReplySource, _message_ids, canonical_message_id, checked_display_names, conversation_root, display_names_of, emitted_conversation,
@@ -112,7 +113,7 @@ class MailService:
 
     @property
     def accounts(self):
-        return AccountStore(self.state, self.api.get_settings(SETTING_KEYS))
+        return AccountStore(self.state, self.api.get_settings(SETTING_KEYS), sign_in=GmailSignIn.environment())
 
     @contextmanager
     def target(self, account_id=""):
@@ -197,8 +198,13 @@ class MailService:
         return {**store.status(), "poll_health": store.get("poll_health")}
 
     def list_accounts(self):
-        return {"accounts": [{**AccountStore.public(row), "queue": self.queue_status(row)} for row in self.accounts.list()],
-                "setup": "Open the Email accounts widget to connect Google, Exchange (EWS), IMAP or Proton Bridge. A Place is optional for ordinary tools."}
+        mode, rows = read_view(self.accounts)
+        setup = "Use Email accounts for Exchange (EWS), IMAP, or Proton Bridge. A Place is optional for ordinary tools."
+        gmail = {"legacy": "Google mail is also added in Email accounts.",
+                 "host": "For Google mail, use the email-presence card in Extensions › Skills.",
+                 "unavailable": "Google sign-in could not be checked; retry when the host is available."}
+        return {"accounts": [{**AccountStore.public(row), "queue": self.queue_status(row)} for row in rows],
+                "setup": setup + " " + gmail[mode], "google_auth_mode": mode}
 
     def search(self, *, account_id="", folder=None, criteria=None, query="", limit=50, page_token=""):
         with self.target(account_id) as (account, _store, client):
@@ -454,6 +460,10 @@ class MailService:
             recipients, visible_cc, visible_bcc = addresses(to), addresses(cc), addresses(bcc)
             rid = str(request_id or uuid.uuid4().hex)
             queued = store.queued_message(rid)
+            # A new mail is queued under the access it began with: named here, before its source is read, and kept as it is.
+            # A request_id already queued replays its accepted row and names none.
+            begin = getattr(client, "change_link", None) if queued is None and account["provider"] == "gmail" else None
+            link = begin() if begin else None
             if queued is not None and references is None:
                 references = list(queued.references)
             original, references, thread, repair = self._reply_context(
@@ -530,6 +540,8 @@ class MailService:
                 reporting["reply_all_fingerprint"] = reply_all_fingerprint
             if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = original["provider_thread_id"]
+            if link:
+                reporting["gmail_connection"] = link  # the access this mail began under; only it delivers it
             hold, modes = "", {}
             if binding.get("supported"):
                 # Each new binding keeps the mode it was bound with; delivery checks it with the same mode.
@@ -574,6 +586,11 @@ class MailService:
     def draft(self, *, account_id="", sender="", reply_all=False, reply_folder="", conversation_id="", thread_id="", folder_names=None,
               display_names=None, draft_conversation_id="", emitted_conversation_id="", **kwargs):
         with self.target(account_id) as (account, store, client):
+            kwargs.pop("link", None)  # the access a change began under comes from the mailbox's client, never from the caller
+            # A change is made under the access it began with: named here, before the reply source, the draft or its labels
+            # are read to prepare it, and presented again when the draft is saved (GmailClient.change_link).
+            begin = getattr(client, "change_link", None) if account["provider"] == "gmail" else None
+            link = begin() if begin else None
             chosen_sender = self._sender(account, sender)
             original, references, thread, repair = self._reply_context(
                 account, store, client, kwargs.get('reply_to_message_id'), kwargs.get('references'), reply_all, reply_folder)
@@ -656,7 +673,7 @@ class MailService:
             kwargs.update(to=(to[0] if to else "") if isinstance(prepared["to"], str) else to, cc=cc, bcc=bcc)
             if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 kwargs["thread_id"] = original["provider_thread_id"]
-            result = save(**kwargs)
+            result = save(**kwargs, **({"link": link} if link else {}))
             return self._account_result(account, {**result, "sender": chosen_sender})
 
     def receipt(self, request_id, *, account_id=""):

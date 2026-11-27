@@ -294,6 +294,13 @@ class EmailStore:
         with self._connect() as db:
             self._put(db, key, value)
 
+    def put_first(self, key, value):
+        """Keep ``value`` under ``key`` unless a record is already kept there, in one statement: the first record stays,
+        whichever process writes next. True when this call kept it."""
+        with self._connect() as db:
+            return db.execute("INSERT INTO runtime_state VALUES(?,?,?) ON CONFLICT(key) DO NOTHING",
+                              (key, json.dumps(value), time.time())).rowcount == 1
+
     def _stage_files(self, attachments, *, bucket, identity, enforce_limits=True):
         """Copy attachment bytes into immutable skill-owned files.
 
@@ -688,11 +695,15 @@ class EmailStore:
     def retry_outbox(self, row_id, token, error, delay=5):
         self._update("outbox", row_id, token, "retry", error, delay)
 
-    def hold_outbox(self, item, reason):
+    def hold_outbox(self, item, reason, *, final=False):
+        """Hold a leased mail unsent. It is asked about again in 5 seconds, or, when nothing can lift the hold (`final`),
+        it takes the state `held`, which no pass claims: the receipt, the list and the counter still show it as held, with
+        its words and content, and only a new send moves on."""
+        state, due = ("held", 0) if final else ("retry", time.time() + 5)
         with self._connect() as db:
-            db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,"
+            db.execute("UPDATE outbox SET state=?,last_error=?,lease_token='',lease_until=0,"
                        "available_at=?,updated_at=?,attempts=MAX(0,attempts-1) WHERE id=? AND lease_token=?",
-                       (reason, time.time() + 5, time.time(), item.row_id, item.lease_token))
+                       (state, str(reason), due, time.time(), item.row_id, item.lease_token))
 
     def uncertain_outbox(self, row_id, token, error, *, reports=()):
         self._update("outbox", row_id, token, "uncertain", error, reports=reports)
@@ -843,7 +854,7 @@ class EmailStore:
             counts["receipts"] = [{**dict(r), "state": _delivery_state(r["state"], r["last_error"])} for r in db.execute(
                 "SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
             counts["delivery_reports_pending"] = db.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0]
-            counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='retry' AND last_error LIKE 'Held:%'").fetchone()[0]
+            counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='held' OR (state='retry' AND last_error LIKE 'Held:%')").fetchone()[0]
             # Retained events still observing their original attempt or child (counted in their inbox state too).
             counts["inbox_retained"] = db.execute("SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state NOT IN ('completed','failed')").fetchone()[0]
             counts["delivery_support"] = self._get(db, "delivery_support")

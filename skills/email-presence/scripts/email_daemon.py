@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(SKILL_ROOT) not in sys.path:
 
 from lib.client import MailClient
 from lib.accounts import AccountError, AccountStore, SETTING_KEYS
+from lib.gmail_host import GmailSignIn, sync_gmail
 from lib.service import account_client
 from lib.host_adapter import create_host_adapter
 from lib.runtime import EmailRuntime
@@ -26,6 +28,21 @@ def signature(account):
     return json.dumps({key: value for key, value in account.items() if key not in {"runtime_error", "_persisted"}}, sort_keys=True)
 
 
+_SYNC_SECONDS = 15  # between passes that follow the host's Google sign-ins
+_BUSY_CODES = (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED: an extended code keeps its primary code in the low byte
+
+
+def _registry_busy(exc):
+    """Another connection holding the registry: the one SQLite failure a later pass may wait out. Python 3.11 names the
+    code, an extended variant included; without it only SQLite's own words for those two codes count, never a broken
+    statement or a damaged store."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in _BUSY_CODES
+    words = str(exc)
+    return words == "database is locked" or words.startswith(("database table is locked", "database schema is locked"))
+
+
 async def manage_accounts(state, stop, *, refresh_seconds=1):
     """One companion supervises independent mailbox workers; settings reload in place.
 
@@ -35,6 +52,22 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
     """
     instances, failed = {}, {}
     legacy = {key: os.environ[key] for key in SETTING_KEYS if key in os.environ}
+    google = GmailSignIn.environment()
+
+    async def follow_google():
+        while not stop.is_set():
+            try:
+                await asyncio.to_thread(sync_gmail, AccountStore(state, legacy, sign_in=google))
+            except (OSError, ValueError, sqlite3.OperationalError) as exc:
+                if isinstance(exc, sqlite3.OperationalError) and not _registry_busy(exc):
+                    raise  # broken SQL or a damaged store ends the companion like any other defect (google_job.result())
+                # The host or a state file unreadable, or the registry busy: the next pass reads everything again.
+                logging.getLogger("email_presence").warning("Google sign-in state could not be reconciled (%s)",
+                                                            type(exc).__name__)
+            try:
+                await asyncio.wait_for(stop.wait(), _SYNC_SECONDS)
+            except asyncio.TimeoutError:
+                pass
 
     async def worker(accounts, account, own_stop):
         client = host = store = None
@@ -64,9 +97,14 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
                         # After its loops and their threads ended: the mailbox's one connection.
                         store.close()
 
+    google_job = asyncio.create_task(follow_google())
     try:
         while not stop.is_set():
-            accounts = AccountStore(state, legacy)
+            if google_job.done():
+                # Any other failure ends the companion with its traceback: the host records the exit and restarts it
+                # (restart_policy on_failure), so following the host never stops unseen while mailboxes run on.
+                google_job.result()
+            accounts = AccountStore(state, legacy, sign_in=google)
             desired = {row["id"]: row for row in accounts.list() if row["connected"]}
             for account_id, entry in list(instances.items()):
                 if entry["task"].done():
@@ -100,7 +138,8 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
     finally:
         for entry in instances.values():
             entry["stop"].set()
-        await asyncio.gather(*(entry["task"] for entry in instances.values()), return_exceptions=True)
+        stop.set()
+        await asyncio.gather(google_job, *(entry["task"] for entry in instances.values()), return_exceptions=True)
 
 
 async def run():

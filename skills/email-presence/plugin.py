@@ -15,6 +15,7 @@ from .lib.accounts import AccountError, SETTING_KEYS
 from .lib.client import MailClient
 from .lib.facts import mailbox_identity
 from .lib import google_auth
+from .lib.gmail_host import CARD, read_view, serves_locally
 from .lib.host_adapter import HostContractError, normalize_binding_id
 from .lib.service import MailService, json_tool, register_tools
 
@@ -40,28 +41,39 @@ def register(api):
                        runtime_error=account.get("runtime_error", ""))
         sending = account.get("sending", "on")
         held = payload.get("outbox_held", 0)
+        auth_state = account.get("gmail_auth_state")
+        if auth_state:
+            payload["gmail_auth_state"] = auth_state
+        not_ready = ("Sign in to Google again in Email accounts"  # an older Ouroboros has no sign-in card
+                     if auth_state == "needs_sign_in" and account.get("auth_owner") == "legacy" else
+                     {"unavailable": "Google sign-in could not be checked",
+                      "needs_sign_in": "Check Google sign-in on the skill card"}.get(auth_state, "Disconnected; history retained"))
         payload["readiness"] = {
             "sending": sending, "connected": account["connected"],
-            "text": "Disconnected; history retained" if not account["connected"] else
-                    SENDING_OFF if sending == "off" else "Sending on",
+            "text": not_ready if not account["connected"] else SENDING_OFF if sending == "off" else "Sending on",
         }
         payload["identity"] = mailbox_identity(account["address"], senders=account["senders"],
                                                 sender=account.get("sender") or account["address"])
-        text = "Disconnected" if not account["connected"] else (
+        failure = ("Mail intake failed: " + str(health.get("error") or "test the connection")
+                   if health and health.get("ok") is False else "")
+        text = not_ready if not account["connected"] else (
             "Worker stopped: " + account["runtime_error"] if account.get("runtime_error") else
-            f"{held} held" if held else "Mail intake failed: " + str(health.get("error") or "test the connection")
-            if health and health.get("ok") is False else "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
-            else "Authenticated intake" if (health or {}).get("ok") else "Configured; test connection")
+            "; ".join(filter(None, (failure, f"{held} held" if held else ""))) or (
+                "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
+                else "Authenticated intake" if (health or {}).get("ok") else "Configured; test connection"))
         payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") or (health or {}).get("ok") is False else "ok" if (health or {}).get("ok") else "muted",
                        title="Email transport")
         return payload
 
     async def status(request=None):
         def build():
-            records = service.accounts.list()
+            _, records = read_view(service.accounts, status_only=True)
             selected = str(request.query_params.get("account_id") or "") if request is not None else ""
             if selected:
-                payload = account_status(service.accounts.get(selected))
+                record = next((row for row in records if row["id"] == selected), None)
+                if record is None:
+                    raise AccountError("Unknown account_id; choose an exact id from email_accounts")
+                payload = account_status(record)
             elif len(records) == 1:
                 payload = account_status(records[0])
             else:
@@ -81,7 +93,9 @@ def register(api):
             result = service.list_accounts()
             settings = api.get_settings(SETTING_KEYS)
             result["google_client_configured"] = bool(settings.get("GOOGLE_OAUTH_CLIENT_ID") or settings.get("EMAIL_OAUTH_CLIENT_ID"))
-            result["credential_storage"] = "Credentials are stored in this skill's private local state (file mode 0600). Disconnect keeps mail history."
+            result["credential_storage"] = ("The host keeps managed Gmail credentials. Other connections use the skill's private local state. Disconnect keeps mail history."
+                                            if result["google_auth_mode"] != "legacy" else
+                                            "Legacy connections use this skill's private local state. Disconnect keeps mail history.")
             return result
         return JSONResponse(await asyncio.to_thread(build))
 
@@ -104,6 +118,13 @@ def register(api):
                 if action == "preferences":
                     return accounts.public(accounts.update_preferences(account_id, body))
                 if action == "disconnect":
+                    account = accounts.get(account_id)
+                    moved = bool(account.get("gmail_host") or account.get("gmail_transfer"))
+                    # Mail disconnects a Google mailbox itself on a host shown to be older (it has no sign-in card) and
+                    # while its own saved sign-in serves it (serves_locally); the card manages every other one.
+                    if (account["provider"] == "gmail" and accounts.sign_in.mode(require_identity=moved) != "legacy"
+                            and not serves_locally(accounts, account)):
+                        raise AccountError(f"Manage this Google sign-in on {CARD}; history stays in Email accounts.")
                     return accounts.public(accounts.disconnect(account_id))
                 if action == "test":
                     return service.test_connection(account_id=account_id)
@@ -142,11 +163,18 @@ def register(api):
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("Expected a JSON object")
+            accounts = service.accounts
+            mode = await asyncio.to_thread(accounts.sign_in.mode)
+            if mode == "host":
+                return JSONResponse({"ok": False, "code": "use_sign_in_card", "error": f"Add Google mail on {CARD}."}, status_code=409)
+            if mode != "legacy":
+                return JSONResponse({"ok": False, "code": "sign_in_unavailable",
+                                     "error": "The host's Google sign-in is unavailable. Try again when Ouroboros is available."}, status_code=503)
             origin = str(body.get("origin") or "").rstrip("/")
             if not origin:
                 info = api.get_runtime_info()
                 origin = f"http://127.0.0.1:{int(info['server_port'])}"
-            result = await asyncio.to_thread(google_auth.begin, service.accounts, api.get_settings(SETTING_KEYS),
+            result = await asyncio.to_thread(google_auth.begin, accounts, api.get_settings(SETTING_KEYS),
                                             origin=origin, login_hint=str(body.get("login_hint") or ""),
                                             permanent_delete=body.get("permanent_delete") is True,
                                             manage_settings=body.get("manage_settings") is not False)
@@ -217,7 +245,7 @@ def register(api):
         "kind": "module", "entry": "ui/accounts.js", "entry_type": "module",
         "assets": ["ui/accounts.css"], "appearance": "host", "start": "auto", "height": 620})
     api.register_settings_section("email_presence", title="Email accounts", schema={"components": [
-        {"type": "markdown", "text": "Use the Email accounts widget to add Google, IMAP, Proton Bridge or Exchange accounts and choose sender addresses. Google needs your installation's granted GOOGLE_OAUTH_CLIENT_ID (and CLIENT_SECRET when required). These fields below keep the original EMAIL_* mailbox configuration."},
+        {"type": "markdown", "text": "Use the Email accounts widget to manage mailboxes and choose sender addresses. If Ouroboros manages Google sign-in, add Gmail on the email-presence card in Extensions › Skills. These settings keep the original EMAIL_* mailbox configuration."},
         {"type": "form", "route": "settings/save", "method": "POST", "submit_label": "Save legacy mailbox settings", "fields": [
             {"name": "folder", "label": "Intake folder", "type": "text", "placeholder": "INBOX"},
             {"name": "sending", "label": "Sending", "type": "select", "default": "on",

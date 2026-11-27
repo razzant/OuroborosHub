@@ -36,7 +36,7 @@ def install(plugin, api, payload):
             box.uid = command
             client = MailClient({}); client.imap = box.open
         elif provider == 'gmail':
-            client = GmailClient.__new__(GmailClient); client.account = {'id': account_id, 'provider':'gmail'}
+            client = GmailClient.__new__(GmailClient); client.account = {'id': account_id, 'provider':'gmail', 'scopes':['https://mail.google.com/']}
             def request(method, path, **kw):
                 if method != 'GET':
                     record([provider, method, path, kw.get('body')]); return {}

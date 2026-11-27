@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.11.0
+
+- Hosts with service sign-in manage Gmail on the email-presence card, with a
+  separate consent per mailbox and its own selected OAuth client. Existing
+  Gmail accounts keep their local account IDs, preferences, mail and receipts.
+  Manage Gmail settings and permanent deletion remain optional permissions.
+- Older hosts keep the local sign-in path. After a transfer, a confirmed older
+  host can use a still-valid saved grant within its recorded permissions (a renewal
+  without an optional permission keeps ordinary mail), and a new local sign-in there
+  serves the moved mailbox under its account ID instead of pointing to a card that
+  host lacks; a rotated or withdrawn grant may require new consent. A mailbox its own
+  saved sign-in still serves is disconnected in Email accounts on any host.
+  Unavailable hosts and unconfirmed transfers never reactivate
+  the old grant. IMAP, SMTP, Exchange and Place addressing are unchanged.
+- A transfer whose answer never arrived is not submitted again unless the host's
+  receipt says `resubmit` (below). Mail first reads
+  the host's own receipt of it where the host announces `sign_in_handover_version` 2,
+  then asks with `recover` (it registers and exchanges nothing) for the outcome it kept under
+  the same account and generation, at once and then after pauses that grow from
+  30 seconds to 15 minutes (in memory, so a restart asks again at once). Only
+  the host's per-item word that nothing was exchanged lets the saved original
+  continue, as does a `429` with `handover_started: false` to its own first offer
+  or a connection failure before that offer was sent. The transfer is offered again
+  later; another reason, another status code or
+  a recover answer changes nothing. When only an outage stopped the transfer before
+  any exchange while an earlier Disconnect or Revoke is known, the receipt says
+  `resubmit`: unless the withdrawal record may concern that mailbox or cannot be
+  read, Mail sends its own reserved offer and registration again as an ordinary
+  transfer after those pauses, the host files it only for the account Google
+  names, and the saved original stays parked meanwhile. A client is registered only with the
+  return address its saved sign-in recorded; one without it moves, as
+  `return_hint: "unknown"`, only to a host announcing `sign_in_handover_version` 2
+  and keeps serving unreserved until then. No installation default client is
+  registered. A change (send, label,
+  settings, deletion) names its confirmed connection and requests a bearer valid
+  for 30 seconds. Failure to obtain that lifetime does not end the consent. A
+  Disconnect or Revoke ends the grant it concerns. A later independent sign-in on
+  an older host keeps its own connection, including when a receipt for an older
+  transfer arrives afterwards. Earlier skill versions do not read withdrawal records.
+- Each queued Gmail mail goes out only through the access it was queued under: the
+  same host or local connection (an ordinary new sign-in keeps it) or the handover
+  of the mailbox's own grant, never another sign-in of the same Google account.
+  Mail without a record of its access, including mail queued by an earlier version,
+  stays held with its content; send it again with a new request_id. A refused
+  bearer is never presented again (a read is repeated once, a change never), and a
+  refresh token Google replaces is kept: a local refresh and a transfer of one
+  sign-in never overlap (one lock per account, kept while its process lives). A
+  transfer carries a bearer only with the permissions Google named for it, so a
+  narrower one stays narrower; a bearer without that record gets no optional
+  operation until a renewal records it. A new local sign-in starts another
+  connection, and on a host announcing version 2
+  a transfer continues earlier local mail only under the consent its receipt names. On a host announcing `sign_in_handover_version` 2 a
+  transfer asks for a verified identity, and a change or a newly queued mail keeps
+  the consent of the host's current row, so mail queued before a new sign-in there
+  stays held. A send whose access cannot be named at that moment queues nothing.
+- Mail queued where the host named no consent is held once it does: a connection
+  alone never proves the consent it was queued under. A hold on a fact nothing can
+  undo (no record of the access, a Disconnect or another local sign-in, or the host's
+  own current list naming other access for this mailbox, never a field it leaves
+  unnamed) takes the state `held`, which no pass claims; receipts, lists and counts
+  still show it as held, with its content, and its receipt says why. What only the
+  local copy of the host's list suggests, behind after a new sign-in until the next
+  pass, stays a temporary hold, which resumes by itself and needs no new send; a
+  final one is never sent automatically, and a mail whose row names no access is
+  final at once, Sending off or not.
+- An unreserved mailbox keeps its local sign-in within recorded Gmail permissions
+  even when automatic transfer is not possible. The host's complete list must name
+  no sign-in of its subject and no withdrawal may apply. A change reads the list
+  anew; ordinary reads in a search or poll can share its snapshot. A grant with
+  unknown permissions keeps reading only; no change, enqueue or transfer is inferred. The host's own receipt of one exact
+  generation with `refused` and `exchange: none` closes that attempt like the first
+  answer's word and gives the saved sign-in back, whatever its reason; it confirms
+  no earlier mail, new owner, break or permission, and a recover answer still never
+  does. Only a transfer's `imported` receipt gives its mail a consent.
+- A change Gmail refuses with 401 is never repeated, and the host hears at once of
+  that very bearer (`rejected`). A Gmail request, or the request for its bearer to
+  the sign-in host, that never connected sent nothing: it is retried a few times,
+  then fails, never uncertain; Sending-off and Place holds keep waiting. A lost
+  answer after the request left stays uncertain: inspect it before any new send.
+- Full Gmail access is named so before sign-in, with what Mail uses it for (permanent
+  deletion that skips Trash, and Gmail settings); no permission changed. The card is
+  pointed to by its technical name, email-presence; Email inbox is the catalog's title
+  for it, which may not be what its installed card shows.
+
 ## 0.10.11
 
 - Requires PluginAPI 2.5. Tool rows declare `touches` groups instead of flat targets

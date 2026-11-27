@@ -38,8 +38,9 @@ import json
 from contextlib import nullcontext
 from pathlib import Path
 from . import original_plugin
-from .lib.accounts import AccountStore
+from .lib.accounts import AccountStore, bearer_mark
 from .lib.gmail import GmailClient
+from .lib.gmail_host import GmailSignIn
 
 HEADERLESS = b"Subject: no identity header\\r\\n\\r\\nbody\\r\\n"
 
@@ -47,7 +48,11 @@ def register(api):
     directory = api.get_state_dir()
     accounts = AccountStore(directory)
     accounts.save({'id': 'google:fixture', 'provider': 'gmail', 'address': 'owner@example.invalid',
-                   'senders': ['owner@example.invalid'], 'scopes': ['https://mail.google.com/']})
+                   'senders': ['owner@example.invalid'], 'scopes': ['https://mail.google.com/'],
+                   # the permissions Google named for this fixture's bearer
+                   'tokens': {'access_token': 'fixture-only', 'expires_at': 4102444800, 'scope': 'https://mail.google.com/',
+                              'scope_of': bearer_mark('fixture-only')}})
+    GmailSignIn.environment = classmethod(lambda cls: cls('', ''))  # no Host sign-in service in this offline child
     def request(self, method, path, **options):
         if method == 'GET':
             if path == '/labels':
