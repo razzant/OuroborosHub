@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/162be81b23cf149006c65b024af347db2007c823",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/db692f2ca8ae4fe543e04c0238492f329a84c1da",
   "schema_version": 1,
   "skills": [
     {
@@ -4505,6 +4505,22 @@
       "slug": "telegram-user-session",
       "type": "extension",
       "version": "0.4.5"
+    },
+    {
+      "description": "Connect T-Bank's official T-Invest MCP server from Settings → Extensions → MCP servers. Read portfolio and market data or use a trading token to place and manage orders. Includes sandbox setup and the Russian Trusted Root CA prerequisite.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "3e41abb5c4f34d4cd959cdfdee36f1d1cc03387c17dc0c2660980f16f4d43739",
+          "size": 6410
+        }
+      ],
+      "name": "tinvest-mcp-guide",
+      "slug": "tinvest-mcp-guide",
+      "title": "T-Invest MCP: portfolios, markets and orders",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "The user wants to connect T-Bank's T-Invest MCP server in Ouroboros, understand the bank's access-token options, or fix a certificate verification error when adding or testing the server. Covers the Extra certificate bundle setting for the Russian Trusted Root CA. Not for trading advice; the token is always the user's own, created in T-Bank."
     },
     {
       "description": "How to add Todoist's official MCP server to Ouroboros and sign in: find, add, edit, complete and reschedule tasks and work with projects, sections, comments, labels, filters and reminders. For Todoist users on any plan, including the free one; the sign-in asks for read and write access.",
