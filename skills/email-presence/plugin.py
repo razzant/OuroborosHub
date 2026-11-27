@@ -41,6 +41,7 @@ def register(api):
                        runtime_error=account.get("runtime_error", ""))
         sending = account.get("sending", "on")
         held = payload.get("outbox_held", 0)
+        untold = len(payload.get("owner_notices") or [])  # notices about mail the host has not shown the owner yet
         auth_state = account.get("gmail_auth_state")
         if auth_state:
             payload["gmail_auth_state"] = auth_state
@@ -58,10 +59,11 @@ def register(api):
                    if health and health.get("ok") is False else "")
         text = not_ready if not account["connected"] else (
             "Worker stopped: " + account["runtime_error"] if account.get("runtime_error") else
-            "; ".join(filter(None, (failure, f"{held} held" if held else ""))) or (
+            "; ".join(filter(None, (failure, f"{held} held" if held else "",
+                                    f"{untold} notice{'' if untold == 1 else 's'} not yet in your chat" if untold else ""))) or (
                 "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
                 else "Authenticated intake" if (health or {}).get("ok") else "Configured; test connection"))
-        payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") or (health or {}).get("ok") is False else "ok" if (health or {}).get("ok") else "muted",
+        payload.update(text=text, tone="warn" if held or untold or not account["connected"] or account.get("runtime_error") or (health or {}).get("ok") is False else "ok" if (health or {}).get("ok") else "muted",
                        title="Email transport")
         return payload
 

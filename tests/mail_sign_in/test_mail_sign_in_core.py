@@ -182,3 +182,141 @@ def test_two_gmail_mailboxes_move_to_the_host_and_each_reads_its_own_mail(tmp_pa
     assert len(handovers) == 1 and Counter(refreshes) == Counter(identities) == Counter(mailboxes.keys())
     assert Counter(token_keys) == Counter({key: 2 for key in keys.values()})
     assert Counter(reads) == Counter({sub: 2 for sub in mailboxes})
+
+
+def test_mail_queued_before_the_move_goes_out_under_the_hosts_sign_in_and_notices_wait_for_their_grant(
+        tmp_path, monkeypatch):
+    """Rule A against the core's real Host Service: a mail Mail queued before its sign-in moved (no record of its access)
+    goes out once, under the connection and consent the host lists for that same Google account; one whose outcome is
+    unknown is kept as a draft in that mailbox; the owner's notice about it waits while the host refuses it (no
+    `notify_owner` grant, then no chat writer in this process) and is shown meanwhile."""
+    raw = os.environ.get('OUROBOROS_SIGN_IN_CORE_ROOT', '').strip()
+    assert raw, 'set OUROBOROS_SIGN_IN_CORE_ROOT to a core checkout with service sign-in'
+    core = Path(raw).resolve()
+    assert (core / 'ouroboros' / 'service_sign_in.py').is_file(), f'no service sign-in in {core}'
+    for name in [name for name in sys.modules if name.split('.')[0] in ('ouroboros', 'supervisor')]:
+        monkeypatch.delitem(sys.modules, name)  # the core is imported anew under this check's own disposable roots
+    home, app, data, repo = (tmp_path / name for name in ('home', 'app', 'data', 'repo'))
+    for path in (home, app, data, repo):
+        path.mkdir()
+    for name in [name for name in os.environ if name.startswith(('OUROBOROS_', 'HOST_SERVICE_'))]:
+        monkeypatch.delenv(name)  # nothing of a running installation reaches this check
+    for name, value in (('HOME', home), ('OUROBOROS_APP_ROOT', app), ('OUROBOROS_DATA_DIR', data),
+                        ('OUROBOROS_SETTINGS_PATH', data / 'settings.json'), ('OUROBOROS_REPO_DIR', repo)):
+        monkeypatch.setenv(name, str(value))
+    monkeypatch.syspath_prepend(str(core))
+    monkeypatch.syspath_prepend(str(SKILL))
+    from types import SimpleNamespace
+    import httpx
+    from starlette.testclient import TestClient
+    from lib import gmail_host
+    from lib.accounts import AccountStore
+    from lib.gmail import GmailClient
+    from lib.google_auth import MAIL_SCOPES
+    from lib.owner_notice import OwnerNotifier, tell_owner
+    from lib.runtime import EmailRuntime
+    from lib.store import EmailStore
+    from ouroboros import oauth_engine, skill_loader
+    from ouroboros.extension_plugin_api import mint_skill_token
+    from ouroboros.gateway.host_service import create_host_service_app
+    from ouroboros.skill_grant_follow import save_skill_grants
+    assert Path(oauth_engine.__file__).resolve().is_relative_to(core)
+    payload = data / 'skills' / 'external' / 'email-presence'
+    shutil.copytree(SKILL, payload, ignore=shutil.ignore_patterns('__pycache__', '.pytest_cache'))
+    skill = skill_loader.load_skill(payload, data)
+    assert skill is not None and not skill.load_error
+    skill_loader.save_review_state(data, 'email-presence',
+                                   skill_loader.SkillReviewState(status='pass', content_hash=skill.content_hash))
+    skill_loader.save_enabled(data, 'email-presence', True)
+    state = data / 'state' / 'skills' / 'email-presence'
+    token = mint_skill_token(state, 'email-presence', payload)  # of this disposable installation only
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError('this check opens no network connection')
+
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', no_network)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', no_network)
+    issued, sent, drafted = set(), [], []
+
+    def google(request):  # a made-up Google: discovery, one renewable grant, its identity and a recording Gmail
+        host, path = request.url.host, request.url.path
+        if host == 'accounts.google.com':
+            if path != '/.well-known/openid-configuration':
+                return httpx.Response(404)
+            return httpx.Response(200, json={
+                'issuer': ISSUER, 'authorization_endpoint': OAUTH + '/authorize', 'token_endpoint': OAUTH + '/token',
+                'userinfo_endpoint': OAUTH + '/userinfo', 'response_types_supported': ['code'],
+                'code_challenge_methods_supported': ['S256'], 'token_endpoint_auth_methods_supported': ['none']})
+        if (host, path) == ('oauth.example.test', '/token'):
+            assert dict(parse_qsl(request.content.decode('ascii')))['refresh_token'] == 'fixture-refresh-home'
+            access = f'fixture-issued-{len(issued)}'
+            issued.add('Bearer ' + access)
+            return httpx.Response(200, json={'access_token': access, 'token_type': 'Bearer',
+                                             'scope': ' '.join(MAIL_SCOPES), 'expires_in': 3600})
+        assert request.headers['authorization'] in issued
+        if (host, path) == ('oauth.example.test', '/userinfo'):
+            return httpx.Response(200, json={'sub': 'home', 'email': 'home@example.test', 'email_verified': True})
+        assert host == 'gmail.googleapis.com'
+        path = path.removeprefix('/gmail/v1/users/me')
+        if (request.method, path) == ('POST', '/messages/send'):
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={'id': f'a{len(sent)}', 'threadId': 'fixture-thread'})
+        if (request.method, path) == ('POST', '/drafts'):
+            drafted.append(json.loads(request.content))
+            return httpx.Response(200, json={'id': 'fixture-draft', 'message': {'id': 'b1'}})
+        assert request.method == 'GET' and path in ('/messages', '/drafts')  # Gmail holds no copy of the lost one
+        return httpx.Response(200, json={})
+
+    tokens = []
+
+    def observe(response):
+        if response.request.url.path == '/sign-in/token':
+            tokens.append(json.loads(response.request.content))
+
+    transport = httpx.MockTransport(google)
+    monkeypatch.setattr(oauth_engine, 'http_client', lambda: httpx.AsyncClient(transport=transport, trust_env=False))
+    with TestClient(create_host_service_app(data), base_url=BASE) as wire, \
+            httpx.Client(transport=transport, trust_env=False) as gmail_http:
+        wire.event_hooks['response'].append(observe)
+        sign_in = gmail_host.GmailSignIn(BASE, token, http=wire)
+        assert sign_in.mode() == 'host' and sign_in.handover_version >= 2
+        accounts = AccountStore(state, sign_in=sign_in)
+        mailbox = accounts.save({'id': 'google:home', 'provider': 'gmail', 'address': 'home@example.test',
+                                 'label': 'Home', 'sender': 'home@example.test', 'senders': ['home@example.test'],
+                                 'folder': 'INBOX', 'sending': 'on', 'oauth': {'client_id': 'desktop.test'},
+                                 'scopes': list(MAIL_SCOPES), 'tokens': {'refresh_token': 'fixture-refresh-home'}})
+        with closing(EmailStore(accounts.mail_dir(mailbox))) as queue:  # what Mail 0.10.11 left in its queue
+            for request_id in ('earlier', 'lost'):
+                queue.enqueue_outbox(request_id=request_id, to=['reader@example.test'], subject='Fixture ' + request_id,
+                                     body='Queued before the move.', reporting={'account_id': 'google:home',
+                                                                                'sender': 'home@example.test'})
+            with queue._connect() as db:
+                db.execute("UPDATE outbox SET state='uncertain',available_at=0 WHERE request_id='lost'")
+        gmail_host.sync_gmail(accounts)  # the saved grant moves to the host
+        row, = sign_in.accounts().values()
+        assert row['verified'] and row['subject'] == 'home' and row['connection_id'] and row['consent']
+        with closing(EmailStore(accounts.mail_dir(mailbox))) as queue:
+            runtime = EmailRuntime(queue, GmailClient(accounts, 'google:home', http=gmail_http), SimpleNamespace(),
+                                   account='google:home')
+            while runtime.process_outbox() or runtime.process_uncertain():
+                pass
+            earlier, lost = queue.receipt('earlier'), queue.receipt('lost')
+        assert earlier['state'] == 'completed' and len(sent) == 1  # once, under the host's sign-in of the same account
+        assert earlier['delivery_reporting']['gmail_connection'] == {'host': row['connection_id'], 'consent': row['consent']}
+        assert [(asked.get('connection_id'), asked.get('consent')) for asked in tokens
+                if asked.get('connection_id')] == [(row['connection_id'], row['consent'])] * 2  # the send and the draft
+        assert lost['unknown_outcome'] == 'drafted' and lost['draft_id'] == 'fixture-draft' and len(drafted) == 1
+
+        notifier = OwnerNotifier(BASE, token, http=wire)
+        assert notifier.supported() is True  # the core announces notify_version 1
+        assert tell_owner(accounts, notifier) == 0  # no notify_owner grant for these files: 403, kept
+        save_skill_grants(data, 'email-presence', [], content_hash=skill.content_hash, requested_keys=[],
+                          granted_permissions=['presence', 'notify_owner'],
+                          requested_permissions=['presence', 'notify_owner'])
+        with closing(EmailStore(accounts.mail_dir(mailbox))) as queue:
+            with queue._connect() as db:
+                db.execute("UPDATE runtime_state SET value=json_set(value,'$.available_at',0) WHERE key LIKE 'owner_notice:%'")
+        assert tell_owner(accounts, notifier) == 0  # granted, but no chat writer runs here: 503, kept
+        with closing(EmailStore(accounts.mail_dir(mailbox))) as queue:
+            told, = queue.status()['owner_notices']
+    assert told['kind'] == 'drafted' and told['attempts'] == 2 and 'Fixture lost' in told['text']

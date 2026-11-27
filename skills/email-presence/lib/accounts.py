@@ -324,8 +324,9 @@ class AccountStore:
         """File a completed legacy callback without overwriting a transfer or host binding.
 
         On an older host (`local`) that consent also connects a mailbox that moved: no sign-in card exists there to do
-        it. `new_connection` (every explicitly passed consent) starts another connection id, so mail queued earlier is
-        never sent automatically through this sign-in. A `borrowed` refresh token, the saved one Google kept, is taken
+        it. `new_connection` (every explicitly passed consent) starts another connection id: a change begun under the
+        earlier one is not issued under this sign-in, while mail queued earlier goes out under it (it is the same Google
+        account). A `borrowed` refresh token, the saved one Google kept, is taken
         from the record at this write, never from a value read before it."""
         for _ in range(3):
             try:
@@ -360,7 +361,7 @@ class AccountStore:
             link = old.get("gmail_connection")
             if new_connection or not (isinstance(link, dict) and link.get("id")):
                 # A new consent, a recorded break, or no record of this mailbox's earlier access: this sign-in starts its
-                # own connection; mail queued before keeps its own record (or none) and is not sent through it.
+                # own connection. Mail queued before goes out under it when it leaves (GmailClient.sending_link).
                 record["gmail_connection"] = {"id": uuid.uuid4().hex}
             saved = self.save(record, connected=connected, expected_generation=old.get("generation"),
                               expected=old or None)
@@ -498,7 +499,7 @@ class AccountStore:
             if record.get("provider") == "gmail":
                 record.pop("gmail_legacy_copy", None)
                 record.pop("gmail_late_consent", None)
-                record["gmail_connection"] = {"ended": True}  # mail queued before is never sent through a later sign-in
+                record["gmail_connection"] = {"ended": True}  # this connection ended: a later sign-in starts another
                 if isinstance(record.get("gmail_transfer"), dict):
                     record["gmail_transfer"]["withdrawn"] = True  # a late host answer never reconnects it by itself
         return self._change(account_id, clear, connected=False)
@@ -605,7 +606,7 @@ class AccountStore:
             link = record.get("gmail_connection")
             if isinstance(link, dict) and isinstance(link.get("id"), str) and link["id"]:
                 return link["id"]
-            # Only the access serving it from now on is recorded: mail queued before has no record and stays held.
+            # Only the access serving it from now on is recorded; mail queued before is named it when it goes out.
             record["gmail_connection"] = {"id": uuid.uuid4().hex}
             db.execute("UPDATE accounts SET record=? WHERE id=?", (json.dumps(record), account_id))
             return record["gmail_connection"]["id"]

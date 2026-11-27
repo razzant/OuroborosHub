@@ -40,7 +40,7 @@ def drain(runtime):
         pass
 
 
-def test_mail_queued_where_the_host_named_no_consent_is_never_sent_under_the_one_it_names_now(tmp_path, monkeypatch):
+def test_mail_queued_where_the_host_named_no_consent_goes_under_the_one_it_names_now(tmp_path, monkeypatch):
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
     sent = []
 
@@ -58,27 +58,25 @@ def test_mail_queued_where_the_host_named_no_consent_is_never_sent_under_the_one
         sync_gmail(accounts)
         assert accounts.get('google:one')['gmail_host']['consent'] == IMPORTED
         store = EmailStore(accounts.mail_dir(account))
-        for request_id, reporting in (('old', {}),  # no record of its access
+        for request_id, reporting in (('old', {}),  # no record of its access: queued by an earlier version
                                       ('v1', {'gmail_connection': {'host': 'cn-1'}}),  # the connection, no consent
                                       ('v2', {'gmail_connection': {'host': 'cn-1', 'consent': IMPORTED}})):
             store.enqueue_outbox(request_id=request_id, to=['reader@example.test'], body=request_id, reporting=reporting)
         accounts.save({**accounts.get('google:one'), 'gmail_host': dict(MOVED)})  # the local copy now lags: it names no consent
         client = GmailClient(accounts, 'google:one', http=mail)
         drain(EmailRuntime(store, client, SimpleNamespace(), account='google:one'))
-        with pytest.raises(AccountError, match='does not confirm'):
-            client._access_token(change=True, link={'host': 'cn-1'})  # the token path refuses it as well
-        with pytest.raises(AccountError, match='not recorded'), client.delivery(store.queued_message('old')):
-            pass  # and a delivery never takes the access of a new operation for a mail without a record
-    assert sent == ['Bearer fixture-host-access'] and store.receipt('v2')['state'] == 'completed'
-    assert [body.get('consent') for body in host.tokens] == [IMPORTED]  # only the mail bound to its consent asked the host
-    for request_id, words in (('old', 'not recorded'), ('v1', 'does not confirm')):
-        receipt = store.receipt(request_id)
-        assert receipt['state'] == 'held' and words in receipt['last_error']
-        assert raw(store, request_id) == 'held'  # a hold nothing can lift takes the state no pass claims
-        assert store.queued_message(request_id).body == request_id  # and its content is kept
+        # A change begun under a connection with no consent is still refused where the host names one: it was named
+        # before this host named consents, and a change is issued only under the access it began with.
+        with pytest.raises(AccountError, match='changed while this operation was being prepared'):
+            client._access_token(change=True, link={'host': 'cn-1'})
+    # Rule A: the same mailbox, so each goes once under the host's current connection and consent.
+    assert [store.receipt(rid)['state'] for rid in ('old', 'v1', 'v2')] == ['completed'] * 3
+    assert sent == ['Bearer fixture-host-access'] * 3 and [body.get('consent') for body in host.tokens] == [IMPORTED] * 3
+    assert all(store.receipt(rid)['delivery_reporting']['gmail_connection'] == {'host': 'cn-1', 'consent': IMPORTED}
+               for rid in ('old', 'v1', 'v2'))
 
 
-def test_a_hold_nothing_can_lift_leaves_the_five_second_passes_and_stays_a_held_receipt(tmp_path, monkeypatch):
+def test_mail_queued_by_an_earlier_version_goes_under_the_saved_sign_in_and_waits_for_sending_and_places(tmp_path, monkeypatch):
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
     sent, paused = [], [True]
 
@@ -87,39 +85,38 @@ def test_a_hold_nothing_can_lift_leaves_the_five_second_passes_and_stays_a_held_
         sent.append(request.headers['Authorization'])
         return httpx.Response(200, json={'id': f'{len(sent):x}', 'threadId': 'fixture-thread'})
 
-    place = SimpleNamespace(place_hold=lambda account, conversation, thread_id='':
-                            'Held: Work mail is paused' if paused[0] else '')
     accounts = AccountStore(tmp_path)  # no sign-in service: Mail's own sign-in serves this mailbox
     account = mailbox(accounts)
     store = EmailStore(accounts.mail_dir(account))
-    link = {'gmail_connection': {'id': accounts.gmail_connection('google:one')}}
-    store.enqueue_outbox(request_id='unrecorded', to=['reader@example.test'], body='no record of its access')
+    place = SimpleNamespace(place_hold=lambda account, conversation, thread_id='':  # a Place pauses one conversation
+                            'Held: Work mail is paused' if paused[0] and conversation == store.message_id_for('paused') else '')
+    current = {'id': accounts.gmail_connection('google:one')}
+    store.enqueue_outbox(request_id='unrecorded', to=['reader@example.test'], body='queued by an earlier version')
     store.enqueue_outbox(request_id='replaced', to=['reader@example.test'], body='queued under an earlier sign-in',
                          reporting={'gmail_connection': {'id': 'fixture-earlier'}})
-    store.enqueue_outbox(request_id='paused', to=['reader@example.test'], body='a place pauses it', reporting=link)
+    store.enqueue_outbox(request_id='paused', to=['reader@example.test'], body='a place pauses it',
+                         reporting={'gmail_connection': current})
     with httpx.Client(transport=httpx.MockTransport(provider)) as mail:
         runtime = EmailRuntime(store, GmailClient(accounts, 'google:one', http=mail), place, account='google:one')
-        accounts.update_preferences('google:one', {'sending': 'off'})  # Sending off holds the rest, not a mail with no access on record
+        accounts.update_preferences('google:one', {'sending': 'off'})  # Sending off holds every one of them
         runtime.account_loader = lambda: accounts.resolve('google:one')
         drain(runtime)
-        assert [raw(store, rid) for rid in ('unrecorded', 'replaced', 'paused')] == ['held', 'retry', 'retry']
+        assert [raw(store, rid) for rid in ('unrecorded', 'replaced', 'paused')] == ['retry'] * 3 and sent == []
         accounts.update_preferences('google:one', {'sending': 'on'})
         with store._connect() as db:
             db.execute("UPDATE outbox SET available_at=0 WHERE state='retry'")
         drain(runtime)
-        assert [store.receipt(rid)['state'] for rid in ('unrecorded', 'replaced', 'paused')] == ['held'] * 3
+        assert [store.receipt(rid)['state'] for rid in ('unrecorded', 'replaced', 'paused')] == ['completed'] * 2 + ['held']
         status = store.status()
-        assert status['outbox_held'] == 3 and [row['state'] for row in status['receipts']] == ['held'] * 3
-        assert [raw(store, rid) for rid in ('unrecorded', 'replaced', 'paused')] == ['held', 'held', 'retry']
-        assert status['outbox'] == {'held': 2, 'retry': 1}  # the row states; the counter and the list show all three as held
+        assert status['outbox_held'] == 1 and status['outbox'] == {'completed': 2, 'retry': 1}
         paused[0] = False  # the place is active again
         with store._connect() as db:
             db.execute("UPDATE outbox SET available_at=0 WHERE request_id='paused'")
         drain(runtime)
-    assert store.receipt('paused')['state'] == 'completed' and sent == ['Bearer fixture-old-access']
-    assert [store.receipt(rid)['state'] for rid in ('unrecorded', 'replaced')] == ['held', 'held']
-    assert 'not recorded' in store.receipt('unrecorded')['last_error']
-    assert 'never sent' in store.receipt('replaced')['last_error']
+    assert [store.receipt(rid)['state'] for rid in ('unrecorded', 'replaced', 'paused')] == ['completed'] * 3
+    assert sent == ['Bearer fixture-old-access'] * 3
+    assert {store.receipt(rid)['delivery_reporting']['gmail_connection']['id'] for rid in ('unrecorded', 'replaced')} == {
+        current['id']}  # each went under the mailbox's own current sign-in
 
 
 def test_a_mailbox_not_yet_reserved_keeps_the_reads_it_had_and_claims_no_permission(tmp_path, monkeypatch):
@@ -288,9 +285,8 @@ def test_the_sign_in_card_says_what_full_gmail_access_gives_before_sign_in_and_p
     name = manifest['name']  # the installed card's exact technical name: what is drawn there may differ from the catalog's title
     assert name == 'email-presence' and name in CARD and 'Extensions › Skills' in CARD and 'Email Presence' not in CARD
     assert f'Extensions › Skills › {name}' in SKILL.joinpath('ui', 'accounts.js').read_text(encoding='utf-8')
-    from lib.gmail import CONNECTION_PENDING, CONNECTION_REPLACED  # a temporary hold never tells to send again by hand
-    assert 'does not confirm' in CONNECTION_PENDING and 'Send it again' not in CONNECTION_PENDING
-    assert 'Send it again' in CONNECTION_REPLACED
+    from lib.gmail import ACCESS_CHANGED  # a change stopped by a sign-in that changed meanwhile says nothing happened
+    assert 'nothing was sent or changed' in ACCESS_CHANGED and 'request_id' not in ACCESS_CHANGED
     entry = SKILL.parents[1] / 'entries' / 'email-presence.json'
     if entry.is_file():  # tested inside its catalog: it lists this very skill, under a title that is true of the catalog only
         assert json.loads(entry.read_text(encoding='utf-8'))['name'] == name
@@ -358,7 +354,7 @@ def test_the_old_grant_renews_its_bearer_without_naming_permissions_it_never_rec
     assert saved['tokens']['access_token'] == 'fixture-renewed' and 'scope' not in saved['tokens'] and saved['scopes'] is None
 
 
-def test_a_new_sign_in_the_local_copy_has_not_seen_never_parks_the_mail_queued_under_it(tmp_path, monkeypatch):
+def test_mail_queued_before_a_new_sign_in_the_local_copy_has_not_seen_goes_under_that_sign_in(tmp_path, monkeypatch):
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
     sent = []
 
@@ -381,16 +377,10 @@ def test_a_new_sign_in_the_local_copy_has_not_seen_never_parks_the_mail_queued_u
         host.held[KEY] = {**host.held[KEY], 'consent': 'd' * 32}  # a new sign-in on the card: the local copy is behind
         store.enqueue_outbox(request_id='new', to=['reader@example.test'], body='queued under the new sign-in',
                              reporting={'gmail_connection': client.connection_link()})
-        runtime = EmailRuntime(store, client, SimpleNamespace(), account='google:one')
-        drain(runtime)
-        assert store.receipt('new')['state'] == 'completed' and sent == ['Bearer fixture-host-access']  # never parked
-        assert raw(store, 'old') == 'retry'  # the host refused its consent: a temporary hold until the fact settles
-        sync_gmail(accounts)  # the local copy catches up
-        with store._connect() as db:
-            db.execute("UPDATE outbox SET available_at=0 WHERE state='retry'")
-        drain(runtime)
-    assert raw(store, 'old') == 'held' and 'never sent' in store.receipt('old')['last_error']
-    assert sent == ['Bearer fixture-host-access']  # the old mail never went out under the new consent
+        drain(EmailRuntime(store, client, SimpleNamespace(), account='google:one'))
+    # Each is named the host's current row as it goes out, never the stale local copy: both go once, under it.
+    assert [store.receipt(rid)['state'] for rid in ('old', 'new')] == ['completed'] * 2
+    assert sent == ['Bearer fixture-host-access'] * 2 and [body.get('consent') for body in host.tokens] == ['d' * 32] * 2
 
 
 def test_a_host_that_never_connected_for_the_bearer_is_retried_within_the_queues_bounds(tmp_path, monkeypatch):
@@ -596,7 +586,7 @@ def test_a_new_mail_and_a_draft_begin_under_the_access_named_at_the_start_of_the
     assert host.tokens[-1]['connection_id'] == 'cn-1' and host.tokens[-1]['consent'] == IMPORTED
 
 
-def test_an_automatic_reply_keeps_the_access_recorded_with_its_event_and_goes_out_once(tmp_path, monkeypatch):
+def test_an_automatic_reply_records_its_events_access_and_goes_out_once(tmp_path, monkeypatch):
     from lib.host_adapter import automatic_reply_targets
 
     sent = []
@@ -643,6 +633,9 @@ def test_an_automatic_reply_keeps_the_access_recorded_with_its_event_and_goes_ou
         assert store.get(_submitted_targets_key(old)) == {'reply_targets': automatic_reply_targets(old)}
         runtime._reply(old, ['Answer'], 'one')
         assert 'gmail_connection' not in store.queued_message(f'presence:{old.provider_event_key}:one').reporting
+        drain(runtime)  # rule A: the same mailbox sends it under its current sign-in, as before 0.11
+        assert store.receipt(f'presence:{old.provider_event_key}:one')['state'] == 'completed'
+        assert sent == ['Bearer fixture-host-access'] * 2
 
 
 def test_one_search_asks_the_host_for_its_list_once_and_the_next_search_asks_again(tmp_path, monkeypatch):

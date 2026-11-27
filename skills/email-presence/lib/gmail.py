@@ -4,6 +4,9 @@ from __future__ import annotations
 import base64
 import contextvars
 import copy
+import email
+import email.policy
+import hashlib
 import re
 import time
 from contextlib import contextmanager
@@ -16,27 +19,21 @@ import httpx
 
 from .accounts import AccountError, bearer_mark
 from .gmail_host import (CARD, HostNotReached, SignInError, bearer_scopes, credential_owner, host_link, local_grant,
-                         mail_scope, queued_link)
+                         mail_scope, queued_link, sending_link)
 from .google_auth import FULL_MAIL_SCOPE, SETTINGS_SCOPE
 from .client import MailClient
-from .delivery import DeliveryRejected, FinalHold
-from .mime import build_message, conversation_root, mailbox_addresses, parse_message
+from .delivery import DeliveryRejected
+from .mime import (_addresses, build_message, canonical_message_id, conversation_root, mailbox_addresses,
+                   parse_message)
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 _SYSTEM_LABEL_IDS = frozenset({"INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "STARRED", "UNREAD", "IMPORTANT"})
 # messages.list leaves Spam and Trash out unless asked (includeSpamTrash defaults to false).
 _SPAM_TRASH = frozenset({"SPAM", "TRASH"})
-# Mail goes out only through the access it was queued under: another one, or none on record, never sends it.
-CONNECTION_REPLACED = ("Held: queued under another connection of this mailbox; it is never sent through this one. "
-                       "Send it again with a new request_id if it is still needed.")
-CONSENT_UNCONFIRMED = ("Held: this Ouroboros does not confirm the Google consent this mail was queued under; it goes out "
-                       "only under that consent. Send it again with a new request_id if it is still needed.")
-CONNECTION_UNKNOWN = ("Held: the connection this mail was queued under is not recorded; it is never sent automatically. "
-                      "Send it again with a new request_id if it is still needed.")
-# What only a temporary hold says: it resumes by itself, so nothing is to be sent again by hand.
-CONNECTION_PENDING = ("Held: this Ouroboros does not confirm, for now, that the connection and Google consent this mail was "
-                      "queued under are still the mailbox's current ones; it is checked again by itself and goes out only "
-                      "under them.")
+# A change is issued only under the access named when it began (change_link): a sign-in of the mailbox that changed in
+# between stops it before anything is sent or changed. A queued mail is named its access anew each time it goes out.
+ACCESS_CHANGED = ("This mailbox's Google sign-in changed while this operation was being prepared; nothing was sent or "
+                  "changed. Try it again.")
 
 
 _RENEWAL_WAIT = 45  # seconds a local renewal waits for another process renewing the same sign-in
@@ -126,22 +123,23 @@ class GmailClient(MailClient):
         else:
             denied = self._rejected_bearer
             # A change names the access it may use, and the host refuses any other (connection_changed, consent_changed):
-            # a queued mail the one it was queued under; mail queued on the saved sign-in the connection and consent its
-            # continuation was last confirmed with; a new change one row of the host's current list. Reading names none.
+            # a queued mail the one named as it goes out (sending_link); a change begun on the saved sign-in the
+            # connection and consent its continuation was last confirmed with; a new change one row of the host's
+            # current list. Reading names none.
             if not change:
                 frozen = {}
             elif link and link.get("host"):
                 if not link.get("consent") and host.handover_version >= 2:
-                    # Queued where the host named no consent: its connection alone never proves the consent it was queued under.
-                    raise SignInError(CONSENT_UNCONFIRMED.removeprefix("Held: "))
+                    # Begun where the host named no consent: its connection alone never proves the consent it began under.
+                    raise SignInError(ACCESS_CHANGED)
                 frozen = dict(link)
             elif link:
                 # Mail queued on the saved sign-in: only while this very binding continues that mail's own grant, under
                 # the consent its transfer receipt named (gmail_host `continues`), never through a fresher binding.
                 if not link.get("id") or binding.get("continues") != link.get("id"):
-                    raise SignInError(CONNECTION_REPLACED.removeprefix("Held: "))
+                    raise SignInError(ACCESS_CHANGED)
                 if bool(binding.get("continues_consent")) != (host.handover_version >= 2):
-                    raise SignInError(CONSENT_UNCONFIRMED.removeprefix("Held: "))
+                    raise SignInError(ACCESS_CHANGED)
                 frozen = {"host": binding.get("connection_id"),
                           **({"consent": binding["continues_consent"]} if binding.get("continues_consent") else {})}
             else:
@@ -177,7 +175,7 @@ class GmailClient(MailClient):
             return self._host_credential(account, reusable=reusable, change=change, link=link)[0]
         if link and link.get("host"):
             # Queued under the host's connection: only that connection sends it, so it waits while no host serves it.
-            raise AccountError("Waiting for the Google connection this mail was queued under")
+            raise AccountError("Waiting for the Google connection this operation began under")
         return self._legacy_token(account, link=str((link or {}).get("id") or ""))
 
     def _legacy_token(self, account, *, proven=False, link=""):
@@ -189,8 +187,8 @@ class GmailClient(MailClient):
         # The owner's later local sign-in when it serves (its generation), else the original fields.
         grant, late = local_grant(self.accounts, account)
         if link and link != (account.get("gmail_connection") or {}).get("id"):
-            # Queued under another local sign-in of this mailbox (a new one replaced it): never sent through this one.
-            raise AccountError(CONNECTION_REPLACED.removeprefix("Held: "))
+            # Begun under another local sign-in of this mailbox (a new one replaced it): never issued through this one.
+            raise AccountError(ACCESS_CHANGED)
         tokens, oauth, scopes = grant.get("tokens") or {}, grant.get("oauth") or {}, grant.get("scopes")
         self.account["scopes"] = bearer_scopes(tokens, scopes)
         if _fresh(tokens) and not (proven and self.account["scopes"] is None):
@@ -745,11 +743,12 @@ class GmailClient(MailClient):
 
     @contextmanager
     def delivery(self, item=None):
-        # Authentication refresh happens before the outbox enters uncertain-send custody. A mail queued under the host's
-        # connection goes out through that connection only (connection_hold).
+        # Authentication refresh happens before the outbox enters uncertain-send custody. A queued mail goes out under the
+        # access named for this pass (EmailRuntime.process_outbox: whichever confirmed sign-in of this mailbox's own Google
+        # account serves it now), and the host refuses any other connection or consent when its bearer is issued.
         link = item.reporting.get("gmail_connection") if item is not None else None
         if item is not None and not (isinstance(link, Mapping) and (link.get("host") or link.get("id"))):
-            raise AccountError(CONNECTION_UNKNOWN.removeprefix("Held: "))  # never the access of a new operation
+            link = self.sending_link()
         try:
             self._delivery_access = self._access_token(change=True, link=link if isinstance(link, Mapping) else None)
         except HostNotReached as exc:
@@ -763,8 +762,14 @@ class GmailClient(MailClient):
             self._delivery_access = ""
 
     def connection_link(self):
-        """The connection a mail queued now keeps (gmail_host.queued_link)."""
+        """The access a mail queued now is recorded with (gmail_host.queued_link)."""
         return queued_link(self.accounts, self.accounts.resolve(self.account_id))
+
+    def sending_link(self):
+        """The access a queued mail of this mailbox goes out under now: a confirmed sign-in of this mailbox's own Google
+        account (its verified subject, never an address), whichever connection and consent serve it now
+        (gmail_host.sending_link). SignInError or AccountError while none does: the mail waits, unsent."""
+        return sending_link(self.accounts, self.accounts.resolve(self.account_id))
 
     def change_link(self):
         """The access an operation that is beginning now is made under: the one a mail queued now keeps. It is named before
@@ -778,83 +783,83 @@ class GmailClient(MailClient):
         the event has not begun, and its claim is retried before anything is submitted."""
         return queued_link(self.accounts, self.accounts.resolve(self.account_id), for_intake=True)
 
-    def _names_consents(self):
-        """Whether the host names each sign-in's consent now (sign_in_handover_version 2); false while it cannot be asked."""
-        host = self.accounts.sign_in
-        return host is not None and host.mode(require_identity=True) == "host" and host.handover_version >= 2
+    def find_submitted(self, item):
+        """What this mailbox holds of a queued mail whose submission began and whose outcome is unknown, searched by the
+        Message-ID it went out with: ("sent", receipt) when a message other than a draft carries it, ("draft", draft)
+        when only a draft does (the draft it was sent from, or one saved for it before), else (None, None).
 
-    def _confirmed(self, account, link):
-        """What a host link the local copy of the host's list (gmail_host, from the last pass) disagrees with comes to.
-        The copy is no fact: the mail was queued from the list as it was then, a new sign-in leaves the copy behind until
-        the next pass, and it may never have named a consent. The host's own current list is read here, once, and only for
-        such a mail. Its confirmed row (verified, this mailbox's subject) still carrying this mail's connection and consent
-        is no hold: the bearer is asked for with these very refs, which the host refuses to any other. That row naming
-        another connection or consent is final. Anything less proves nothing, a field it leaves unnamed included (an older
-        host names no consent, and a missing connection_id proves nothing): the temporary hold, asked about by itself."""
-        host = self.accounts.sign_in
-        if host is None:
-            return CONNECTION_PENDING
+        Gmail search can lag a moment behind a send and Gmail may give a sent message a Message-ID of its own, so an
+        empty answer never proves that nothing went out: the store waits before this is asked (EmailStore.RECONCILE_AFTER),
+        and the draft saved then asks the owner to check before sending it."""
+        token = canonical_message_id(item.message_id)
+        if token:
+            found = self._request("GET", "/messages", params={"q": "rfc822msgid:" + token, "includeSpamTrash": "true",
+                                                              "maxResults": 10})
+            for row in found.get("messages", []):
+                native = self.native_id(row["id"])
+                labels = self._request("GET", "/messages/" + native, params={"format": "minimal"}).get("labelIds") or []
+                if "DRAFT" not in labels:
+                    return "sent", {"transport": "gmail_api", "message_id": native,
+                                    "thread_id": str(row.get("threadId") or ""), "found": "rfc822msgid"}
+        sent_from = item.reporting.get("gmail_draft")
+        if isinstance(sent_from, Mapping) and sent_from.get("id"):
+            try:  # the draft it was to be sent from, while it still exists
+                draft = self._request("GET", "/drafts/" + _draft_id(sent_from["id"]), params={"format": "minimal"})
+            except GmailError as exc:
+                if exc.status != 404:
+                    raise
+            else:
+                return "draft", {"id": draft["id"], "message_ref": "gmail:" + self.native_id(draft["message"]["id"]),
+                                 "how": "found"}
+        if token:
+            drafts = self._request("GET", "/drafts", params={"q": "rfc822msgid:" + token, "maxResults": 10})
+            for draft in drafts.get("drafts", []):
+                return "draft", {"id": draft["id"], "message_ref": "gmail:" + self.native_id(draft["message"]["id"]),
+                                 "how": "found"}
+        return None, None
+
+    def save_unsent(self, item, link):
+        """One Gmail draft, in this same mailbox, of a queued mail whose outcome is unknown and that it does not hold
+        (find_submitted): its exact envelope (Bcc kept in the draft's header, as a draft keeps it), body, attachments,
+        thread and Message-ID, so the owner can check and send it from any device and a later search finds it."""
+        message = copy.deepcopy(self.message(item))
+        if item.bcc:
+            message["Bcc"] = ", ".join(item.bcc)
+        payload = {"message": {"raw": base64.urlsafe_b64encode(message.as_bytes(policy=SMTP)).decode().rstrip("=")}}
+        if item.reporting.get("gmail_thread_id"):
+            payload["message"]["threadId"] = item.reporting["gmail_thread_id"]
+        result = self._request("POST", "/drafts", body=payload, **({"link": link} if link else {}))
+        return {"id": result["id"], "message_ref": "gmail:" + self.native_id(result["message"]["id"]), "how": "created"}
+
+    def draft_letter(self, draft_id):
+        """An existing draft as it is now, for email_send(draft_id): its raw source read with the intake parser, its Bcc,
+        Gmail thread and a digest of the bytes, so the send that follows names exactly the draft that was checked."""
+        draft = self._request("GET", "/drafts/" + _draft_id(draft_id), params={"format": "raw"})
+        message = draft.get("message") if isinstance(draft, dict) else None
+        if (not isinstance(message, dict) or draft.get("id") != draft_id or not isinstance(message.get("raw"), str)
+                or not message["raw"]):
+            raise ValueError("Gmail did not return the selected draft; nothing was queued")
+        raw = base64.urlsafe_b64decode(message["raw"] + "=" * (-len(message["raw"]) % 4))
+        letter = parse_message(raw, folder="Gmail", uid=0, max_body_chars=None, missing_id="")
+        source = email.message_from_bytes(raw, policy=email.policy.default)
+        letter.update(bcc=_addresses(source.get("Bcc")), digest=hashlib.sha256(message["raw"].encode()).hexdigest(),
+                      provider_thread_id=str(message.get("threadId") or ""))
+        return letter
+
+    def _send_draft(self, draft):
+        """Send one existing draft (users.drafts.send) only while it is still the very draft that was checked: a draft
+        changed or deleted since is refused, and nothing is sent."""
         try:
-            row = host.accounts().get((account.get("gmail_host") or {}).get("key"))
-        except SignInError:
-            return CONNECTION_PENDING
-        if not row or not row.get("verified") or account["id"] != "google:" + str(row.get("subject")):
-            return CONNECTION_PENDING
-        named, recorded = row.get("connection_id"), link.get("consent")
-        if (named and named != link["host"]) or (recorded and row.get("consent") and row["consent"] != recorded):
-            return FinalHold(CONNECTION_REPLACED)
-        return "" if named == link["host"] and (not recorded or row.get("consent") == recorded) else CONNECTION_PENDING
-
-    @staticmethod
-    def unrecorded_hold(item):
-        """FinalHold when the row itself names no access this mail was queued under (mail queued by an earlier version, or
-        while no confirmed sign-in served the mailbox), else empty. Read from the row alone: no network, account or setting."""
-        link = item.reporting.get("gmail_connection")
-        return "" if isinstance(link, Mapping) and (link.get("host") or link.get("id")) else FinalHold(CONNECTION_UNKNOWN)
-
-    def connection_hold(self, item):
-        """Empty while the access this mail was queued under still serves it, else a hold that never sends it on its own.
-
-        Mail without a recorded access (queued by an earlier version, or while no confirmed sign-in served the mailbox)
-        is held: neither its age nor an unobserved Disconnect proves its consent. Mail queued on this mailbox's own local
-        access reaches the host only while the host connection continues that same grant (gmail_host `continues`).
-
-        A FinalHold is a hold nothing can lift: no record of the access, a Disconnect or another local sign-in of the
-        mailbox, no consent recorded where the host names them, or the host's own current list, for the confirmed
-        subject, naming other access than this mail's (`_confirmed`; a field it leaves unnamed proves nothing). What only
-        the local copy of that list suggests, behind after a new sign-in until the
-        next pass, or a transfer still to be confirmed, waits as a temporary hold."""
-        if hold := self.unrecorded_hold(item):  # read from the row alone, before anything is asked
-            return hold
-        account = self.accounts.resolve(self.account_id)
-        link = item.reporting.get("gmail_connection")
-        binding = account.get("gmail_host") or {}
-        if link.get("host"):  # the host also refuses any other connection or consent (connection_changed, consent_changed)
-            if not link.get("consent") and self._names_consents():
-                # Queued where the host named none: a connection alone never proves the consent it was queued under,
-                # whatever the local copy of the host's list shows.
-                return FinalHold(CONSENT_UNCONFIRMED)
-            if (binding.get("connection_id") not in (None, link["host"])
-                    or (link.get("consent") and binding.get("consent") != link["consent"])):
-                # The local copy of the host's list disagrees with the mail's own record: no fact until the host's own
-                # list says so (a new sign-in leaves the copy behind, or the copy never named a consent).
-                return self._confirmed(account, link)
-            return ""
-        current = account.get("gmail_connection")
-        if not isinstance(current, Mapping) or current.get("ended"):
-            return FinalHold(CONNECTION_REPLACED)  # a Disconnect came between
-        if binding and credential_owner(self.accounts, account) == "host":
-            # Through the host only while it continues this mail's own grant under its confirmed consent (`continues`).
-            if binding.get("continues") != link["id"]:
-                # Lasting once the move is confirmed and no transfer or later local sign-in can still continue it.
-                lasting = (binding.get("verified") and not account.get("gmail_transfer")
-                           and not account.get("gmail_late_consent"))
-                return FinalHold(CONNECTION_REPLACED) if lasting else CONNECTION_PENDING
-            # Under the consent its transfer receipt named: needed where the host names consents, never dropped elsewhere.
-            strict = self.accounts.sign_in.handover_version >= 2
-            return "" if bool(binding.get("continues_consent")) == strict else CONNECTION_PENDING
-        # On the saved sign-in only while the local sign-in it was queued under serves; a new one starts another id.
-        return "" if current.get("id") == link["id"] else FinalHold(CONNECTION_REPLACED)
+            current = self._request("GET", "/drafts/" + _draft_id(draft["id"]), params={"format": "raw"},
+                                    access=self._delivery_access)
+        except GmailError as exc:
+            if exc.status == 404:
+                raise DeliveryRejected("The draft no longer exists; nothing was sent") from exc
+            raise
+        raw = ((current.get("message") or {}) if isinstance(current, dict) else {}).get("raw")
+        if not isinstance(raw, str) or hashlib.sha256(raw.encode()).hexdigest() != draft.get("digest"):
+            raise DeliveryRejected("The draft changed after it was checked; nothing was sent. Check it and send it again")
+        return self._request("POST", "/drafts/send", body={"id": draft["id"]}, access=self._delivery_access)
 
     def transmit(self, _session, message, recipients, *, has_bcc=False, reporting=None):
         wire = copy.deepcopy(message)
@@ -866,8 +871,10 @@ class GmailClient(MailClient):
         payload = {"raw": base64.urlsafe_b64encode(wire.as_bytes(policy=SMTP)).decode().rstrip("=")}
         if (reporting or {}).get("gmail_thread_id"):
             payload["threadId"] = reporting["gmail_thread_id"]
+        draft = (reporting or {}).get("gmail_draft")
         try:
-            result = self._request("POST", "/messages/send", body=payload, access=self._delivery_access)
+            result = (self._send_draft(draft) if isinstance(draft, Mapping) else
+                      self._request("POST", "/messages/send", body=payload, access=self._delivery_access))
         except GmailError as exc:
             if 400 <= exc.status < 500 and exc.status != 408:
                 raise DeliveryRejected(exc, retryable=exc.status == 429, retry_after=exc.retry_after) from exc

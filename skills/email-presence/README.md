@@ -16,7 +16,11 @@ adds automatic intake; its Silent/Paused controls still apply to that account.
 Existing EMAIL_* configurations keep their original identity and mail history.
 Known thread replies preserve RFC threading, and transient Host failures retry
 stored paid output without generating it again. Unknown provider acceptance is
-never automatically resent. Sender authentication remains explicitly unverified.
+never automatically resent: for Gmail, Mail looks for the mail in its own mailbox
+and otherwise keeps it there as one draft, and tells the owner once in the chat.
+Queued Gmail mail, including mail queued before this version, goes out under its
+mailbox's current sign-in, and waits while that mailbox is signed out of Mail.
+Sender authentication remains explicitly unverified.
 
 Searches return pages: pass `next_page_token` back as `page_token` with the same
 account, folder and query or criteria until it comes back empty. IMAP criteria are

@@ -163,7 +163,7 @@ def _connect(store, pending, code, http):
     if not reused:  # a borrowed token keeps the count saved with that token at the write
         record["oauth"]["withdrawals_seen"] = local_withdrawals_seen(store)
     # Every explicitly passed consent starts another local connection, also when Google kept the saved refresh token
-    # (`reused`): mail queued before it is never sent automatically. That token is borrowed as stored at the write.
+    # (`reused`): a change begun before it is not issued under it. That token is borrowed as stored at the write.
     account = store.save_gmail_consent(record, local=local, new_connection=True, borrowed=reused)
     if not local:  # a host that manages sign-in keeps the active one on its card
         return {"ok": False, "code": "consent_saved", "account_id": account_id,

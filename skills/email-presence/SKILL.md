@@ -6,7 +6,7 @@ type: extension
 entry: plugin.py
 plugin_api: "2.5"
 runtime: python3
-permissions: [net, read_settings, route, tool, widget, companion_process, presence]
+permissions: [net, read_settings, route, tool, widget, companion_process, presence, notify_owner]
 env_from_settings: [EMAIL_IMAP_HOST, EMAIL_IMAP_PORT, EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_SMTP_USER, EMAIL_SMTP_PASSWORD, EMAIL_DEFAULT_FOLDER, EMAIL_AUTH_MODE, EMAIL_OAUTH_ACCESS_TOKEN, EMAIL_OAUTH_REFRESH_TOKEN, EMAIL_OAUTH_CLIENT_ID, EMAIL_OAUTH_CLIENT_SECRET, EMAIL_IMAP_SECURITY, EMAIL_SMTP_SECURITY, EMAIL_TLS_CA, EMAIL_TLS_FINGERPRINT, GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET]
 dependencies: [httpx, starlette, requests, requests-ntlm, defusedxml]
 sign_in:
@@ -51,7 +51,7 @@ tools:
       - {conversation: to, effect: write, match: exact_casefold}
       - {conversation: cc, effect: write, match: exact_casefold}
       - {conversation: bcc, effect: write, match: exact_casefold}
-    description: Queue a proactive email or threaded reply for durable delivery.
+    description: Queue a proactive email, a threaded reply or an existing Gmail draft for durable delivery.
   - name: email_search
     effect: read
     target: []
@@ -72,7 +72,7 @@ tools:
     touches:
       - {conversation: message_conversation_id, thread: message_thread_id, effect: write}
       - {conversation: draft_conversation_id, thread: message_thread_id, effect: write}
-    description: List/create folders, copy/move messages and update flags.
+    description: List/create folders, copy/move messages, update flags, and send or drop a queued mail that has not gone out.
   - name: email_draft
     effect: write
     target: [account_id,to,cc,bcc]
@@ -229,32 +229,30 @@ remain unchanged and delivery additionally checks their emitted scope.
    offers the saved limit and the host renews the grant once within it. A host announcing `sign_in_handover_version` 2 files it
    only under the identity Google confirms (`require_verified`). Disconnect a Gmail
    account the host serves on the card, and one its own saved sign-in still serves
-   in Email accounts; both keep its history and receipts. A queued mail goes out
-   only through the access it was queued under: the same host or local connection,
-   or the host's handover of this mailbox's own grant. On a host announcing
-   `sign_in_handover_version` 2 that access includes the consent of the host's
-   current row, read for each change and newly queued mail, so a new sign-in on the
-   card serves new work while mail queued before it stays held, and mail queued on
-   this mailbox's own sign-in continues through its transfer only under the consent
-   that transfer's receipt names (an imported grant's only: one already present or
-   kept newer names none); elsewhere an ordinary new sign-in on the card
-   keeps the connection. A new sign-in in Email accounts starts another local
-   connection. Another sign-in, even of the same
-   Google account, never sends it; mail without a record of its access, including
-   mail queued by an earlier version, stays held with its content. So does mail
-   queued where the host named no consent, once it does: a connection alone never
-   proves the consent. A hold is final only on a fact nothing can undo (no record
-   of the access, a Disconnect or another local sign-in, or the host's own current
-   list naming other access for this mailbox, never a field it leaves unnamed);
-   what the local copy of that list merely suggests, behind after a new sign-in
-   until the next pass, stays a temporary hold. A final hold takes the state
-   `held`, which no pass claims; receipts, lists and counts still show it as held,
-   with its content, and its receipt says why. A temporary hold resumes by itself
-   and needs no new send; a final one is never sent automatically, and a mail whose
-   row names no access is final at once, Sending off or not. An uncertain outcome
-   is inspected first, never resent. A send whose access cannot be named at that
-   moment, for
-   example while the host is unreachable, queues nothing and returns an error.
+   in Email accounts; both keep its history and receipts. A change (send, label,
+   draft, settings) is made under the access named when it began: a sign-in of the
+   mailbox that changes in between stops it before anything is sent or changed. A
+   send whose access cannot be named at that moment, for example while the host is
+   unreachable, queues nothing and returns an error.
+   Queued Gmail mail that has not gone out goes, as before 0.11, under whichever
+   confirmed sign-in of its mailbox's own Google account serves it when it leaves:
+   the host's current connection and consent or the mailbox's saved sign-in, whatever
+   it was queued with, mail queued by an earlier version included. The same mailbox
+   is its verified Google subject, never a matching address. While no confirmed
+   sign-in of that account serves it (signed out, or its sign-in to be renewed on the
+   card), it waits unsent, and the owner is told once which mail waits and why; it
+   goes by itself once the mailbox is signed in again. A mail whose sending began and
+   whose outcome is unknown is never sent a second time: its own mailbox is searched
+   for it by Message-ID; found sent, it is recorded sent; otherwise one draft of it
+   (its envelope with Bcc, body, attachments and thread) is kept in that mailbox's
+   Drafts, and the owner is told once to check it and send it. Nothing is drafted in
+   another mailbox. These notices go through the host's `notify_owner` (one System row
+   in Main, mirrored to the owner's Telegram); until the host confirms one (no grant
+   yet, an older host, the host away) it is shown in the mailbox's status and the
+   mail's receipt and posted later. The owner's "send" or "delete" in chat is for the
+   mind to apply: `email_send` with `draft_id` sends such a draft as it is then,
+   `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
+   discard_queued sends now or drops a mail that has not gone out.
    Provider revocation is a separate action and can affect
    other uses of that Google client. An unconfirmed transfer does not fall back to
    its old token: refresh the account view or sign in again on the card.
@@ -275,8 +273,9 @@ and legacy credentials; it is not an encrypted backup. Until a transfer is reser
 the mailbox keeps its saved sign-in within its recorded permissions, including when
 it cannot move automatically. The complete host list must name no sign-in for its
 subject, and no recorded withdrawal may apply. Each change reads that list again.
-A grant that never recorded its permissions keeps reading only; Mail cannot use that
-fact to change or queue mail, or to offer a transfer. Recorded permissions without
+A grant that never recorded its permissions, nor those Google named for its current
+bearer, keeps reading only; Mail cannot use that fact to change or queue mail, or to
+offer a transfer. Recorded permissions without
 Gmail access are refused. For transferred Gmail
 accounts, the host alone refreshes the grant. The transition keeps the original
 credentials dormant in their private fields until a confirmed withdrawal. They
@@ -507,11 +506,24 @@ remain readable by explicit account_id.
   account_id/request_id returns its original receipt; changed sender/content
   conflicts. The same request_id in another explicitly selected account is a
   different operation.
-- Queued is not sent. Results/receipts expose pending, held, completed, failed
-  or uncertain state, actual account/sender and native provider receipt when
-  available. An ambiguous SMTP/API acceptance is never blindly replayed. A hold
-  nothing can lift stays a held receipt with its content and is not asked about
-  every few seconds; a Place's or account's hold is, and lifts when they allow.
+- Queued is not sent. Results/receipts expose pending, held, completed, failed,
+  cancelled or uncertain state, actual account/sender and native provider receipt
+  when available. An ambiguous SMTP/API acceptance is never blindly replayed; for
+  Gmail the receipt also names what was found (`unknown_outcome`: sent, drafted,
+  unresolved or discarded), the draft kept for it (`draft_id`) and the owner's
+  notices. email_receipt also returns, while a mail has not gone out, the mail as
+  queued, so it can be sent from another mailbox with email_send at the owner's
+  word. A Place's or account's hold is asked about again and lifts when they allow.
+- email_send with a Gmail `draft_id` sends that existing draft as it is now: the
+  Host checks its actual To, Cc and Bcc (and its conversation when it replies) and
+  Safety reads its subject and text (and HTML), which `retry_arguments` names first;
+  its attachments are not named in the call. It is queued like any mail and goes out
+  only while the draft is unchanged since that check (users.drafts.send).
+- email_mailbox `discard_queued` with a request_id drops a mail of that account that
+  has not gone out (its receipt stays, so replaying that request_id never queues it
+  again), also while the mailbox is signed out; for a mail of unknown outcome not yet
+  checked it means no draft is made. `send_queued` sends a mail that is still queued
+  or held now, under the mailbox's current confirmed sign-in.
 - New Hosts advertise presence_place_binding_version=1. The tool captures the
   applicable target binding before enqueue; delivery checks that retained binding
   against current scope. A newly unbound send is distinct from a disconnected

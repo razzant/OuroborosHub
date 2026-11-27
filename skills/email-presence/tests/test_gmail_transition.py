@@ -200,7 +200,9 @@ def test_an_unrecorded_return_waits_unreserved_until_the_host_announces_version_
     assert store.get('google:one')['gmail_host']['key'] == KEY
 
 
-def test_mail_queued_before_a_disconnect_is_never_sent_through_the_next_sign_in(tmp_path, monkeypatch):
+def test_mail_queued_before_a_disconnect_goes_out_once_the_same_google_account_signs_in_again(tmp_path, monkeypatch):
+    # Rule A: a mail goes out under whichever confirmed sign-in of its mailbox's own Google account serves it when it
+    # leaves, as before 0.11; while that mailbox is signed out it waits, unsent.
     from lib import service as mail_service
 
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
@@ -247,14 +249,16 @@ def test_mail_queued_before_a_disconnect_is_never_sent_through_the_next_sign_in(
         del host.held[KEY]  # Disconnect on the card
         sync_gmail(accounts)
         assert not accounts.get('google:one')['connected']
+        deliver()
+        third = store.receipt('third')
+        assert third['state'] == 'held' and len(sent) == 2  # signed out: it waits, unsent
         host.held[KEY] = listed('cn-2', via='card')  # the same Google account signs in again
         sync_gmail(accounts)
         queue('fourth')
         deliver()
-    third = store.receipt('third')
-    assert third['state'] == 'held' and 'never sent' in third['last_error']
-    assert [store.receipt(rid)['state'] for rid in ('first', 'second', 'fourth')] == ['completed'] * 3
-    assert len(sent) == 3 and [body.get('connection_id') for body in host.tokens] == ['cn-1', 'cn-1', 'cn-2']
+    assert [store.receipt(rid)['state'] for rid in ('first', 'second', 'third', 'fourth')] == ['completed'] * 4
+    assert len(sent) == 4 and [body.get('connection_id') for body in host.tokens] == ['cn-1', 'cn-1', 'cn-2', 'cn-2']
+    assert store.receipt('third')['delivery_reporting']['gmail_connection'] == {'host': 'cn-2'}  # the access it went under
 
 
 @pytest.mark.parametrize('with_scope', [True, False])
@@ -439,7 +443,7 @@ def test_an_older_host_disconnects_a_moved_mailbox_in_email_accounts(tmp_path, m
 
 
 @pytest.mark.parametrize('via', ['handover', 'card'])
-def test_queued_mail_reaches_the_host_only_through_continuous_access(tmp_path, monkeypatch, via):
+def test_queued_mail_goes_through_whichever_sign_in_of_its_google_account_serves_the_mailbox(tmp_path, monkeypatch, via):
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
     sent = []
 
@@ -455,12 +459,12 @@ def test_queued_mail_reaches_the_host_only_through_continuous_access(tmp_path, m
         accounts = AccountStore(tmp_path, sign_in=GmailSignIn(*HOST, http=wire))
         account = mailbox(accounts, hint='')  # deferred on version 1: its saved sign-in serves it here
         store = EmailStore(accounts.mail_dir(account))
-        store.enqueue_outbox(request_id='unrecorded', to=['reader@example.test'], body='no record of its access')
+        store.enqueue_outbox(request_id='unrecorded', to=['reader@example.test'], body='queued by an earlier version')
         link = GmailClient(accounts, 'google:one', http=mail).connection_link()
         store.enqueue_outbox(request_id='local', to=['reader@example.test'], body='queued on the saved sign-in',
                              reporting={'gmail_connection': link})
-    if via == 'card':
-        newer.held[KEY] = listed('cn-1', via='card')  # the same Google account, signed in anew on the card
+    if via == 'card':  # the same Google account, signed in anew on the card (a host naming consents names one)
+        newer.held[KEY] = {**listed('cn-1', via='card'), 'consent': 'd' * 32}
     with httpx.Client(transport=httpx.MockTransport(newer)) as wire, \
             httpx.Client(transport=httpx.MockTransport(provider)) as mail:
         accounts = AccountStore(tmp_path, sign_in=GmailSignIn(*HOST, http=wire))
@@ -468,9 +472,11 @@ def test_queued_mail_reaches_the_host_only_through_continuous_access(tmp_path, m
         runtime = EmailRuntime(store, GmailClient(accounts, 'google:one', http=mail), SimpleNamespace(), account='google:one')
         while runtime.process_outbox():
             pass
-    assert store.receipt('unrecorded')['state'] == 'held'
-    assert store.receipt('local')['state'] == ('completed' if via == 'handover' else 'held')
-    assert sent == (['Bearer fixture-host-access'] if via == 'handover' else [])
+    consent = IMPORTED if via == 'handover' else 'd' * 32
+    assert [store.receipt(rid)['state'] for rid in ('unrecorded', 'local')] == ['completed'] * 2
+    assert sent == ['Bearer fixture-host-access'] * 2
+    assert [(body['connection_id'], body['consent']) for body in newer.tokens] == [('cn-1', consent)] * 2
+    assert {store.receipt(rid)['delivery_reporting']['gmail_connection']['host'] for rid in ('unrecorded', 'local')} == {'cn-1'}
 
 
 LIMIT = ' '.join([*MAIL_SCOPES, SETTINGS_SCOPE])
@@ -537,7 +543,7 @@ def test_a_local_refresh_and_a_transfer_of_one_sign_in_never_drop_each_others_re
     assert store.get('google:one')['tokens']['access_token'] == 'fixture-later'
 
 
-def test_on_a_host_naming_consent_mail_queued_before_a_new_sign_in_stays_held(tmp_path, monkeypatch):
+def test_on_a_host_naming_consent_mail_queued_before_a_new_sign_in_goes_under_the_new_one(tmp_path, monkeypatch):
     from lib import service as mail_service
 
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
@@ -578,16 +584,22 @@ def test_on_a_host_naming_consent_mail_queued_before_a_new_sign_in_stays_held(tm
         deliver()
         sync_gmail(accounts)
         deliver()
-    before = store.receipt('before')
-    assert before['state'] == 'held' and 'never sent' in before['last_error']
-    assert store.receipt('after')['state'] == 'completed' and sent == ['Bearer fixture-host-access']
-    assert [body.get('consent') for body in host.tokens] == ['c' * 32, 'd' * 32]
+    assert store.receipt('before')['delivery_reporting']['gmail_connection'] == {'host': 'cn-1', 'consent': 'd' * 32}
+    assert [store.receipt(rid)['state'] for rid in ('before', 'after')] == ['completed'] * 2
+    assert sent == ['Bearer fixture-host-access'] * 2 and [body.get('consent') for body in host.tokens] == ['d' * 32] * 2
 
 
-def test_mail_bound_to_a_consent_is_not_sent_where_the_host_names_none(tmp_path):
+def test_mail_queued_under_a_named_consent_goes_out_where_the_host_names_none_now(tmp_path):
+    sent = []
+
+    def provider(request):  # an inert recorder in place of Gmail: nothing is delivered anywhere
+        assert request.method == 'POST' and request.url.path.endswith('/messages/send')
+        sent.append(request.headers['Authorization'])
+        return httpx.Response(200, json={'id': f'{len(sent):x}', 'threadId': 'fixture-thread'})
+
     host = Host()  # version 1: its list names no consent
     host.held[KEY] = listed('cn-1', via='card')
-    with httpx.Client(transport=httpx.MockTransport(host)) as wire, httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500))) as mail:
+    with httpx.Client(transport=httpx.MockTransport(host)) as wire, httpx.Client(transport=httpx.MockTransport(provider)) as mail:
         accounts = AccountStore(tmp_path, sign_in=GmailSignIn(*HOST, http=wire))
         account = mailbox(accounts, gmail_host={**MOVED, 'consent': 'c' * 32})
         sync_gmail(accounts)
@@ -597,19 +609,26 @@ def test_mail_bound_to_a_consent_is_not_sent_where_the_host_names_none(tmp_path)
         runtime = EmailRuntime(store, GmailClient(accounts, 'google:one', http=mail), SimpleNamespace(), account='google:one')
         while runtime.process_outbox():
             pass
-    assert 'does not confirm' in store.receipt('bound')['last_error'] and host.tokens == []
+    assert store.receipt('bound')['state'] == 'completed' and sent == ['Bearer fixture-host-access']
+    assert [(body.get('connection_id'), body.get('consent')) for body in host.tokens] == [('cn-1', None)]
 
 
-def test_a_new_sign_in_on_the_card_ends_the_continuation_of_mail_queued_on_the_saved_sign_in(tmp_path):
+def test_a_new_sign_in_on_the_card_sends_mail_queued_on_the_saved_sign_in(tmp_path):
     host = Host(handover=2)
+    sent = []
 
     def imported(body):  # the moved grant, as a host naming each sign-in's consent lists it
         answer = host.imported(body)
         host.held[KEY] = {**host.held[KEY], 'consent': 'c' * 32}
         return answer
 
+    def provider(request):  # an inert recorder in place of Gmail: nothing is delivered anywhere
+        assert request.method == 'POST' and request.url.path.endswith('/messages/send')
+        sent.append(request.headers['Authorization'])
+        return httpx.Response(200, json={'id': f'{len(sent):x}', 'threadId': 'fixture-thread'})
+
     host.answers = [imported]
-    with httpx.Client(transport=httpx.MockTransport(host)) as wire, httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500))) as mail:
+    with httpx.Client(transport=httpx.MockTransport(host)) as wire, httpx.Client(transport=httpx.MockTransport(provider)) as mail:
         accounts = AccountStore(tmp_path, sign_in=GmailSignIn(*HOST, http=wire))
         account = mailbox(accounts, gmail_connection={'id': 'fixture-local'})
         store = EmailStore(accounts.mail_dir(account))
@@ -622,7 +641,8 @@ def test_a_new_sign_in_on_the_card_ends_the_continuation_of_mail_queued_on_the_s
         runtime = EmailRuntime(store, GmailClient(accounts, 'google:one', http=mail), SimpleNamespace(), account='google:one')
         while runtime.process_outbox():
             pass
-    assert 'never sent' in store.receipt('local')['last_error'] and host.tokens == []
+    assert store.receipt('local')['state'] == 'completed' and sent == ['Bearer fixture-host-access']
+    assert [(body.get('connection_id'), body.get('consent')) for body in host.tokens] == [('cn-1', 'd' * 32)]
 
 
 def test_a_mail_is_not_queued_while_its_google_access_cannot_be_named(tmp_path, monkeypatch):
@@ -713,7 +733,7 @@ def test_a_bearer_without_a_record_of_its_permissions_shows_them_as_unknown(tmp_
     assert result['ok'] and result['scope_status'] == 'unknown' and reads == ['GET']  # ordinary reading still works
 
 
-def test_a_new_local_sign_in_holds_mail_queued_under_the_one_it_replaced(tmp_path, monkeypatch):
+def test_a_new_local_sign_in_sends_mail_queued_under_the_one_it_replaced(tmp_path, monkeypatch):
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
     sent = []
 
@@ -738,19 +758,23 @@ def test_a_new_local_sign_in_holds_mail_queued_under_the_one_it_replaced(tmp_pat
         store = AccountStore(tmp_path)  # an Ouroboros without the sign-in service: Mail's own sign-in serves
         account = mailbox(store)
         outbox = EmailStore(store.mail_dir(account))
+        first = GmailClient(store, 'google:one', http=http).connection_link()
         outbox.enqueue_outbox(request_id='before', to=['reader@example.test'], body='queued under the first sign-in',
-                              reporting={'gmail_connection': GmailClient(store, 'google:one', http=http).connection_link()})
+                              reporting={'gmail_connection': first})
         opened = begin(store, {'GOOGLE_OAUTH_CLIENT_ID': 'fixture-other-client'}, origin='http://127.0.0.1:8765',
                        verify_return=False)
         state = parse_qs(urlsplit(opened['authorization_url']).query)['state'][0]
         assert finish(store, state=state, code='fixture-code', http=http)['ok']  # signed in again, with another client
+        second = GmailClient(store, 'google:one', http=http).connection_link()
+        assert second != first  # the new sign-in has a connection of its own
         outbox.enqueue_outbox(request_id='after', to=['reader@example.test'], body='queued under the new sign-in',
-                              reporting={'gmail_connection': GmailClient(store, 'google:one', http=http).connection_link()})
+                              reporting={'gmail_connection': second})
         runtime = EmailRuntime(outbox, GmailClient(store, 'google:one', http=http), SimpleNamespace(), account='google:one')
         while runtime.process_outbox():
             pass
-    assert 'never sent' in outbox.receipt('before')['last_error']
-    assert outbox.receipt('after')['state'] == 'completed' and sent == ['Bearer fixture-new-access']
+    assert [outbox.receipt(rid)['state'] for rid in ('before', 'after')] == ['completed'] * 2
+    assert sent == ['Bearer fixture-new-access'] * 2  # the same Google account's current sign-in sends both
+    assert outbox.receipt('before')['delivery_reporting']['gmail_connection'] == second
 
 
 def test_a_filed_transfer_whose_answer_was_lost_is_settled_by_its_receipt_without_a_new_offer(tmp_path, monkeypatch):
@@ -852,13 +876,14 @@ def test_an_os_failure_of_the_account_lock_is_raised_never_reported_as_busy():
         _try_lock(Unopened())
 
 
-def test_a_new_consent_without_a_new_refresh_token_holds_earlier_mail_and_keeps_a_later_rotation(tmp_path):
+def test_a_new_consent_without_a_new_refresh_token_keeps_a_later_rotation_and_sends_earlier_mail(tmp_path):
     store = AccountStore(tmp_path)  # no sign-in host: Mail's own sign-in serves this mailbox
     account = mailbox(store)
     earlier = store.gmail_connection('google:one')
     mail = EmailStore(store.mail_dir(account))
     mail.enqueue_outbox(request_id='earlier', to=['reader@example.test'], body='queued before the new consent',
                         reporting={'gmail_connection': {'id': earlier}})
+    sent = []
 
     def google(request):  # an inert Google: the same client's new consent, answered without a refresh token
         path = request.url.path
@@ -871,7 +896,10 @@ def test_a_new_consent_without_a_new_refresh_token_holds_earlier_mail_and_keeps_
             current = store.get('google:one')
             store.save({**current, 'tokens': {**current['tokens'], 'refresh_token': 'fixture-rotated'}})
             return httpx.Response(200, json={'sendAs': []})
-        assert path.endswith('/profile')  # nothing is sent
+        if path.endswith('/messages/send'):  # an inert recorder in place of Gmail: nothing is delivered anywhere
+            sent.append(request.headers['Authorization'])
+            return httpx.Response(200, json={'id': '1', 'threadId': 'fixture-thread'})
+        assert path.endswith('/profile')
         return httpx.Response(200, json={'emailAddress': 'one@example.test'})
 
     opened = begin(store, {'GOOGLE_OAUTH_CLIENT_ID': 'fixture-client'}, origin='http://127.0.0.1:8765',
@@ -884,10 +912,11 @@ def test_a_new_consent_without_a_new_refresh_token_holds_earlier_mail_and_keeps_
             pass
     saved = store.get('google:one')
     assert saved['tokens']['refresh_token'] == 'fixture-rotated'  # never the value read before that renewal
-    assert saved['gmail_connection']['id'] != earlier and mail.receipt('earlier')['state'] == 'held'
+    assert saved['gmail_connection']['id'] != earlier  # the new consent started another connection
+    assert mail.receipt('earlier')['state'] == 'completed' and sent == ['Bearer fixture-new-access']
 
 
-def test_a_transfer_filed_before_version_2_serves_new_mail_and_holds_the_earlier(tmp_path, monkeypatch):
+def test_a_transfer_filed_before_version_2_serves_new_mail_and_the_earlier(tmp_path, monkeypatch):
     monkeypatch.setattr('lib.gmail.BASE', 'https://gmail.example.test/mail')
     sent = []
 
@@ -916,8 +945,8 @@ def test_a_transfer_filed_before_version_2_serves_new_mail_and_holds_the_earlier
             pass
     binding = accounts.get('google:one')['gmail_host']
     assert binding['verified'] and not binding.get('continues_consent') and host.reads == host.handovers == []
-    assert store.receipt('earlier')['state'] == 'held' and store.receipt('new')['state'] == 'completed'
-    assert sent == ['Bearer fixture-host-access']
+    assert [store.receipt(rid)['state'] for rid in ('earlier', 'new')] == ['completed'] * 2
+    assert sent == ['Bearer fixture-host-access'] * 2
 
 
 def test_a_first_offer_that_never_reached_the_host_keeps_the_saved_sign_in_and_is_offered_again(tmp_path, monkeypatch):

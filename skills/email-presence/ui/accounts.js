@@ -206,8 +206,7 @@ function queueView(account) {
     const outgoing = {...(queue.outbox || {})};
     const held = queue.outbox_held || 0;
     if (held) {
-        // `held` counts every held row: the ones still retrying (taken off retry) and the ones held for good (their own state).
-        outgoing.retry = Math.max(0, (outgoing.retry || 0) - (held - (outgoing.held || 0)));
+        outgoing.retry = Math.max(0, (outgoing.retry || 0) - held);
         outgoing.held = held;
     }
     const counts = rows => Object.entries(rows || {}).filter(([, count]) => count > 0)
@@ -218,6 +217,8 @@ function queueView(account) {
     ]);
     if (queue.poll_health?.ok === false) view.append(node('p', {class:'note', text:`Mail intake failed: ${queue.poll_health.error || 'test the connection'}`}));
     if (queue.delivery_reports_pending) view.append(node('p', {class:'note', text:`${queue.delivery_reports_pending} delivery reports waiting for host acknowledgement`}));
+    // What Mail is to tell the owner about mail that did not go out as queued, while the host has not confirmed it.
+    for (const told of queue.owner_notices || []) view.append(node('p', {class:'note', text:`Not yet in your chat: ${told.text}`}));
     const rows = queue.receipts || [];
     if (rows.length) {
         const recent = node('details', {class:'recent-deliveries'}, [node('summary', {text:'Recent deliveries (latest 20)'})]);
@@ -277,7 +278,7 @@ function card(account) {
     if (account.connected && (!managed || account.auth_owner === 'legacy')) controls.append(button('Disconnect locally', async () => {
         await request('accounts/disconnect', {account_id:account.id});
         notice = 'Disconnected locally. Mail history and receipts were retained; Google project grants were not revoked.'
-            + (account.provider === 'gmail' ? ' Mail queued before stays unsent after a new sign-in.' : '');
+            + (account.provider === 'gmail' ? ' Queued mail that has not gone out waits and goes once this mailbox is signed in again.' : '');
         noticeError = false; await refresh();
     }, 'danger'));
     card.append(controls, queueView(account));

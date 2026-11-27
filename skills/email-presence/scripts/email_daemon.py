@@ -18,6 +18,7 @@ from lib.accounts import AccountError, AccountStore, SETTING_KEYS
 from lib.gmail_host import GmailSignIn, sync_gmail
 from lib.service import account_client
 from lib.host_adapter import create_host_adapter
+from lib.owner_notice import OwnerNotifier, tell_owner
 from lib.runtime import EmailRuntime
 from lib.store import EmailStore
 
@@ -29,6 +30,7 @@ def signature(account):
 
 
 _SYNC_SECONDS = 15  # between passes that follow the host's Google sign-ins
+_NOTICE_SECONDS = 15  # between passes that tell the owner about mail that did not go out as queued (owner_notice)
 _BUSY_CODES = (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED: an extended code keeps its primary code in the low byte
 
 
@@ -53,6 +55,7 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
     instances, failed = {}, {}
     legacy = {key: os.environ[key] for key in SETTING_KEYS if key in os.environ}
     google = GmailSignIn.environment()
+    notifier = OwnerNotifier.environment()
 
     async def follow_google():
         while not stop.is_set():
@@ -66,6 +69,20 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
                                                             type(exc).__name__)
             try:
                 await asyncio.wait_for(stop.wait(), _SYNC_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def follow_notices():
+        # Also for mailboxes no worker serves (signed out): their mail waits, and the owner is told so once.
+        while not stop.is_set():
+            try:
+                await asyncio.to_thread(tell_owner, AccountStore(state, legacy, sign_in=google), notifier)
+            except (OSError, ValueError, sqlite3.OperationalError) as exc:
+                if isinstance(exc, sqlite3.OperationalError) and not _registry_busy(exc):
+                    raise  # broken SQL or a damaged store ends the companion like any other defect (notice_job.result())
+                logging.getLogger("email_presence").warning("Owner notices could not be passed on (%s)", type(exc).__name__)
+            try:
+                await asyncio.wait_for(stop.wait(), _NOTICE_SECONDS)
             except asyncio.TimeoutError:
                 pass
 
@@ -98,12 +115,14 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
                         store.close()
 
     google_job = asyncio.create_task(follow_google())
+    notice_job = asyncio.create_task(follow_notices())
     try:
         while not stop.is_set():
-            if google_job.done():
-                # Any other failure ends the companion with its traceback: the host records the exit and restarts it
-                # (restart_policy on_failure), so following the host never stops unseen while mailboxes run on.
-                google_job.result()
+            for job in (google_job, notice_job):
+                if job.done():
+                    # Any other failure ends the companion with its traceback: the host records the exit and restarts it
+                    # (restart_policy on_failure), so following the host never stops unseen while mailboxes run on.
+                    job.result()
             accounts = AccountStore(state, legacy, sign_in=google)
             desired = {row["id"]: row for row in accounts.list() if row["connected"]}
             for account_id, entry in list(instances.items()):
@@ -139,7 +158,7 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
         for entry in instances.values():
             entry["stop"].set()
         stop.set()
-        await asyncio.gather(google_job, *(entry["task"] for entry in instances.values()), return_exceptions=True)
+        await asyncio.gather(google_job, notice_job, *(entry["task"] for entry in instances.values()), return_exceptions=True)
 
 
 async def run():

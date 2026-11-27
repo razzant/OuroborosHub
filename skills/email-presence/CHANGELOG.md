@@ -39,37 +39,54 @@
   Disconnect or Revoke ends the grant it concerns. A later independent sign-in on
   an older host keeps its own connection, including when a receipt for an older
   transfer arrives afterwards. Earlier skill versions do not read withdrawal records.
-- Each queued Gmail mail goes out only through the access it was queued under: the
-  same host or local connection (an ordinary new sign-in keeps it) or the handover
-  of the mailbox's own grant, never another sign-in of the same Google account.
-  Mail without a record of its access, including mail queued by an earlier version,
-  stays held with its content; send it again with a new request_id. A refused
-  bearer is never presented again (a read is repeated once, a change never), and a
-  refresh token Google replaces is kept: a local refresh and a transfer of one
-  sign-in never overlap (one lock per account, kept while its process lives). A
-  transfer carries a bearer only with the permissions Google named for it, so a
+- A refused bearer is never presented again (a read is repeated once, a change never),
+  and a refresh token Google replaces is kept: a local refresh and a transfer of one
+  sign-in never overlap (one lock per account, kept while its process lives), and a
+  renewal stores its bearer only into the connection it started under, so an unrelated
+  edit meanwhile keeps the rotation. A renewal answer naming no permissions is refused.
+  A transfer carries a bearer only with the permissions Google named for it, so a
   narrower one stays narrower; a bearer without that record gets no optional
-  operation until a renewal records it. A new local sign-in starts another
-  connection, and on a host announcing version 2
-  a transfer continues earlier local mail only under the consent its receipt names. On a host announcing `sign_in_handover_version` 2 a
-  transfer asks for a verified identity, and a change or a newly queued mail keeps
-  the consent of the host's current row, so mail queued before a new sign-in there
-  stays held. A send whose access cannot be named at that moment queues nothing.
-- Mail queued where the host named no consent is held once it does: a connection
-  alone never proves the consent it was queued under. A hold on a fact nothing can
-  undo (no record of the access, a Disconnect or another local sign-in, or the host's
-  own current list naming other access for this mailbox, never a field it leaves
-  unnamed) takes the state `held`, which no pass claims; receipts, lists and counts
-  still show it as held, with its content, and its receipt says why. What only the
-  local copy of the host's list suggests, behind after a new sign-in until the next
-  pass, stays a temporary hold, which resumes by itself and needs no new send; a
-  final one is never sent automatically, and a mail whose row names no access is
-  final at once, Sending off or not.
+  operation until a renewal records it. A new local sign-in starts another connection.
+  On a host announcing `sign_in_handover_version` 2 a transfer asks for a verified
+  identity, and a change keeps the consent of the host's current row. A change (send,
+  label, draft, settings) is made under the access named when it began; a sign-in that
+  changes in between stops it before anything is sent or changed. A send whose access
+  cannot be named at that moment queues nothing.
+- Queued Gmail mail that has not gone out goes, as before this version, under
+  whichever confirmed sign-in of its mailbox's own Google account (its verified
+  subject, never a matching address) serves it when it leaves: the host's current
+  connection and consent or the mailbox's saved sign-in, mail queued by an earlier
+  version or before a new sign-in included. While no confirmed sign-in serves the
+  mailbox it waits unsent and the owner is told once which mail waits; it goes by
+  itself once the mailbox is signed in again.
+- A Gmail mail whose sending began and whose outcome is unknown is never sent a second
+  time. Once Gmail search can show it, its own mailbox is searched for it by Message-ID:
+  found sent, it is recorded sent; found as a draft, that draft is kept; otherwise one
+  draft of it (envelope with Bcc, body, attachments, thread, Message-ID) is saved in that
+  mailbox's Drafts. Nothing is drafted in another mailbox. The owner is told once, in one
+  line naming the subject: "The email ... is in Drafts of ...: check it and send it".
+  Gmail may give a sent message a Message-ID of its own, so a search that finds nothing
+  never proves it unsent: that is why the line asks to check it.
+- Those lines go through the host's `notify_owner` permission (`POST /notify`, one System
+  row in the owner's chat, mirrored to Telegram); recipients, Bcc and body stay out of
+  them. Until the host confirms one (no grant yet, an older host without `notify_version`,
+  the host away) it stays pending, is shown in the mailbox's status, the widget and the
+  mail's receipt, and is posted later; a 503 from the host is posted again after a pause.
+- "Send" and "delete" in chat are the mind's: `email_send` with a Gmail `draft_id` sends
+  an existing draft as it is now (the Host checks its actual recipients and Safety reads
+  its subject and text, returned in `retry_arguments`; its attachments are not named in
+  the call; it goes out only while unchanged since that check);
+  `email_mailbox` delete_draft removes it; `email_mailbox` `discard_queued` drops a mail
+  that has not gone out (its receipt stays as `cancelled`, so a replayed request_id never
+  queues it again) and `send_queued` sends one now under the mailbox's current sign-in.
+  `email_receipt` names the unknown outcome found (`unknown_outcome`), the draft kept
+  (`draft_id`), the owner's notices and, while a mail has not gone out, the mail as queued.
 - An unreserved mailbox keeps its local sign-in within recorded Gmail permissions
   even when automatic transfer is not possible. The host's complete list must name
   no sign-in of its subject and no withdrawal may apply. A change reads the list
-  anew; ordinary reads in a search or poll can share its snapshot. A grant with
-  unknown permissions keeps reading only; no change, enqueue or transfer is inferred. The host's own receipt of one exact
+  anew; ordinary reads in a search or poll can share its snapshot. A grant that
+  recorded neither its permissions nor those Google named for its current bearer keeps
+  reading only; no change, enqueue or transfer is inferred. The host's own receipt of one exact
   generation with `refused` and `exchange: none` closes that attempt like the first
   answer's word and gives the saved sign-in back, whatever its reason; it confirms
   no earlier mail, new owner, break or permission, and a recover answer still never
@@ -78,7 +95,7 @@
   that very bearer (`rejected`). A Gmail request, or the request for its bearer to
   the sign-in host, that never connected sent nothing: it is retried a few times,
   then fails, never uncertain; Sending-off and Place holds keep waiting. A lost
-  answer after the request left stays uncertain: inspect it before any new send.
+  answer after the request left stays uncertain and is looked for as above.
 - Full Gmail access is named so before sign-in, with what Mail uses it for (permanent
   deletion that skips Trash, and Gmail settings); no permission changed. The card is
   pointed to by its technical name, email-presence; Email inbox is the catalog's title

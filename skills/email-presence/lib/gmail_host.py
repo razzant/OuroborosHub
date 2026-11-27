@@ -6,8 +6,9 @@ reconciled by reading the host's list and by asking it, with `recover`, for the 
 it kept under the reserved account and generation, never by repeating an exchange. Only
 the host's per-item `exchange` word, not a reason or a status code, lets the old path go on;
 a request its rate limit turned away unread (`handover_started: false`), or one that never
-reached it, changed nothing. A queued mail keeps the connection it was queued under
-(`queued_link`).
+reached it, changed nothing. A change is made under the access named when it began
+(`queued_link`); a queued mail goes out under whichever confirmed sign-in of its mailbox's own
+Google account serves it then (`sending_link`).
 """
 from __future__ import annotations
 
@@ -443,6 +444,15 @@ def host_link(store, account):
     return {'host': row['connection_id'], **({'consent': row['consent']} if strict else {})}
 
 
+def sending_link(store, account):
+    """The access a change, or a queued mail now going out, is made under: on the host's grant its host_link (the row of
+    this mailbox's own verified subject), on this mailbox's own saved sign-in its local connection (`id`). SignInError
+    while neither can be named now (the host unreadable, the sign-in unconfirmed or ended)."""
+    if credential_owner(store, account) == 'host':
+        return host_link(store, account)
+    return {'id': _local_connection(store, account)}
+
+
 def queued_link(store, account, *, for_intake=False):
     """The access a mail queued now keeps: on the host's grant its host_link, on this mailbox's own saved sign-in its
     local connection (`id`). When neither can be named now (the host unreadable, the sign-in unconfirmed) nothing is
@@ -455,11 +465,9 @@ def queued_link(store, account, *, for_intake=False):
     unconfirmed, so nothing begins and the claim is retried."""
     if not for_intake:
         try:
-            if credential_owner(store, account) == 'host':
-                return host_link(store, account)
+            return sending_link(store, account)
         except SignInError as error:
             raise SignInError(f'{error} Nothing was queued; try again.') from None
-        return {'id': _local_connection(store, account)}
     binding, claim, host = account.get('gmail_host'), account.get('gmail_transfer') or {}, store.sign_in
     transitioned = bool(binding or claim)
     mode = (host.mode(require_identity=transitioned) if host is not None else
@@ -491,7 +499,7 @@ def _local_connection(store, account):
         return link['id']
     made = store.gmail_connection(account['id'])
     if store.get(account['id']).get('generation') != account.get('generation'):
-        raise SignInError('This Gmail mailbox changed while its access was being named. Nothing was queued; try again.')
+        raise SignInError('This Gmail mailbox changed while its access was being named.')
     return made
 
 
@@ -602,7 +610,7 @@ def _follow(store, before, held):
                 and claim.get('generation') and not claim.get('refusal')
                 and row.get('legacy_generation') == claim['generation'] and binding.get('filed') != claim['generation']):
             # A version 2 reservation, filed but unanswered, waits for its receipt (_lookup). One made before version 2
-            # has no such receipt: its verified row serves new commands, and its earlier mail stays held.
+            # has no such receipt: its verified row serves the mailbox, its earlier mail included.
             continue
         rejoined = bool(claim.get('withdrawn'))
         if binding.get('state') == 'signed_in' and not old['connected']:
@@ -634,11 +642,12 @@ def _follow(store, before, held):
             _clear_legacy(record)
         # Keep the original oauth/tokens/scopes in their original private fields.
         # The host projection and the bearer have their own live scope.
-        # Mail queued on this mailbox's own local access reaches the host only through the handover of that same grant,
-        # while the host keeps that connection; never through another sign-in of the same Google account.
-        # A renewal hands over the later local sign-in such mail was queued under, so that mail continues too. A host
-        # announcing sign_in_handover_version 2 must prove it is that very grant: the consent its transfer receipt named
+        # A change begun on this mailbox's own local access continues through the host only through the handover of
+        # that same grant, while the host keeps that connection (`continues`; GmailClient._host_credential). A renewal
+        # hands over the later local sign-in such a change began under, so it continues too. A host announcing
+        # sign_in_handover_version 2 must prove it is that very grant: the consent its transfer receipt named
         # (`imported`; a kept newer grant names none) must be the listed one, and each later list must keep it.
+        # Queued mail needs none of this: it goes out under the mailbox's current sign-in (sending_link).
         same = binding.get('connection_id') == row.get('connection_id') and (not strict or (
             bool(binding.get('continues_consent')) and binding.get('continues_consent') == row.get('consent')))
         if broken:
