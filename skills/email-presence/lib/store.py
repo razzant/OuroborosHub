@@ -46,11 +46,10 @@ def _unsettled(state, reporting_json):
     return state in _UNKNOWN and "reconciled" not in json.loads(reporting_json or "{}")
 
 
-def _held_otherwise(error, reporting_json):
+def _held_otherwise(error, hold_kind):
     """Its last try was held by a Place or another check of Mail, which its mailbox's sign-in does not lift. A hold for
     access (the sign-in itself) or for Sending off (read from the mailbox as it is now) is not counted here."""
-    return (str(error).startswith("Held:")
-            and json.loads(reporting_json or "{}").get("hold") not in ("access", "sending_off"))
+    return str(error).startswith("Held:") and hold_kind not in ("access", "sending_off")
 
 
 def _shown_whole(request_id):
@@ -307,7 +306,9 @@ class EmailStore:
                                       ("refused_json", "TEXT NOT NULL DEFAULT '{}'"),
                                       ("reporting_json", "TEXT NOT NULL DEFAULT '{}'"),
                                       ("reports_json", "TEXT NOT NULL DEFAULT '[]'"),
-                                      ("report_due_at", "REAL NOT NULL DEFAULT 0")):
+                                      ("report_due_at", "REAL NOT NULL DEFAULT 0"),
+                                      # What held it last (hold_outbox), kept apart from the accepted row it describes.
+                                      ("hold_kind", "TEXT NOT NULL DEFAULT ''")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {declaration}")
             db.execute("CREATE INDEX IF NOT EXISTS outbox_report_due ON outbox(report_due_at)")
@@ -808,11 +809,11 @@ class EmailStore:
     def hold_outbox(self, item, reason, *, delay=5, kind="policy"):
         """Hold a leased mail unsent; it is asked about again after `delay` seconds. `kind` records what holds it:
         `access` (its mailbox's sign-in cannot serve it now), `sending_off`, or `policy` (a Place or a check of Mail),
-        so a line about its signed-out mailbox says whether the sign-in alone holds it (note_waiting)."""
+        so a line about its signed-out mailbox says whether the sign-in alone holds it (note_waiting). It is kept in its
+        own column: a hold never rewrites the accepted row (its envelope and reporting stay as they were queued)."""
         with self._connect() as db:
             db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,"
-                       "available_at=?,updated_at=?,attempts=MAX(0,attempts-1),"
-                       "reporting_json=json_set(reporting_json,'$.hold',?) WHERE id=? AND lease_token=?",
+                       "available_at=?,updated_at=?,attempts=MAX(0,attempts-1),hold_kind=? WHERE id=? AND lease_token=?",
                        (str(reason), time.time() + delay, time.time(), str(kind), item.row_id, item.lease_token))
 
     def uncertain_outbox(self, row_id, token, error, *, reports=()):
@@ -951,8 +952,8 @@ class EmailStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._settle_lost_sends(db, time.time())
-            rows = db.execute("SELECT request_id,subject,state,last_error,reporting_json FROM outbox WHERE state IN "
-                              "('pending','retry','processing','uncertain','partial')").fetchall()
+            rows = db.execute("SELECT request_id,subject,state,last_error,hold_kind,reporting_json FROM outbox WHERE "
+                              "state IN ('pending','retry','processing','uncertain','partial')").fetchall()
             for row in rows:
                 unknown = row["state"] in _UNKNOWN
                 if unknown and not _unsettled(row["state"], row["reporting_json"]):
@@ -961,7 +962,7 @@ class EmailStore:
                 if self._get(db, key) is not None:
                     continue
                 hold = ("" if unknown else "sending_off" if sending_off else
-                        "held" if _held_otherwise(row["last_error"], row["reporting_json"]) else "")
+                        "held" if _held_otherwise(row["last_error"], row["hold_kind"]) else "")
                 self._note(db, row["request_id"], "waiting", waiting_notice(row["subject"], address, unknown=unknown,
                                                                             hold=hold, request_id=row["request_id"]))
                 kept += 1
