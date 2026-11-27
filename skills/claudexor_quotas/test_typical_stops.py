@@ -558,6 +558,18 @@ def fixture_file(tmp_path_factory):
         "repeat_blocked": _route_views(root / "repeat_blocked", lambda t, now: [
             week("acct-a", 0.20, now + 5 * H, t),
             week("acct-b", 0.40, now + 60 * H, t)], _rate(0.10), disabled=("acct-b",)),
+        # Tight pre-unlock margin: B refills at +2h and unlocks at +4h; A dips to 0.02 usable right before +4h unlock.
+        "tight_unlock": _route_views(root / "tight_unlock", lambda t, now: [
+            week("acct-a", 0.22, now + 100 * H, t, (0.10, now + 5 * H)),
+            week("acct-b", 0.50, now + 2 * H, t, (1.0, now + 4 * H))], _rate(0.05)),
+        # Contrast: disabled B resets at +2h while runnable A dips to 0.02 right before A's own real +5h reset.
+        "tight_reset": _route_views(root / "tight_reset", lambda t, now: [
+            week("acct-a", 0.52, now + 5 * H, t),
+            week("acct-b", 0.50, now + 2 * H, t)], _rate(0.10), disabled=("acct-b",)),
+        # Uncalibrated Combined (scenarios is null): two accounts with short history (<6h common period).
+        "joint_uncal": _route_views(root / "joint_uncal", lambda t, now: [
+            week("acct-a", 0.40, now + 60 * H, t, (0.20, now + 3 * H)),
+            week("acct-b", 0.60, now + 60 * H, t, (0.30, now + 4 * H))], _rate(0.05)),
         "joint": _joint_views(root / "joint"),
     }
     path = root / "views.json"
@@ -578,6 +590,11 @@ const strip = (env) => classes(block(env), 'tl-verdict')[0];
 const head = (env) => classes(strip(env), 'tl-verdict-head')[0];
 const figs = (env) => classes(strip(env), 'tl-vfig').map(text);
 const marks = (env) => walk(block(env)).filter((n) => /deplete-dot/.test(cls(n)));
+const svgResetDots = (env) => {
+  const svg = walk(block(env)).find((n) => /\bchart-svg\b/.test(cls(n)));
+  assert.ok(svg, 'chart svg present');
+  return walk(svg).filter((n) => /\breset-dot\b/.test(cls(n)));
+};
 const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
 (async () => {
   const fx = JSON.parse(require('fs').readFileSync(process.env.STOPS_FIXTURE, 'utf8'));
@@ -687,9 +704,36 @@ const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
   env.disposeHooks[0]();
 
   // Just under the minimum: never "12h valid of 12h needed".
+  // Also: when Typical draws no line but drawChart renders reset markers from No new use,
+  // calmLegend labels "reported reset" iff a marker is actually drawn on the SVG.
   env = await open('insufficient');
   assert.match(text(strip(env)), /11\.9h valid of 12h needed/, text(strip(env)));
   assert.doesNotMatch(text(block(env)), /(?<![\d.])12h valid/, text(strip(env)));
+  const svgResetDots7d = svgResetDots(env);
+  assert.ok(svgResetDots7d.length > 0, '7d insufficient chart draws reset marker');
+  assert.match(text(classes(block(env), 'calm-legend')[0]), /reported reset/, text(classes(block(env), 'calm-legend')[0]));
+  click(env, 'horizon:24h');
+  await settle();
+  const svgResetDots24h = svgResetDots(env);
+  assert.equal(svgResetDots24h.length, 0, '24h insufficient chart has reset outside span');
+  assert.doesNotMatch(text(classes(block(env), 'calm-legend')[0]), /reported reset/, text(classes(block(env), 'calm-legend')[0]));
+  env.disposeHooks[0]();
+
+  // Tight pre-unlock margin (+4h unlock after +2h refill): +4h is never called "reset", while +2h refill stays in figures.
+  env = await open('tight_unlock');
+  assert.match(text(head(env)), /^Weekly almost runs out before the \d\d:\d\d unlock$/, text(head(env)));
+  assert.doesNotMatch(text(head(env)), /\breset\b/i, text(head(env)));
+  assert.match(text(strip(env)), /0\.02 win usable left before \d\d:\d\d unlock \(1\.02 win total\)/, text(strip(env)));
+  assert.doesNotMatch(text(strip(env)), /before reset/i, text(strip(env)));
+  const tuFigs = figs(env);
+  assert.ok(tuFigs.some((x) => /^Before \d\d:\d\d0\.62 win$/.test(x)), tuFigs.join(' | '));
+  assert.ok(tuFigs.some((x) => /^After \d\d:\d\d1\.12 win$/.test(x)), tuFigs.join(' | '));
+  env.disposeHooks[0]();
+
+  // Contrast: real +5h reset on runnable account after disabled account's +2h reset still calls +5h a reset.
+  env = await open('tight_reset');
+  assert.match(text(head(env)), /^Weekly almost runs out before the \d\d:\d\d reset$/, text(head(env)));
+  assert.match(text(strip(env)), /0\.02 win usable left before reset \(1\.02 win total\)/, text(strip(env)));
   env.disposeHooks[0]();
 
   // A little reserve under the cursor, in checkpoint cards, and in the Details table: "<0.01", never 0.00.
@@ -754,15 +798,37 @@ const facts = (env) => text(classes(block(env), 'tl-facts')[0]);
   assert.match(text(classes(block(env), 'chart-legend')[0]), /could not be read/);
   env.disposeHooks[0]();
 
-  // Combined on 24 h names the next known reset although the span ends before it.
+  // Combined on 24 h names the next known reset although the span ends before it;
+  // calibrated Combined preserves the No new use suggestion, and on 7d labels drawn reset markers in calmLegend.
   env = await open('joint');
-  click(env, 'horizon:24h');
-  await settle();
+  assert.match(text(strip(env)), /switch to No new use for refills|48h/, text(strip(env)));
   click(env, 'graph:joint');
+  await settle();
+  assert.match(text(strip(env)), /pick a single limit for Typical, or switch to No new use for refills/, text(strip(env)));
+  const jointDots7d = svgResetDots(env);
+  assert.ok(jointDots7d.length > 0, 'calibrated Combined 7d draws reset marker');
+  assert.match(text(classes(block(env), 'calm-legend')[0]), /reported reset/, text(classes(block(env), 'calm-legend')[0]));
+  click(env, 'horizon:24h');
   await settle();
   const next = classes(block(env), 'tl-next-v')[0];
   assert.ok(next && !cls(next).split(/\s+/).includes('dim'), cls(next));
   assert.notEqual(text(next), 'none reported');
+  assert.doesNotMatch(text(classes(block(env), 'calm-legend')[0]), /reported reset/, text(classes(block(env), 'calm-legend')[0]));
+  env.disposeHooks[0]();
+
+  // Uncalibrated Combined (scenarios === null): names the reason and suggests a single limit window,
+  // never pointing the user to a nonexistent No new use refill forecast.
+  env = await open('joint_uncal');
+  click(env, 'graph:joint');
+  await settle();
+  assert.match(text(head(env)), /No pooled 48h typical forecast for Combined/, text(head(env)));
+  assert.match(text(strip(env)), /2 not calibrated/, text(strip(env)));
+  assert.match(text(strip(env)), /pick a single limit window instead/, text(strip(env)));
+  assert.doesNotMatch(text(strip(env)), /No new use|for refills/i, text(strip(env)));
+  click(env, 'scenario:no_new_use');
+  await settle();
+  assert.match(text(classes(block(env), 'calm-legend')[0]), /no account counted in Combined yet/, text(classes(block(env), 'calm-legend')[0]));
+  assert.doesNotMatch(text(classes(block(env), 'calm-legend')[0]), /no current reading/, text(classes(block(env), 'calm-legend')[0]));
   env.disposeHooks[0]();
 })().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });
 """

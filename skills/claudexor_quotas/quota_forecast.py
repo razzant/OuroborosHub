@@ -194,6 +194,7 @@ def _source_evidence(
     failed: Sequence[float],
     *,
     need_spans: bool = False,
+    capped_before: Optional[float] = None,
 ) -> Tuple[
     List[_Seg],
     List[Tuple[float, float, Optional[float]]],
@@ -246,6 +247,11 @@ def _source_evidence(
         if prev.resets_at is not None and t1 > prev.resets_at + 1e-6:
             continue
         if run.resets_at is not None and t1 > run.resets_at + 1e-6:
+            continue
+        if capped_before is not None and (
+            prev.last_seen <= capped_before + 1e-6
+            or t0 <= capped_before + 1e-6
+        ):
             continue
         if t0 < win_start - 1e-6 or t1 > now + 1e-6:
             continue
@@ -645,6 +651,8 @@ def _account_segments(
     now: float,
     view: "qs.HistoryView",
     failed: Sequence[float],
+    *,
+    capped_before: Optional[float] = None,
 ) -> List[Tuple[float, float, float, bool]]:
     """Deduplicated valid intervals ``(u, v, rate_per_sec, has_capacity)`` for
     one account over ``[win_start, now]``."""
@@ -653,7 +661,8 @@ def _account_segments(
         by_src_runs.setdefault(r.source, []).append(r)
     if len(by_src_runs) == 1:
         only_segs, _obs, _rspans, _rpts = _source_evidence(
-            next(iter(by_src_runs.values())), win_start, now, view, failed
+            next(iter(by_src_runs.values())), win_start, now, view, failed,
+            capped_before=capped_before,
         )
         return [(s.t0, s.t1, s.burn / (s.t1 - s.t0), _seg_has_cap(s)) for s in only_segs]
 
@@ -666,7 +675,8 @@ def _account_segments(
     ]] = {}
     for src in sources:
         segs, obs, rspans, rpts = _source_evidence(
-            by_src_runs[src], win_start, now, view, failed, need_spans=True
+            by_src_runs[src], win_start, now, view, failed,
+            need_spans=True, capped_before=capped_before,
         )
         max_hi: List[float] = []
         hi_so_far = -math.inf
@@ -787,6 +797,15 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
         })
 
     win_start = now - TYPICAL_LOOKBACK_SEC
+    capped = (
+        float(view.capped_before)
+        if isinstance(view.capped_before, (int, float))
+        and not isinstance(view.capped_before, bool)
+        and math.isfinite(view.capped_before)
+        else None
+    )
+    pruned = capped is not None and capped > win_start
+    eff_win_start = max(win_start, capped) if pruned else win_start
     typical_since = qs.typical_history_since(now)
     if view.truncated_at.get(calc.key, -math.inf) >= typical_since:
         return _finish({
@@ -865,7 +884,7 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
         by_sub[sub] = other_src + same_src
 
     if not by_sub:
-        warming = view.collecting_since is None or (now - view.collecting_since) < TYPICAL_LOOKBACK_SEC
+        warming = (not pruned) and (view.collecting_since is None or (now - view.collecting_since) < TYPICAL_LOOKBACK_SEC)
         return _finish({
             "state": "warming_up" if warming else "insufficient", "reason": "few_hours",
             "rate_per_hour": None, "valid_seconds": 0, "valid_hours": 0.0,
@@ -874,17 +893,19 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
         })
 
     # Sweep-line over disjoint valid measurement segments and merged cohort
-    # presence spans inside [win_start, now].
+    # presence spans inside [eff_win_start, now] (respecting storage pruning
+    # ``capped_before`` so pre-cutoff time where older runs could have been
+    # dropped never counts as clean comparable coverage).
     # Event tuple: (at, kind, sub, is_current, rate_sec, has_cap)
     # kind order at equal timestamp: 0=seg_end, 1=pres_end, 2=pres_start, 3=seg_start.
     events: List[Tuple[float, int, str, bool, float, bool]] = []
     for sub, runs in by_sub.items():
         is_cur = sub in current_subs
-        segs = _account_segments(runs, win_start, now, view, failed)
+        segs = _account_segments(runs, eff_win_start, now, view, failed, capped_before=capped)
         cap_end = now if is_cur else max(r.last_seen for r in runs)
         raw_pres: List[Tuple[float, float]] = []
         for r in runs:
-            lo = max(r.first_seen, win_start)
+            lo = max(r.first_seen, eff_win_start)
             hi = min(r.last_seen + 86400.0, cap_end, now)
             if hi > lo + 1e-6:
                 raw_pres.append((lo, hi))
@@ -962,7 +983,7 @@ def estimate_typical_pace(calc: "qs.GroupCalc", state: "qs.SummaryState") -> Dic
                 "observed_burn": round(total_burn, 6),
                 "window_hours": window_hours, "min_valid_hours": min_hours,
             })
-        warming = view.collecting_since is None or (now - view.collecting_since) < TYPICAL_LOOKBACK_SEC
+        warming = (not pruned) and (view.collecting_since is None or (now - view.collecting_since) < TYPICAL_LOOKBACK_SEC)
         return _finish({
             "state": "warming_up" if warming else "insufficient", "reason": "few_hours",
             "rate_per_hour": None, "valid_seconds": round(usable_sec),
@@ -1350,6 +1371,13 @@ def _make_verdict(
         if i not in unk_set and res is not None and res > now and (blk is None or math.isfinite(blk))
     ]
     usable_reset_at = min(usable_resets) if usable_resets else None
+    usable_has_reset = usable_reset_at is not None and any(
+        i not in unk_set
+        and res is not None
+        and abs(res - usable_reset_at) <= SAME_INSTANT_SEC
+        and (blk is None or blk <= res + SAME_INSTANT_SEC)
+        for i, (_rem, res, blk) in enumerate(items)
+    )
 
     before_first: Optional[float] = None
     after_first: Optional[float] = None
@@ -1398,6 +1426,9 @@ def _make_verdict(
     tight_reset_at: Optional[float] = None
     before_tight: Optional[float] = None
     usable_tight: Optional[float] = None
+    tight_unlock_at: Optional[float] = None
+    before_tight_unlock: Optional[float] = None
+    usable_tight_unlock: Optional[float] = None
     if kind == "no_new_use":
         v_state = "no_new_use" if first_reset_at is not None else "no_new_use_no_reset"
     elif status == "held":
@@ -1430,14 +1461,20 @@ def _make_verdict(
         v_state = "tight" if (tight_first or tight_usable) else "lasts"
         if v_state == "tight":
             if not tight_first and usable_reset_at is not None and sim is not None:
-                tight_reset_at = usable_reset_at
-                before_tight = eval_polyline(sim["vertices"], usable_reset_at, right=False)
-                total_at_tight, cand_usable = before_tight, usable_before_usable
-            else:
-                total_at_tight, cand_usable = before_first, usable_before_first
-            if (cand_usable is not None and total_at_tight is not None
-                    and total_at_tight - cand_usable > qs.RATIO_EPS):
-                usable_tight = cand_usable
+                before_usable = eval_polyline(sim["vertices"], usable_reset_at, right=False)
+                if usable_has_reset:
+                    tight_reset_at = usable_reset_at
+                    before_tight = before_usable
+                    if (usable_before_usable is not None and before_usable is not None
+                            and before_usable - usable_before_usable > qs.RATIO_EPS):
+                        usable_tight = usable_before_usable
+                else:
+                    tight_unlock_at = usable_reset_at
+                    before_tight_unlock = before_usable
+                    usable_tight_unlock = usable_before_usable
+            elif (usable_before_first is not None and before_first is not None
+                    and before_first - usable_before_first > qs.RATIO_EPS):
+                usable_tight = usable_before_first
     else:
         v_state = "lasts_no_reset"
 
@@ -1480,6 +1517,11 @@ def _make_verdict(
         out["before_tight_reset"] = _kept(before_tight)
     if usable_tight is not None:
         out["usable_before_reset"] = _kept(usable_tight)
+    if tight_unlock_at is not None:
+        out["tight_unlock_at"] = qs._instant(tight_unlock_at)
+        out["before_tight_unlock"] = _kept(before_tight_unlock)
+        if usable_tight_unlock is not None:
+            out["usable_before_unlock"] = _kept(usable_tight_unlock)
     return out
 
 

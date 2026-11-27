@@ -1341,3 +1341,119 @@ def test_24h_and_7d_agree_with_pre_48h_sighting_under_row_cap(tmp_path, monkeypa
             assert sc["status"] == "unavailable" and sc["reason"] == "history_truncated", sc
             assert sc["verdict"]["state"] == "unavailable" and sc["verdict"]["reason"] == "history_truncated"
             assert sc["rate_per_hour"] is None and sc["line"] == []
+
+
+def test_storage_pruning_capped_before_limits_typical_to_post_cutoff_history(tmp_path, monkeypatch):
+    """Storage pruning (``HistoryView.capped_before`` from MAX_RUNS / MAX_FILE_BYTES)
+    clips Typical to the intact post-cutoff window, rejects transitions crossing the
+    cutoff, preserves the 12h minimum, and stays distinct from temporary read-cap
+    truncation (``truncated_at`` -> ``history_truncated``)."""
+    key_7d = f"codex|primary|{WEEK}|-"
+    reset = NOW + 5 * 86400.0
+    step = 600.0
+    sweeps = [NOW - 24 * H + i * step for i in range(int(24 * H / step) + 1)]
+    rd = qs.Reading(
+        harness="codex", subject_id="a", source="s1", fresh=True, observed_at=NOW,
+        key=key_7d, meaning="primary", label="Weekly", window=WEEK, models=(),
+        ratio=0.20, ratio_problem="", resets_at=reset, plan="plus", plan_key=PLAN,
+    )
+    member = qs.Member(harness="codex", subject_id="a", status="measured", reading=rd, remaining=0.80, pseudo="p-a")
+    calc = qs.GroupCalc(
+        key=key_7d, harness="codex", family="Codex", meaning="primary", label="Weekly",
+        window=WEEK, models=(), members=[member], other_family_accounts=0, possible_duplicates=0,
+    )
+    norm = qs.Normalized(
+        reads={"catalog": "ok", "accounts": "ok", "quota": "ok"}, unified=False,
+        harness_order=["codex"], families={"codex": "Codex"}, accounts={},
+        accounts_known=True, quota_known=True, readings=[], cooldown_ends={},
+        exhaustion_ends={}, unattributed=qs.Counter(), superseded=qs.Counter(), malformed=0,
+    )
+
+    # 1. Surviving 24h plateau on s1 after conflicting s2 runs in the first 13h were pruned
+    #    (capped_before = NOW - 11h): only 11 post-cutoff hours remain (<12h) -> insufficient/few_hours,
+    #    NOT 24h false zero and NOT history_truncated.
+    plat = qs.Run(source="s1", ratio=0.20, resets_at=reset, plan=PLAN,
+                  first_obs=NOW - 24 * H, last_obs=NOW, n_obs=145,
+                  first_seen=NOW - 24 * H, last_seen=NOW)
+    view_11h = qs.HistoryView(
+        state="ok", salt="salt", capped_before=NOW - 11 * H,
+        collecting_since=NOW - 24 * H, sweeps=sweeps,
+        runs={("p-a", key_7d): [plat]},
+    )
+    res_11h = qf.estimate_typical_pace(calc, qs.SummaryState(norm=norm, groups=[calc], view=view_11h, now=NOW))
+    assert res_11h["state"] == "insufficient" and res_11h["reason"] == "few_hours", res_11h
+    assert res_11h["rate_per_hour"] is None and res_11h["valid_hours"] == 11.0, res_11h
+
+    # 2. Control: 13 intact post-cutoff hours (>=12h) still emit measured zero over those 13h only.
+    view_13h = qs.HistoryView(
+        state="ok", salt="salt", capped_before=NOW - 13 * H,
+        collecting_since=NOW - 24 * H, sweeps=sweeps,
+        runs={("p-a", key_7d): [plat]},
+    )
+    res_13h = qf.estimate_typical_pace(calc, qs.SummaryState(norm=norm, groups=[calc], view=view_13h, now=NOW))
+    assert res_13h["state"] == "zero" and res_13h["rate_per_hour"] == 0.0 and res_13h["valid_hours"] == 13.0, res_13h
+
+    # 3. Transition crossing or starting at capped_before is never counted (even within SIGHTING_GAP_SEC);
+    #    strictly post-cutoff burn counts cleanly.
+    step_5m = 300.0
+    post_start = NOW - 12 * H
+    cutoff = post_start - step_5m
+    pre_run = qs.Run(source="s1", ratio=0.10, resets_at=reset, plan=PLAN,
+                     first_obs=cutoff - 2 * H, last_obs=cutoff, n_obs=25,
+                     first_seen=cutoff - 2 * H, last_seen=cutoff)
+    post_runs = [pre_run]
+    post_sweeps = [cutoff - 2 * H + i * step_5m for i in range(int(2 * H / step_5m) + 1)]
+    n_steps = int(12 * H / step_5m)
+    for i in range(n_steps + 1):
+        t = post_start + i * step_5m
+        post_sweeps.append(t)
+        ratio = round(0.50 + 0.24 * (i / n_steps), 6)
+        post_runs.append(qs.Run(source="s1", ratio=ratio, resets_at=reset, plan=PLAN,
+                                first_obs=t, last_obs=t, n_obs=1, first_seen=t, last_seen=t))
+    rd_end = qs.replace(rd, ratio=0.74)
+    m_end = qs.Member(harness="codex", subject_id="a", status="measured", reading=rd_end, remaining=0.26, pseudo="p-a")
+    calc_end = qs.GroupCalc(
+        key=key_7d, harness="codex", family="Codex", meaning="primary", label="Weekly",
+        window=WEEK, models=(), members=[m_end], other_family_accounts=0, possible_duplicates=0,
+    )
+    view_cross = qs.HistoryView(
+        state="ok", salt="salt", capped_before=cutoff,
+        collecting_since=NOW - 48 * H, sweeps=post_sweeps,
+        runs={("p-a", key_7d): post_runs},
+    )
+    res_cross = qf.estimate_typical_pace(calc_end, qs.SummaryState(norm=norm, groups=[calc_end], view=view_cross, now=NOW))
+    # Only the 12h post-cutoff burn (+0.24 over 12h = 0.02/h) counts; the +0.40 jump across cutoff is dropped.
+    assert res_cross["state"] == "ok" and res_cross["valid_hours"] == 12.0, res_cross
+    assert math.isclose(res_cross["observed_burn"], 0.24, abs_tol=1e-4), res_cross
+    assert math.isclose(res_cross["rate_per_hour"], 0.02, abs_tol=1e-4), res_cross
+
+    # 4. Temporary read-cap truncation still reports unavailable/history_truncated.
+    view_trunc = qs.HistoryView(
+        state="ok", salt="salt", capped_before=NOW - 11 * H,
+        truncated=True, truncated_at={key_7d: NOW - 2 * H},
+        collecting_since=NOW - 24 * H, sweeps=sweeps,
+        runs={("p-a", key_7d): [plat]},
+    )
+    res_trunc = qf.estimate_typical_pace(calc, qs.SummaryState(norm=norm, groups=[calc], view=view_trunc, now=NOW))
+    assert res_trunc["state"] == "unavailable" and res_trunc["reason"] == "history_truncated", res_trunc
+
+    # 5. End-to-end SQLite storage pruning via MAX_RUNS: source s1 keeps one 24h plateau run while
+    #    s2 produces conflicting changing runs during the first 13h that get pruned by _drop_oldest.
+    store = quota_history.HistoryStore(tmp_path / "pruned")
+    monkeypatch.setattr(quota_history, "MAX_RUNS", 4)
+    profs = [profile("codex", "a")]
+    for i in range(int(24 * H / step_5m) + 1):
+        t = NOW - 24 * H + i * step_5m
+        snaps = [_snap("a", 0.20, reset, observed_at=t, source="s1")]
+        if t <= NOW - 11 * H:
+            # Distinct ratios per sweep create separate s2 runs that overflow MAX_RUNS and get pruned.
+            snaps.append(_snap("a", round(0.40 + (i % 50) * 0.01, 6), reset, observed_at=t, source="s2"))
+        st = payload(snaps, profs, harnesses=("codex",))
+        plugin.persist_sweep(store, st, "", t)
+    live_status = payload([_snap("a", 0.20, reset, observed_at=NOW, source="s1")], profs, harnesses=("codex",))
+    rv = plugin.reserve_view(store, live_status, NOW, NOW, harness="codex", group=key_7d, horizon="24h", analytics=True)
+    # MAX_RUNS=4 keeps s1's plateau + the 3 newest s2 runs, pruning everything up to NOW - 11h - 15m.
+    assert rv["summary"]["history"]["capped_before"] == qs.iso(NOW - 11 * H - 3 * step_5m)
+    typ = rv["chart"]["analytics"]["window"]["scenarios"]["typical"]
+    assert typ["status"] == "insufficient" and typ["reason"] == "few_hours", typ
+    assert typ["rate_per_hour"] is None and math.isclose(typ["valid_hours"], 11.0 + 5 / 60.0, abs_tol=0.02), typ

@@ -393,14 +393,18 @@ def test_a_spent_scoped_window_keeps_a_longer_model_exhaustion_hold_across_its_o
 
 def test_pre_unlock_margin_excludes_just_unlocked_balance_and_tiny_no_new_use_stays_positive():
     """1. At 0.05 win/h, refilled B unlocks at +4h while runnable A dips to 0.02 just before +4h:
-    the pre-unlock margin is 0.02 (tight), never 1.02 including B's just-unlocked balance.
+    the pre-unlock margin is 0.02 (tight) reported under tight_unlock_at (never tight_reset_at),
+    preserving B's real +2h refill in first_reset_at / before_first_reset / after_first_reset.
     2. Selected-window No new use keeps 0.00004 positive in line and checkpoints while true 0.0 stays 0.0."""
     a, b = _member(0.22, NOW + 100 * H, "a"), _member(0.50, NOW + 2 * H, "b")
     sc = qf.build_typical_scenario([a, b], NOW, NOW + 86400, "24h", RATE, blocked_until=[None, NOW + 4 * H])
     v = sc["verdict"]
     assert v["state"] == "tight" and v["first_reset_at"] == NOW + 2 * H, v
-    assert v["tight_reset_at"] == NOW + 4 * H and math.isclose(v["before_tight_reset"], 1.02, abs_tol=1e-4), v
-    assert math.isclose(v["usable_before_reset"], 0.02, abs_tol=1e-4), v
+    assert math.isclose(v["before_first_reset"], 0.62, abs_tol=1e-4), v
+    assert math.isclose(v["after_first_reset"], 1.12, abs_tol=1e-4), v
+    assert "tight_reset_at" not in v and "usable_before_reset" not in v, v
+    assert v["tight_unlock_at"] == NOW + 4 * H and math.isclose(v["before_tight_unlock"], 1.02, abs_tol=1e-4), v
+    assert math.isclose(v["usable_before_unlock"], 0.02, abs_tol=1e-4), v
 
     # Selected-window No new use: 0.00004 stays positive in line and checkpoints; 0.0 stays 0.0.
     tiny_data = _payload([_snap("a", [_con("primary", 0.99996, WEEK, NOW + 30 * H, "Weekly")])], [_profile("a")])
@@ -426,3 +430,99 @@ def test_pre_unlock_margin_excludes_just_unlocked_balance_and_tiny_no_new_use_st
         assert nnu["line"] and all(val == 0.0 for _t, val in nnu["line"]), nnu["line"]
         assert nnu["checkpoints"] and all(cp["value"] == 0.0 for cp in nnu["checkpoints"]), nnu["checkpoints"]
         assert nnu["verdict"]["current"] == 0.0, nnu["verdict"]
+
+
+@pytest.mark.parametrize("reported_reset", [True, False], ids=["known-end", "unknown-end"])
+def test_offscreen_binding_spent_window_beyond_max_groups_still_holds_selected_request(reported_reset):
+    """When 64 other groups fill MAX_GROUPS, an offscreen exhausted window that binds the
+    selected request (model-scoped, prefix-scoped, or request-kind-specific) still holds
+    the account with its exact reset deadline or endless other_limit_spent reason, without
+    affecting unrelated requests, raising MAX_GROUPS, or widening history reads."""
+    assert qs.MAX_GROUPS == 64
+    reset_at = NOW + 8 * H if reported_reset else None
+    visible = _con("visible_shared", 0.70, FIVE_H, NOW + 60 * H, "Visible 5h")
+    hidden_model = _con("hidden_model", 1.0, WEEK, reset_at, "Hidden model-a", models=["model-a"])
+    hidden_prefix = dict(_con("hidden_prefix", 1.0, WEEK, reset_at, "Hidden gem"),
+                         applies_to_models=[], applies_to_model_prefixes=["gem-"])
+    hidden_text = dict(_con("hidden_text", 1.0, WEEK, reset_at, "Hidden text"),
+                       applies_to_request_kinds=["text"])
+    hidden_image = dict(_con("hidden_image", 1.0, WEEK, NOW + 2 * H, "Hidden image"),
+                        applies_to_request_kinds=["image"])
+    # Put filler groups on account b so per-account constraint caps do not drop account a's windows.
+    fillers = [_con(f"filler_{i:02d}", 0.10, 30000, NOW + 50 * H, f"Filler {i:02d}")
+               for i in range(qs.MAX_GROUPS - 1)]
+
+    # 1. Model-scoped & prefix-scoped offscreen spent windows (norm.spent stays empty for scoped limits).
+    data_scoped = _payload([
+        _snap("a", [visible, hidden_model, hidden_prefix]),
+        _snap("b", fillers),
+    ], [_profile("a"), _profile("b")])
+    state = qs.compute(data_scoped, qs.HistoryView(state="empty"), NOW)
+    assert len(state.groups) == qs.MAX_GROUPS
+    assert not any(g.meaning.startswith("hidden_") for g in state.groups)
+    assert not state.norm.spent  # scoped limits never pollute unscoped norm.spent
+    vis = next(g for g in state.groups if g.meaning == "visible_shared")
+    state.typical_cache[vis.key] = dict(RATE, rate_per_hour=0.10)
+
+    # History reads stay bounded to displayed groups only (never widened for offscreen groups).
+    wanted = {}
+    qa.extend_requests(wanted, state.groups, vis, "salt", NOW, model="model-a", kind="text")
+    assert all("hidden_" not in series for _sub, series in wanted)
+
+    for matching_model in ("model-a", "gem-pro"):
+        built = qa.build(state, vis, "24h", model=matching_model, kind="text")
+        typ = built["window"]["scenarios"]["typical"]
+        v = typ["verdict"]
+        if reported_reset:
+            assert typ["status"] == "ok" and v["state"] == "runs_out", (matching_model, v)
+            assert (v["earlier_empty_at"], v["earlier_resumes_at"]) == (round(NOW), NOW + 8 * H), (matching_model, v)
+            assert v["empty_at"] == NOW + 11 * H and v["blocked_accounts"] == 1, (matching_model, v)
+        else:
+            assert typ["status"] == "held" and typ["held_reason"] == "other_limit_spent", (matching_model, typ)
+            assert v["state"] == "held" and v["held_reason"] == "other_limit_spent", (matching_model, v)
+        # Legacy recent_pace is also held rather than draining an exhausted account.
+        assert built["window"]["scenarios"]["recent_pace"]["at_pace"] == 0
+
+    # Unrelated models and unspecified-model requests remain completely unaffected.
+    for other_model in ("model-b", None):
+        v_free = qa.build(state, vis, "24h", model=other_model, kind="text")["window"]["scenarios"]["typical"]["verdict"]
+        assert v_free["state"] == "runs_out" and v_free["empty_at"] == NOW + 3 * H, (other_model, v_free)
+        assert v_free["earlier_empty_at"] is None and v_free["blocked_accounts"] == 0, (other_model, v_free)
+
+    # 2. Request-kind-specific offscreen spent window: binds text on an all-kinds window, never image.
+    data_kind = _payload([
+        _snap("a", [visible, hidden_text, hidden_image]),
+        _snap("b", fillers),
+    ], [_profile("a"), _profile("b")])
+    state_k = qs.compute(data_kind, qs.HistoryView(state="empty"), NOW)
+    assert len(state_k.groups) == qs.MAX_GROUPS
+    assert not any(g.meaning.startswith("hidden_") for g in state_k.groups)
+    vis_k = next(g for g in state_k.groups if g.meaning == "visible_shared")
+    state_k.typical_cache[vis_k.key] = dict(RATE, rate_per_hour=0.10)
+
+    v_text = qa.build(state_k, vis_k, "24h", model=None, kind="text")["window"]["scenarios"]["typical"]["verdict"]
+    if reported_reset:
+        assert v_text["earlier_empty_at"] == round(NOW) and v_text["earlier_resumes_at"] == NOW + 8 * H, v_text
+        assert v_text["empty_at"] == NOW + 11 * H, v_text
+    else:
+        assert v_text["state"] == "held" and v_text["held_reason"] == "other_limit_spent", v_text
+
+    v_img = qa.build(state_k, vis_k, "24h", model=None, kind="image")["window"]["scenarios"]["typical"]["verdict"]
+    assert v_img["earlier_empty_at"] == round(NOW) and v_img["earlier_resumes_at"] == NOW + 2 * H, v_img
+    assert v_img["empty_at"] == NOW + 5 * H, v_img
+
+    # 3. Combined (joint) view with two visible windows + offscreen spent binding window reports 0.0, not positive.
+    vis2 = _con("visible_day", 0.50, 24000, NOW + 60 * H, "Visible 2")
+    fillers_j = [_con(f"filler_{i:02d}", 0.10, 30000, NOW + 50 * H, f"Filler {i:02d}")
+                 for i in range(qs.MAX_GROUPS - 2)]
+    data_joint = _payload([
+        _snap("a", [visible, vis2, hidden_model]),
+        _snap("b", fillers_j),
+    ], [_profile("a"), _profile("b")])
+    state_j = qs.compute(data_joint, qs.HistoryView(state="empty"), NOW)
+    assert len(state_j.groups) == qs.MAX_GROUPS
+    assert not any(g.meaning == "hidden_model" for g in state_j.groups)
+    vis_j = next(g for g in state_j.groups if g.meaning == "visible_shared")
+    joint = qa.build(state_j, vis_j, "24h", model="model-a", kind="text")["joint"]
+    assert joint["available"] is True and joint["known"] == 1 and joint["figure"] == 0.0, joint
+    assert joint["hours"]["value"] == 0.0, joint["hours"]

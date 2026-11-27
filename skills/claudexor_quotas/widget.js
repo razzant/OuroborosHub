@@ -5598,6 +5598,13 @@
         return jointUnit(joint, 'left');
     }
 
+    function jointUnknownList(joint) {
+        var reasons = (joint && joint.unknown_reasons) || {};
+        return Object.keys(reasons).map(function (why) {
+            return reasons[why] + ' ' + why.replace(/_/g, ' ');
+        }).join(', ');
+    }
+
     // The combined view's figures, once: the figure now and whose it is, the
     // conditional hours, who is left out and why, and what the number is not.
     // On a kept screen (`readAt`, the answer's moment) nobody is counted now:
@@ -5619,10 +5626,8 @@
                 known: hours.known, unknown: hours.unknown })));
         }
         box.appendChild(line);
-        var left = Object.keys(joint.unknown_reasons || {}).map(function (why) {
-            return joint.unknown_reasons[why] + ' ' + why.replace(/_/g, ' ');
-        });
-        if (left.length) box.appendChild(el('div', null, t('joint.left_out_why', { list: left.join(', ') })));
+        var left = jointUnknownList(joint);
+        if (left) box.appendChild(el('div', null, t('joint.left_out_why', { list: left })));
         var cal = joint.calibration || {};
         box.appendChild(el('div', null, t('joint.windows', { list: (joint.windows || []).map(function (w) { return w.label; }).join(' + ') })
             + (cal.calibrated !== undefined ? ' · ' + t('joint.calibrated', { accounts: plural(cal.calibrated, 'account') }) : '')
@@ -5900,7 +5905,17 @@
             jHead.appendChild(stateDot('muted', false));
             jHead.appendChild(el('span', null, t('verdict.joint_head')));
             jMain.appendChild(jHead);
-            jMain.appendChild(el('div', 'tl-verdict-sub', t('verdict.joint_sub')));
+            var hasJointRefills = !!(shown.scenarios && shown.scenarios.no_new_use);
+            var jSub;
+            if (hasJointRefills) {
+                jSub = t('verdict.joint_sub');
+            } else {
+                var jWhy = jointUnknownList(shown.joint_note);
+                jSub = jWhy
+                    ? t('verdict.joint_no_refills_sub', { why: jWhy })
+                    : t('verdict.joint_no_refills_plain_sub');
+            }
+            jMain.appendChild(el('div', 'tl-verdict-sub', jSub));
             jStrip.appendChild(jMain);
             return jStrip;
         }
@@ -5988,14 +6003,23 @@
                     + ' · ' + t(v.unknown_refilled === false ? 'verdict.unknown_unblocks' : 'verdict.unknown_refills');
             }
         } else if (st === 'tight') {
-            // Reserve stays above zero until the reset (or touches it right at the reset): a margin, not a stop.
+            // Reserve stays above zero until the reset or unlock (or touches it right there): a margin, not a stop.
             tone = 'warn';
-            var tightReset = v.tight_reset_at ? shortMoment(v.tight_reset_at, shown.now) : resetShort;
-            var tightLeft = v.before_tight_reset !== undefined && v.before_tight_reset !== null ? v.before_tight_reset : v.before_first_reset;
-            headline = t('verdict.tight_head', { limit: limitName, reset: tightReset });
-            sub = v.usable_before_reset !== undefined && v.usable_before_reset !== null
-                ? t('verdict.tight_usable_sub', { usable: winVal(v.usable_before_reset), left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText })
-                : t('verdict.tight_sub', { left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText });
+            if (v.tight_unlock_at) {
+                var tightUnlock = shortMoment(v.tight_unlock_at, shown.now);
+                var unlockLeft = v.before_tight_unlock !== undefined && v.before_tight_unlock !== null ? v.before_tight_unlock : v.before_first_reset;
+                headline = t('verdict.tight_unlock_head', { limit: limitName, when: tightUnlock });
+                sub = v.usable_before_unlock !== undefined && v.usable_before_unlock !== null
+                    ? t('verdict.tight_unlock_usable_sub', { usable: winVal(v.usable_before_unlock), when: tightUnlock, left: winVal(unlockLeft), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                    : t('verdict.tight_unlock_sub', { when: tightUnlock, left: winVal(unlockLeft), rate: rateWords(v.rate_per_hour), hours: hoursText });
+            } else {
+                var tightReset = v.tight_reset_at ? shortMoment(v.tight_reset_at, shown.now) : resetShort;
+                var tightLeft = v.before_tight_reset !== undefined && v.before_tight_reset !== null ? v.before_tight_reset : v.before_first_reset;
+                headline = t('verdict.tight_head', { limit: limitName, reset: tightReset });
+                sub = v.usable_before_reset !== undefined && v.usable_before_reset !== null
+                    ? t('verdict.tight_usable_sub', { usable: winVal(v.usable_before_reset), left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText })
+                    : t('verdict.tight_sub', { left: winVal(tightLeft), rate: rateWords(v.rate_per_hour), hours: hoursText });
+            }
         } else if (st === 'lasts') {
             tone = 'ok';
             headline = t('verdict.lasts_head', { limit: limitName, reset: resetShort });
@@ -6113,7 +6137,10 @@
             } else {
                 if (v.first_reset_at) {
                     var figTone = scenario === 'no_new_use' || tone === 'muted'
-                        || (st === 'tight' && v.usable_before_reset !== undefined && v.usable_before_reset !== null) ? '' : tone;
+                        || (st === 'tight' && (
+                            (v.usable_before_reset !== undefined && v.usable_before_reset !== null)
+                            || (v.usable_before_unlock !== undefined && v.usable_before_unlock !== null)
+                        )) ? '' : tone;
                     addFig(t('verdict.fig_before', { reset: resetShort }), winVal(v.before_first_reset), figTone);
                 }
                 if (v.empty_at !== null && st !== 'empty_now' && scenario === 'typical') {
@@ -6281,6 +6308,21 @@
         return 'none';
     }
 
+    // Reported reset events actually plotted on the chart (from the active
+    // scenario when drawn, else from No new use so calmLegend and drawChart agree).
+    function drawnResets(chart, sc, fallbackEnd) {
+        var resetSrc = hasFutureLine(sc) ? sc : (!chart.kept && chart.scenarios ? chart.scenarios.no_new_use : null);
+        if (!resetSrc || !(resetSrc.schedule && resetSrc.schedule.length)) return [];
+        var now = chart.now;
+        var resetStart = resetSrc.line && resetSrc.line.length ? Math.min(now, resetSrc.line[0][0]) : now;
+        var resetEnd = typeof chart.end === 'number' && isFinite(chart.end)
+            ? chart.end
+            : (typeof fallbackEnd === 'number' && isFinite(fallbackEnd) ? fallbackEnd : Math.ceil((now || 0) / 3600) * 3600);
+        return resetSrc.schedule.filter(function (r) {
+            return !!(r && typeof r.at === 'number' && isFinite(r.at) && r.at >= resetStart && r.at <= resetEnd);
+        });
+    }
+
     // One short line under the plot: only what is drawn, each in a few words.
     // The long legend, with whose total each line is, stays under Details.
     function calmLegend(chart, sc) {
@@ -6306,12 +6348,14 @@
                 scText = t('chart.legend_typical', { rate: rateWords(sc.rate_per_hour) });
             }
             item(legendSwatch('line-scenario'), scText);
-            if ((sc.schedule || []).length) item(resetSwatch(), t('chart.reported_reset'));
         } else if (!chart.kept && scenario === 'typical' && (chart.mode === 'joint' || (chart.scenarios && chart.scenarios.no_new_use))) {
             item(null, t(TYPICAL_IDLE[typicalIdleWhy(chart)].legend, { name: scenarioName(scenario).toLowerCase() }));
+        } else if (!chart.kept && chart.mode === 'joint' && !(chart.scenarios && chart.scenarios.no_new_use)) {
+            item(null, t('chart.no_future_joint'));
         } else {
             item(null, t('chart.no_future'));
         }
+        if (drawnResets(chart, sc).length) item(resetSwatch(), t('chart.reported_reset'));
         return legend;
     }
 
@@ -7243,11 +7287,8 @@
             svg.appendChild(label);
         });
 
-        var resetSrc = hasFutureLine(sc) ? sc : (!chart.kept && chart.scenarios ? chart.scenarios.no_new_use : null);
-        var resetStart = resetSrc && resetSrc.line && resetSrc.line.length ? Math.min(now, resetSrc.line[0][0]) : now;
         var resetEnd = typeof chart.end === 'number' && isFinite(chart.end) ? chart.end : t1;
-        ((resetSrc && resetSrc.schedule) || []).forEach(function (r) {
-            if (!r || typeof r.at !== 'number' || !isFinite(r.at) || r.at < resetStart || r.at > resetEnd) return;
+        drawnResets(chart, sc, t1).forEach(function (r) {
             svg.appendChild(svgEl('line', { x1: x(r.at), x2: x(r.at), y1: pt, y2: bottom, 'class': 'reset-line', 'clip-path': inField }));
             svg.appendChild(svgEl('circle', { cx: x(r.at).toFixed(1), cy: bottom.toFixed(1), r: 4.5, 'class': 'reset-dot' }));
         });

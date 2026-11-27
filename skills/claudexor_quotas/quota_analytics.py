@@ -331,10 +331,13 @@ def _fact_timeline(acct: _Account, key: str, times: Sequence[float], now: float
     return out
 
 
-def _joint_history(accounts: Sequence[_Account], keys: Sequence[str], start: float, now: float
-                   ) -> Dict[str, Any]:
-    cal = list(accounts)
-    cal = [a for a in cal if all(a.members.get(k) is not None for k in keys)]
+def _joint_history(accounts: Sequence[_Account], keys: Sequence[str], start: float, now: float,
+                   spent_now: Set[Tuple[str, str]]) -> Dict[str, Any]:
+    """``spent_now`` accounts have a proven spent window outside ``keys``: its
+    past was not read, so they have no past value and a measured zero now."""
+    spent = [a for a in accounts if a.subject in spent_now]
+    cal = [a for a in accounts
+           if a.subject not in spent_now and all(a.members.get(k) is not None for k in keys)]
     changes: Set[float] = {start, now}
     for acct in cal:
         for key in keys:
@@ -377,6 +380,8 @@ def _joint_history(accounts: Sequence[_Account], keys: Sequence[str], start: flo
             if value is None:
                 continue
             members.append((acct, facts, value))
+        if at == now:
+            members.extend((acct, [], 0.0) for acct in spent)
         ids = {(a.subject) for a, _f, _v in members}
         carried = [(a, f) for a, fs, _v in members for f in fs if not f["measured"]]
         oldest = min((f["observed"] for _a, f in carried), default=None)
@@ -565,10 +570,36 @@ def _futures(accounts: Sequence[Tuple[_Account, List[qj.Win]]], joint: bool, now
 # The whole view
 
 
-def _hours_now(accounts: Sequence[_Account], keys: Sequence[str]) -> Dict[str, Any]:
+def _reading_applies(reading: "qs.Reading", model: Optional[str], kind: str) -> Optional[bool]:
+    """Whether one resolved reading governs a request ``(model, kind)`` by the
+    engine's own rule (quota_scope.applies); None when its scope cannot be read."""
+    if reading.desc is None:
+        legacy_model_digest = (len(reading.scope) == 10
+                               and all(c in "0123456789abcdef" for c in reading.scope))
+        return False if model is None and legacy_model_digest else None
+    return quota_scope.applies(reading.desc, model, kind)
+
+
+def _offscreen_spent(state: "qs.SummaryState", subject: Tuple[str, str],
+                     exclude_keys: Set[str], model: Optional[str],
+                     kind: str) -> List[Tuple[str, "qs.Reading"]]:
+    """Resolved current spent windows of ``subject`` outside ``exclude_keys``
+    that provably govern ``(model, kind)`` (e.g. trimmed past ``MAX_GROUPS``)."""
+    found = [
+        (limit, reading)
+        for limit, reading in state.norm.spent_windows.get(subject, {}).items()
+        if limit not in exclude_keys and _reading_applies(reading, model, kind) is True
+    ]
+    found.sort(key=lambda pair: pair[0])
+    return found
+
+
+def _hours_now(accounts: Sequence[_Account], keys: Sequence[str],
+               wins_override: Optional[Dict[Tuple[str, str], List[qj.Win]]] = None) -> Dict[str, Any]:
     total, known, unknown = 0.0, 0, 0
     for acct in accounts:
-        hours = qj.work_hours(acct.wins(keys))
+        wins = wins_override[acct.subject] if wins_override and acct.subject in wins_override else acct.wins(keys)
+        hours = qj.work_hours(wins)
         if hours.value is None:
             unknown += 1
         else:
@@ -650,23 +681,33 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
         return out
     unit = keys[0]
     accounts = _accounts(state, keys, by_key, unit, now)
+    keys_set = set(keys)
     reasons = Counter()
     joinable: List[Tuple[_Account, List[qj.Win]]] = []
+    spent_now: Set[Tuple[str, str]] = set()
     for acct in accounts:
-        why = _reason_of(acct, keys)
+        extra_spent = [
+            qj.Win(limit, 0.0, rd.resets_at, None, None, False)
+            for limit, rd in _offscreen_spent(state, acct.subject, keys_set, model, kind)
+        ]
+        w = acct.wins(keys) + extra_spent
+        why = "" if extra_spent else _reason_of(acct, keys)
         if why == "no_history" and state.view is not None and state.view.truncated:
             why = "history_truncated"
-        if unreadable and qj.joint_value(acct.wins(keys)).value != 0:
+        if unreadable and qj.joint_value(w).value != 0:
             why = "scope_unknown"
         if why:
             reasons[why] += 1
         if not why:
-            joinable.append((acct, acct.wins(keys)))
+            joinable.append((acct, w))
+            if extra_spent:
+                spent_now.add(acct.subject)
     calibrated = [a for a in accounts if a.calib is not None]
-    hist = None if light else _joint_history(accounts, keys, start, now)
+    hist = None if light else _joint_history(accounts, keys, start, now, spent_now)
     futures = None if light else _futures(joinable, True, now, end, horizon, 0)
     figure = round(sum(qj.joint_value(w).value for _a, w in joinable), 4) if joinable else None
     periods = [a.calib["common_seconds"] for a in calibrated]
+    joinable_wins = {a.subject: w for a, w in joinable}
     out["joint"] = {
         "available": True, "unit": {"key": unit, "window_seconds": by_key[unit].window,
                                     "label": by_key[unit].label},
@@ -674,7 +715,7 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
                      "scoped": bool(g.scope_info and g.scope_info.scoped)} for g in wins],
         "accounts": len(accounts), "known": len(joinable), "unknown_reasons": dict(sorted(reasons.items())),
         "figure": figure,
-        "hours": _hours_now([a for a, _w in joinable], keys),
+        "hours": _hours_now([a for a, _w in joinable], keys, joinable_wins),
         "history": hist, "scenarios": futures, "table": future_table(futures, now),
         "y_max": float(max(1, len(joinable), hist["max_accounts"] if hist else 0)),
         "calibration": {"lookback_seconds": CAL_LOOKBACK_SEC, "min_common_seconds": MIN_COMMON_SEC,
@@ -762,9 +803,12 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
     # legacy scenarios' count).
     pooled_held: Counter = Counter()
     pooled_unsure: Counter = Counter()
+    offscreen_labels: List[str] = []
     whole_pool = own_unknown or not scope_applies
     for acct in accounts:
         bound = [key for key in keys if key == chart.key or acct.members.get(key) is not None]
+        bound_set = set(bound)
+        offscreen = _offscreen_spent(state, acct.subject, bound_set, model, kind)
         w = acct.wins(bound, recent=True)
         why = ("scope_unknown" if own_unknown
                else "scope_not" if not scope_applies
@@ -773,9 +817,10 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
         blk: Optional[float] = math.inf if whole_pool else None
         if not whole_pool:
             # Respect any other binding window of this account that is already
-            # exhausted now, even when another window or scope is unknown: the
-            # account cannot run until every known spent binding window resets
-            # (or stays held if that spent window reports no reset).
+            # exhausted now — including one trimmed past MAX_GROUPS — even when
+            # another window or scope is unknown: the account cannot run until
+            # every known spent binding window resets (or stays held if that
+            # spent window reports no reset).
             for sibling in w[1:]:
                 if sibling.remaining is not None and sibling.remaining <= qs.RATIO_EPS:
                     if sibling.reset is None:
@@ -783,6 +828,15 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                         break
                     if sibling.reset > now:
                         blk = sibling.reset if blk is None else max(blk, sibling.reset)
+            for _limit, rd in offscreen:
+                if rd.label and rd.label not in offscreen_labels:
+                    offscreen_labels.append(rd.label)
+                if blk is not None and not math.isfinite(blk):
+                    continue
+                if rd.resets_at is None:
+                    blk = math.inf
+                elif rd.resets_at > now:
+                    blk = rd.resets_at if blk is None else max(blk, rd.resets_at)
         if why:
             # The account's future cannot be judged against that window: it
             # is held at its own share of this window (no pace, nothing
@@ -792,6 +846,10 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
             own = w[0]
             w = [qj.Win(own.key, own.remaining, own.reset, None, own.k, own.unit)]
             holds[why] += 1
+        elif offscreen:
+            # Hold legacy pace simulation against offscreen spent binding
+            # windows too, without widening history reads for them.
+            w.extend(qj.Win(limit, 0.0, rd.resets_at, None, None, False) for limit, rd in offscreen)
         own_member = acct.members.get(chart.key)
         if own_member is not None and own_member.status == "measured":
             # The account's own known state (disabled, signed out, cooling
@@ -843,6 +901,9 @@ def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence
                 lbl = groups[k].label
                 if lbl and lbl not in other_labels:
                     other_labels.append(lbl)
+        for lbl in offscreen_labels:
+            if lbl not in other_labels:
+                other_labels.append(lbl)
         typical_info = qf.estimate_typical_pace(chart, state)
         futures["typical"] = qf.build_typical_scenario(
             pooled_members, now, end, horizon, typical_info,

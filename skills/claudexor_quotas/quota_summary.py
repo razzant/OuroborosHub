@@ -552,6 +552,10 @@ class Normalized:
     cached: Dict[str, float] = field(default_factory=dict)
     # account -> resolved shared limits that are spent, including groups not shown.
     spent: Dict[Tuple[str, str], Dict[str, Reading]] = field(default_factory=dict)
+    # account -> every resolved current limit that is spent (shared, model-scoped,
+    # prefix-scoped, or kind-restricted), recorded before MAX_GROUPS display trimming
+    # so request-scoped analytics never lose an offscreen binding exhausted window.
+    spent_windows: Dict[Tuple[str, str], Dict[str, Reading]] = field(default_factory=dict)
     # Every cooldown and live model exhaustion above as reported, per account:
     # (``cooldown`` | ``exhaustion``, hold scope, its scope as sent, its own end;
     # None: no end reported or readable). An account is held until the last one
@@ -1441,14 +1445,18 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
     # unknown timing, not the absence of a restriction. A reading of an ended
     # cycle (reset passed), a stale or an unreadable one blocks nothing.
     spent: Dict[Tuple[str, str], Dict[str, Reading]] = {}
+    spent_windows: Dict[Tuple[str, str], Dict[str, Reading]] = {}
     for key, members in resolved.items():
         for member in members:
             reading = member.reading
-            if member.status == "measured" and reading is not None and not _scoped(reading) \
-                    and member.remaining <= RATIO_EPS and (reading.desc is None or any(
+            if member.status == "measured" and reading is not None and member.remaining <= RATIO_EPS:
+                subject = (member.harness, member.subject_id)
+                spent_windows.setdefault(subject, {})[key] = reading
+                if not _scoped(reading) and (reading.desc is None or any(
                         quota_scope.account_wide(reading.desc, kind) for kind in quota_scope.REQUEST_KINDS)):
-                spent.setdefault((member.harness, member.subject_id), {})[key] = reading
+                    spent.setdefault(subject, {})[key] = reading
     norm.spent = spent
+    norm.spent_windows = spent_windows
     groups: List[GroupCalc] = []
     for key, subjects in by_key.items():
         # Every reading of one key has one applicability (quota_scope.key_token);

@@ -212,3 +212,37 @@ def test_combined_later_counts_distinct_accounts_not_windows():
         0, True, NOW, end_24h, "24h",
     )
     assert sc_stag["later"] == {"at": round(r30), "accounts": 1, "more_events": 1, "more_accounts": 1}, sc_stag["later"]
+
+
+def test_a_spent_window_trimmed_from_view_ends_history_at_zero_like_a_visible_one(tmp_path):
+    store = quota_history.HistoryStore(tmp_path)
+    profiles = [profile("claude", s) for s in "abc"]
+    for t in range(int(START), int(NOW) + 1, int(STEP)):
+        hours = (t - START) / H
+        a, c = (account_snap(s, t, 0.05 * hours, 0.82 + 0.01 * hours, short_reset=NOW + H) for s in "ac")
+        plugin.persist_sweep(store, payload([a, c], profiles, harnesses=("claude",)), "", t)
+    hold = constraint("hidden-model", 1.0, 2 * WEEK, reset=8 * H, models=["model-a"])
+    held = dict(a, constraints=[*a["constraints"], hold])
+    filler = [constraint(f"filler-{i:02}", 0.1, 30000, models=["model-b"]) for i in range(qs.MAX_GROUPS - 2)]
+    trimmed = snap("claude", "b", filler, observed_abs=NOW)
+
+    def view(rows):
+        data = payload(rows, profiles, harnesses=("claude",))
+        result = plugin.reserve_view(store, data, NOW, NOW, harness="claude", analytics=True, model="model-a")
+        shown = any(g["label"] == "hidden-model" for g in result["summary"]["groups"])
+        return shown, result["chart"]["analytics"]["joint"]
+
+    for rows, visible in (([held], True), ([held, trimmed], False)):
+        shown, joint = view(rows)
+        line = joint["history"]["line"]
+        assert shown is visible and joint["figure"] == 0
+        assert line[-1] == joint["scenarios"]["no_new_use"]["line"][0] == [NOW, 0]
+        assert all(v is None for t, v in line if t < NOW)
+    # An unaffected account keeps its past; the trimmed zero joins it only now.
+    shown, joint = view([held, trimmed, c])
+    history = joint["history"]
+    assert not shown and joint["figure"] == pytest.approx(0.5, abs=1e-3)
+    assert history["line"][-1] == joint["scenarios"]["no_new_use"]["line"][0] == [NOW, joint["figure"]]
+    assert history["line"][-2] == [NOW, None]  # entering is a break, not a step
+    assert {d["accounts"] for d in history["details"] if d["at"] < NOW} == {0, 1}
+    assert history["details"][-1]["accounts"] == history["details"][-1]["measured"] == 2
