@@ -257,9 +257,10 @@ remain unchanged and delivery additionally checks their emitted scope.
    a Place or this skill's access keeps Mail from writing there, the mail waits and
    the owner is told so once. Nothing is drafted in
    another mailbox. These notices go through the host's `notify_owner` (one System row
-   in Main, mirrored to the owner's Telegram) and name the mail by its subject and its
-   `request_id` (left out only when it cannot be shown whole on one line); until the
-   host confirms one (no grant yet, an older host, the host away) it is shown in the
+   in Main, mirrored to the owner's Telegram) and name the mail by its subject and a
+   short reference Mail gave it in its mailbox (`ref`, like `m-3fa91c07`), never by
+   the caller's request_id, which may carry an address and may read like another's;
+   until the host confirms one (no grant yet, an older host, the host away) it is shown in the
    mailbox's status and the mail's receipt and posted later, only while it is still
    true: a waiting line ends unposted once its mail went, was deleted or settled, or
    its mailbox is signed in again, and each line is read again, with its mailbox's
@@ -267,7 +268,9 @@ remain unchanged and delivery additionally checks their emitted scope.
    mind to apply: `email_send` with `draft_id` sends such a draft as it is then,
    `email_mailbox` delete_draft removes it, and `email_mailbox` send_queued or
    discard_queued sends now or drops a mail that has not gone out; `email_accounts`
-   lists every mail that waits (`waiting`) by request_id and subject.
+   lists every mail that waits (`waiting`) by request_id, ref and subject. Those tools
+   and `email_receipt` take the ref in `request_id` as they take the request_id
+   itself; a new request_id that is another mail's ref in that mailbox is refused.
    Provider revocation is a separate action and can affect
    other uses of that Google client. An unconfirmed transfer does not fall back to
    its old token: refresh the account view or sign in again on the card.
@@ -542,10 +545,10 @@ remain readable by explicit account_id.
   none); a draft gone or changed since that check is refused. Mail keeps the
   draft's source and files as they were queued, with the mailbox's other staged mail:
   its receipt gives them, and rule A puts the draft back from them.
-- email_mailbox `discard_queued` with a request_id drops, in one write, a mail of
-  that account that has not begun to go out (also one a stopped worker had taken),
-  also while the mailbox is signed out; its receipt stays with the mail, so replaying
-  that request_id never queues it again. To send a waiting mail from another mailbox,
+- email_mailbox `discard_queued` with a request_id (or the mail's ref) drops, in one
+  write, a mail of that account that has not begun to go out (also one a stopped
+  worker had taken), also while the mailbox is signed out; its receipt stays with the
+  mail, so replaying that request_id never queues it again. To send a waiting mail from another mailbox,
   drop it here first and then, only when that answers that it will not go out from
   this mailbox, send the mail its result returns from the other mailbox: it can then
   never go out from both. The answer is what the deleting write itself found, never an

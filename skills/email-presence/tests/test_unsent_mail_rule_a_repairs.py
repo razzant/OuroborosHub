@@ -516,8 +516,8 @@ def test_a_letter_with_only_blind_recipients_moves_with_them_kept_blind(mail, mo
 
 
 def test_each_line_names_its_mail_and_email_accounts_lists_the_mail_that_waits(mail):
-    """A line names its mail by request_id, which "send" and "delete" take; email_accounts lists every mail that waits,
-    however many receipts came since. Recipients and body stay out of both."""
+    """A line names its mail by the ref Mail gave it, which "send" and "delete" take; email_accounts lists every mail that
+    waits, however many receipts came since. Recipients and body stay out of both."""
     queue(mail.store, 'older-invoice', subject='My older invoice')
     for index in range(20):
         queue(mail.store, f'other-{index}', subject=f'Item {index}')
@@ -525,21 +525,87 @@ def test_each_line_names_its_mail_and_email_accounts_lists_the_mail_that_waits(m
     host = Notify()
     assert told(mail.accounts, host) == 21
     line, = [text for text in host.posted if 'My older invoice' in text]
-    assert '(request_id older-invoice)' in line and 'reader@' not in line and 'private body' not in line
+    ref = mail.store.receipt('older-invoice')['ref']
+    assert f'(ref {ref})' in line and 'reader@' not in line and 'private body' not in line
     queued = mail.service.list_accounts()['accounts'][0]['queue']
     assert 'older-invoice' not in [row['request_id'] for row in queued['receipts']]  # beyond the latest twenty
-    assert {'request_id': 'older-invoice', 'subject': 'My older invoice', 'state': 'pending'} in queued['waiting']
+    assert {'request_id': 'older-invoice', 'ref': ref, 'subject': 'My older invoice', 'state': 'pending'} in queued['waiting']
     assert len(queued['waiting']) == 21 and 'reader@' not in str(queued['waiting'])
     dropped = mail.service.mailbox(account_id='google:one', action='discard_queued', request_id='older-invoice')
     assert dropped['ok'] and 'older-invoice' not in [row['request_id'] for row in
                                                      mail.service.list_accounts()['accounts'][0]['queue']['waiting']]
 
 
-def test_a_request_id_that_cannot_be_shown_whole_stays_out_of_the_line():
-    assert '(request_id ' not in drafted_notice('Notes', ADDRESS, request_id='two words')
-    assert '(request_id ' not in drafted_notice('Notes', ADDRESS, request_id='r' * 390)
-    shortened = waiting_notice('Q' * 900, ADDRESS, request_id='r' * 100)
-    assert len(shortened) <= 400 and '(request_id ' + 'r' * 100 + ')' in shortened and '…' in shortened
+def test_two_mails_of_one_subject_are_told_apart_and_reached_by_their_refs(mail):
+    """Two reminders share a subject and their senders' request_ids could not be shown on a line (they hold spaces):
+    each line names its mail by its own ref, `waiting` lists it, and email_receipt, discard_queued and send_queued take
+    that ref for exactly that mail, while the request_ids keep working (Hub #382 second review, P6)."""
+    for request_id in ('reminder first', 'reminder second'):
+        sent = mail.service.send(account_id='google:one', request_id=request_id, to='reader@example.test',
+                                 subject='Reminder', body='Fictional body for ' + request_id)
+        assert sent['ok'] and sent['request_id'] == request_id
+    saved = mail.accounts.get('google:one')
+    mail.accounts.disconnect('google:one')
+    host = Notify()
+    assert told(mail.accounts, host) == 2 and host.posted[0] != host.posted[1]
+    first, second = (mail.store.receipt(rid)['ref'] for rid in ('reminder first', 'reminder second'))
+    assert first != second and all(ref.startswith('m-') for ref in (first, second))
+    assert [sum(f'(ref {ref})' in line for line in host.posted) for ref in (first, second)] == [1, 1]
+    waiting = mail.service.list_accounts()['accounts'][0]['queue']['waiting']
+    assert {(row['request_id'], row['ref']) for row in waiting} == {('reminder first', first), ('reminder second', second)}
+    assert mail.service.receipt(first, account_id='google:one')['request_id'] == 'reminder first'
+    dropped = mail.service.mailbox(account_id='google:one', action='discard_queued', request_id=first)
+    assert dropped['ok'] and dropped['request_id'] == 'reminder first' and dropped['receipt']['state'] == 'cancelled'
+    assert mail.store.receipt('reminder second')['state'] == 'pending'
+    sign_in_again(mail, saved)
+    released = mail.service.mailbox(account_id='google:one', action='send_queued', request_id=second)
+    assert released['ok'] and released['request_id'] == 'reminder second'
+    assert mail.service.receipt('reminder second', account_id='google:one')['ref'] == second  # the request_id still works
+
+
+def test_a_line_never_shows_an_address_a_callers_request_id_carries(mail):
+    """An integration keys its reminders by month and customer, Bcc address included: the line names the mail by its
+    ref, so that address never reaches Main or Telegram (Hub #382 second review, P6)."""
+    blind = 'renewals@example.test'
+    assert mail.service.send(account_id='google:one', request_id=f'renewal-2026-11-{blind}', bcc=[blind],
+                             subject='Renewal', body='November reminder')['ok']
+    mail.accounts.disconnect('google:one')
+    host = Notify()
+    assert told(mail.accounts, host) == 1
+    line, = host.posted
+    assert blind not in line and 'renewal-2026-11' not in line
+    assert f"(ref {mail.store.receipt(f'renewal-2026-11-{blind}')['ref']})" in line
+
+
+def test_a_ref_names_one_mail_of_one_mailbox(mail, monkeypatch):
+    """A ref is never also another mail's request_id in its mailbox, so it names one mail there; another mailbox does
+    not know it. A mail queued before refs existed gets one when a line first names it."""
+    queue(mail.store, 'invoice')
+    ref = mail.store.receipt('invoice')['ref']
+    reused = mail.service.send(account_id='google:one', request_id=ref, to='reader@example.test', subject='Other',
+                               body='Other words')
+    assert reused['code'] == 'request_id_conflict' and mail.store.queued_message(ref) is None
+    with httpx.Client(transport=httpx.MockTransport(Gmail())) as second_http:
+        second_mailbox(mail, monkeypatch, second_http)
+        assert mail.service.send(account_id='google:two', request_id='elsewhere', to='reader@example.test',
+                                 subject='Elsewhere', body='Words')['ok']
+        unknown = mail.service.mailbox(account_id='google:two', action='discard_queued', request_id=ref)
+        assert unknown['code'] == 'not_found'
+    queue(mail.store, 'older')
+    with mail.store._connect() as db:  # as an earlier version queued it
+        db.execute("UPDATE outbox SET ref='' WHERE request_id='older'")
+    mail.accounts.disconnect('google:one')
+    host = Notify()
+    assert told(mail.accounts, host) == 2
+    older = mail.store.receipt('older')['ref']
+    assert older.startswith('m-') and older != ref and len([line for line in host.posted if f'(ref {older})' in line]) == 1
+
+
+def test_a_ref_that_cannot_be_shown_whole_stays_out_of_the_line():
+    assert '(ref ' not in drafted_notice('Notes', ADDRESS, ref='two words')
+    assert '(ref ' not in drafted_notice('Notes', ADDRESS, ref='r' * 390)
+    shortened = waiting_notice('Q' * 900, ADDRESS, ref='r' * 100)
+    assert len(shortened) <= 400 and '(ref ' + 'r' * 100 + ')' in shortened and '…' in shortened
 
 
 def test_a_send_a_stopped_worker_left_is_of_unknown_outcome_while_its_mailbox_is_signed_out(mail):
@@ -595,7 +661,7 @@ def test_a_drafts_place_that_holds_writes_keeps_the_mail_waiting_and_tells_the_o
         assert 'unknown_outcome' not in mail.store.receipt('lost') and mail.gmail.posts('/drafts') == []
         line, = notices(mail.store)
         assert line['kind'] == 'held' and 'may already have gone out' in line['text'] and 'paused' not in line['text']
-        assert '(request_id lost)' in line['text']
+        assert f"(ref {mail.store.receipt('lost')['ref']})" in line['text']
         due_now(mail.store)
     policy['hold'] = ''  # the owner lets Mail write Drafts again
     assert mail.runtime.process_uncertain()

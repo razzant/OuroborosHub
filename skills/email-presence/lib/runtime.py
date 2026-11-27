@@ -617,8 +617,7 @@ class EmailRuntime:
                 if hold:
                     # A Place (or this skill's access) keeps Mail from writing these Drafts: it waits, and the owner, told
                     # once, decides (allow writing there, or delete it).
-                    self.store.defer_uncertain(item, hold, notice=draft_held_notice(item.subject, address,
-                                                                                    item.request_id))
+                    self.store.defer_uncertain(item, hold, notice=draft_held_notice(item.subject, address, item.ref))
                     return True
                 if hold is None:
                     self.store.defer_uncertain(item, "The policy of Drafts could not be read now")
@@ -631,10 +630,10 @@ class EmailRuntime:
                     if isinstance(exc, AccountError) or (isinstance(exc, GmailError) and exc.status not in (400, 404)):
                         raise
                     self.store.settle_uncertain(item, "unresolved", error=type(exc).__name__,
-                                                notice=unresolved_notice(item.subject, address, item.request_id))
+                                                notice=unresolved_notice(item.subject, address, item.ref))
                     return True
             self.store.settle_uncertain(item, "drafted", draft=details,
-                                        notice=drafted_notice(item.subject, address, item.request_id))
+                                        notice=drafted_notice(item.subject, address, item.ref))
         except (AccountError, GmailError, httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             self.store.defer_uncertain(item, getattr(exc, "mail_diagnostic", None) or type(exc).__name__)
         return True

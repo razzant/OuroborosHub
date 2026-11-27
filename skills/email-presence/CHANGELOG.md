@@ -75,8 +75,9 @@
   its thread), allow writing there, asked as email_draft asks; while a Place or this
   skill's access holds them, the mail waits and the owner is told once.
   Nothing is drafted in another mailbox. The owner is told once, in one line naming the
-  subject and the mail's request_id: "The email ... (request_id ...) is in Drafts of ...:
-  check it and send it". Gmail may give a sent message a Message-ID of its own, so a
+  subject and a short reference Mail gave the mail in its mailbox (never the caller's
+  request_id, which may carry an address and may read like another's): "The email ...
+  (ref m-...) is in Drafts of ...: check it and send it". Gmail may give a sent message a Message-ID of its own, so a
   search that finds nothing never proves it unsent: that is why the line asks to check it.
 - Those lines go through the host's `notify_owner` permission (`POST /notify`, one System
   row in the owner's chat, mirrored to Telegram); recipients, Bcc and body stay out of
@@ -105,7 +106,9 @@
   (`draft_id`), the owner's notices and, while a mail has not gone out or once it was
   dropped, the mail as queued: To, Cc and Bcc apart (a mail may have only Cc or Bcc
   recipients), HTML and files, those of a draft sent by its id included. `email_accounts`
-  lists every mail that waits (`waiting`) by request_id and subject. A draft sent by its
+  lists every mail that waits (`waiting`) by request_id, ref and subject; those tools and
+  `email_receipt` take the ref in `request_id` as they take the request_id itself, and a
+  new request_id that is another mail's ref in its mailbox is refused. A draft sent by its
   id is read again before its sending begins, under the sign-in it is then sent with, so a
   read that fails leaves it queued and a renewed bearer serves both; a read Gmail does not
   answer, or answers busy or failing (429, 5xx), waits without spending an attempt, asked

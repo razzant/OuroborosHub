@@ -696,11 +696,11 @@ class MailService:
 
     def queued(self, *, account_id="", action="", request_id="", **unused):
         """email_mailbox discard_queued / send_queued: the owner's "delete" or "send" for one mail of this mailbox that has
-        not gone out, chosen by its request_id (the owner's line and email_accounts' `waiting` name it). Both work while
-        the mailbox is signed out of Mail: "delete" takes it off this mailbox's queue, in one write and only while it has
-        not begun to go out, and returns the mail, which can then be sent from another mailbox; "send" needs this mailbox
-        signed in again. A mail whose sending began and whose outcome is unknown is never offered for sending anywhere:
-        it may already have gone out."""
+        not gone out, chosen by its request_id or by the ref Mail gave it (the owner's line and email_accounts' `waiting`
+        name it by that). Both work while the mailbox is signed out of Mail: "delete" takes it off this mailbox's queue,
+        in one write and only while it has not begun to go out, and returns the mail, which can then be sent from another
+        mailbox; "send" needs this mailbox signed in again. A mail whose sending began and whose outcome is unknown is
+        never offered for sending anywhere: it may already have gone out."""
         if not account_id or not request_id:
             raise ValueError(f"{action} takes the mail's account_id and request_id")
         if any(value not in (None, "", [], {}, False) for value in unused.values()):
@@ -713,6 +713,8 @@ class MailService:
                     "error": "No mail with this request_id in this account"}
         store = EmailStore(directory)
         try:
+            # Its request_id, or the ref a line to the owner (and `waiting`) names it by: the mail's own request_id below.
+            request_id = store.request_id_of(request_id) or request_id
             receipt = store.receipt(request_id)
             if receipt is None:
                 return {"ok": False, "code": "not_found", "account_id": account["id"], "request_id": request_id,
@@ -872,7 +874,11 @@ class MailService:
         directory = self.accounts.mail_dir(account)
         if not (directory / "email_presence.sqlite3").exists():
             return None
-        result = EmailStore(directory).receipt(request_id, with_letter=True)
+        store = EmailStore(directory)
+        try:  # its request_id, or the ref a line to the owner (and `waiting`) names it by
+            result = store.receipt(store.request_id_of(request_id) or request_id, with_letter=True)
+        finally:
+            store.close()
         if result:
             result["account_id"] = account["id"]
         return result
@@ -954,16 +960,16 @@ def register_tools(api, service):
          {**message, "remove_labels": array, "folder_names": array, "message_conversation_id": message_conversation,
           "message_thread_id": message_thread, "label_names": array})
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id (the owner's line and email_accounts' waiting name it): discard_queued drops it (also while the mailbox is signed out) and returns the mail, send_queued sends it now under the mailbox's current sign-in. To send it from another mailbox, discard_queued it here first and, only when it answers that the mail will not go out from here, email_send the returned mail there; one that may already have gone out is never sent again.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write. For one queued mail of this account that has not gone out, chosen by its request_id or by the ref the owner's line and email_accounts' waiting name it by: discard_queued drops it (also while the mailbox is signed out) and returns the mail, send_queued sends it now under the mailbox's current sign-in. To send it from another mailbox, discard_queued it here first and, only when it answers that the mail will not go out from here, email_send the returned mail there; one that may already have gone out is never sent again.",
          {**message, "action": string, "destination": string, "folder_names": array, "flags": array, "remove_flags": {"type": "boolean"},
-          "request_id": {"type": "string", "description": "discard_queued and send_queued only: the queued mail's request_id."},
+          "request_id": {"type": "string", "description": "discard_queued and send_queued only: the queued mail's request_id, or the ref (m-...) a line to the owner names it by."},
           "add_labels": array, "remove_labels": array, "label_names": array, "label_id": string, "draft_id": string, "properties": {"type": "object"},
           "draft_conversation_id": draft_conversation, "message_conversation_id": message_conversation,
           "message_thread_id": message_thread})
     tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity, Reply All recipients or the effective folder need preparation. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",
          {**compose, "folder": string, "folder_names": {"type": "array", "items": string, "description": "Names of the actual draft destination from retry_arguments, and for a Gmail draft_id the label IDs and names the existing draft bears. Do not invent folder aliases."},
           "draft_id": string, "draft_conversation_id": draft_conversation}, ("to", "subject"))
-    tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
+    tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt, by its request_id or by the ref (m-...) a line to the owner names the mail by. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})
     settings = {"resource": string, "identifier": string}
     tool("email_settings_read", service.settings_read, "Read Gmail filters, send-as, vacation, language, IMAP/POP or forwarding settings. Other providers return website_required.", settings)
