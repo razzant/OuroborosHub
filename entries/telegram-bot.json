@@ -6,7 +6,7 @@
     "Telegram"
   ],
   "description": "Connect Telegram groups to Places using your connected bot on a compatible Ouroboros, or use a separate bot for groups, channels, and private chats people open with it. Both group paths support topics and durable media delivery. The Bot API cannot read earlier history.",
-  "digest": "fc456f1f7d74294e1e359292769af305ad67a16ba19fa35ed411a6113fb31c2c",
+  "digest": "b732f2b1696262ce3889661218f4a8f717a859555d2a4d3562535b769d03e137",
   "icon": "ui/icon.svg",
   "mark": "Same or separate bot",
   "name": "telegram-bot",
@@ -20,6 +20,6 @@
   },
   "title": "Telegram for others",
   "type": "extension",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "withdrawn": null
 }

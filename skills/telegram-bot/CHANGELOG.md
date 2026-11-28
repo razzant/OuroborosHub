@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.1
+
+- Confirm the outgoing address of a plain text reply to the owner's confirmed
+  direct chat before sending. An unavailable check holds the send. A confirmed
+  bot or owner-confirmation change ends the unsent remainder and keeps the
+  receipt. Ordinary delivery is unchanged.
+
 ## 0.14.0
 
 - A group can reach Ouroboros through the owner's own Telegram bot. On an Ouroboros advertising
