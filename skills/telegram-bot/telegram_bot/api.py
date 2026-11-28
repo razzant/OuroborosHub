@@ -156,6 +156,12 @@ class UrllibTelegramTransport:
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(self._post_json, url, payload, timeout_sec)
 
+    async def post_json_strict(
+        self, url: str, payload: Dict[str, Any], timeout_sec: float
+    ) -> Dict[str, Any]:
+        """A conditional send's POST, read like a file send's: only Telegram's own whole answer says what happened."""
+        return await asyncio.to_thread(self._post_json, url, payload, timeout_sec, True)
+
     async def post_multipart(
         self,
         url: str,
@@ -186,7 +192,7 @@ class UrllibTelegramTransport:
 
     @staticmethod
     def _post_json(
-        url: str, payload: Dict[str, Any], timeout_sec: float
+        url: str, payload: Dict[str, Any], timeout_sec: float, strict: bool = False
     ) -> Dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
@@ -195,7 +201,7 @@ class UrllibTelegramTransport:
             method="POST",
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
-        return _open_json(request, timeout_sec)
+        return _open_json(request, timeout_sec, strict=strict)
 
     @staticmethod
     def _post_multipart(
@@ -293,6 +299,9 @@ class TelegramClient:
     async def get_me(self) -> Dict[str, Any]:
         return await self._call("getMe", {})
 
+    async def get_chat(self, chat_id: str) -> Dict[str, Any]:
+        return await self._call("getChat", {"chat_id": chat_id})
+
     async def delete_webhook(self) -> bool:
         return bool(await self._call("deleteWebhook", {"drop_pending_updates": False}))
 
@@ -385,6 +394,7 @@ class TelegramClient:
         text: str,
         *,
         parse_mode: str = "",
+        perform_post=None,
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -396,8 +406,20 @@ class TelegramClient:
             payload["reply_parameters"] = {"message_id": int(reply_to_message_id)}
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        # A conditional send reads every POST strictly, so only Telegram's own refusal frees it or permits the plain
+        # retry. A transport without that reader sends nothing: there is no lax fallback.
+        if perform_post and not callable(getattr(self._transport, "post_json_strict", None)):
+            raise TelegramRequestNotSent("sendMessage", "no strict JSON transport for a conditional send")
+
+        async def post():
+            async def request():
+                if perform_post:
+                    return await self._call("sendMessage", payload, strict=True)
+                return await self._call("sendMessage", payload)
+            return await perform_post(request) if perform_post else await request()
+
         try:
-            result = await self._call("sendMessage", payload)
+            result = await post()
         except TelegramApiError as exc:
             # A definitive negative 400 response permits a plain retry. A timeout
             # or unknown response never triggers a second physical send here.
@@ -405,7 +427,7 @@ class TelegramClient:
                 raise
             payload.pop("parse_mode", None)
             payload["text"] = _telegram_html_to_plain(text)
-            result = await self._call("sendMessage", payload)
+            result = await post()
         return {**result, "_delivery": {"text": payload["text"], "format": "html" if payload.get("parse_mode") == "HTML" else "plain"}} if isinstance(result, dict) else {}
 
     async def send_photo(
@@ -633,13 +655,15 @@ class TelegramClient:
         payload: Dict[str, Any],
         *,
         timeout_sec: float = 35.0,
+        strict: bool = False,
     ) -> Any:
         if not self._token:
             raise TelegramApiError(
                 endpoint, "TELEGRAM_PUBLIC_BOT_TOKEN is not configured"
             )
         try:
-            response = await self._transport.post_json(
+            post_json = self._transport.post_json_strict if strict else self._transport.post_json
+            response = await post_json(
                 self._endpoint(endpoint), payload, timeout_sec
             )
         except TelegramApiError:
@@ -688,8 +712,9 @@ def _open_multipart(request: urllib.request.Request, *, timeout: float) -> Any:
 def _open_json(request: urllib.request.Request, timeout_sec: float, *, strict: bool = False) -> Dict[str, Any]:
     """Telegram's JSON answer to ``request``.
 
-    ``strict`` (file sends) only reads the original POST's answer: ``ok`` true to a success status, or Telegram's own
-    error to an error status, ``ok`` false with a ``description`` and an integer ``error_code`` equal to that status.
+    ``strict`` (file and conditional text sends) only reads the original POST's answer: ``ok`` true to a success
+    status, or Telegram's own error to an error status, ``ok`` false with a ``description`` and an integer
+    ``error_code`` equal to that status.
     Anything else, such as a gateway's HTML error page, a cut body or an answer contradicting its status, says
     nothing about what Telegram did, so it is an error without a code: never a refusal that permits another request.
     """

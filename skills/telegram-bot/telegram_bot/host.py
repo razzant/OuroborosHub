@@ -40,6 +40,8 @@ HOLD_PLACE_NOT_CONNECTED = "place_not_connected"
 HOLD_BINDING_CHANGED = "binding_changed"
 OWNER_HOLD_KINDS = frozenset({HOLD_SKILL_ACCESS, HOLD_PLACE_NOT_CONNECTED})
 _OWNER_CONTRIBUTION_ID = "owner_bot"
+# A conditional row still waits for its original address and confirmation.
+OWNER_DM_UNCONFIRMED = "Held: This waits for the same bot and your confirmed direct chat."
 
 
 class HoldNote(str):
@@ -199,6 +201,28 @@ class UrllibPresenceHostTransport:
             timeout_sec,
         )
 
+    async def request_owner_dm(
+        self,
+        url: str,
+        *,
+        headers: Dict[str, str],
+        condition: Dict[str, Any],
+        timeout_sec: float,
+    ) -> Dict[str, Any]:
+        port = urllib.parse.urlsplit(url).port
+        if not port or url != f"http://127.0.0.1:{port}/presence/place":
+            raise PresenceHostError("owner DM check requires the local Host Service origin")
+        # Unlike the ordinary opener, this one has no proxy or redirect handlers.
+        opener = urllib.request.OpenerDirector()
+        opener.add_handler(urllib.request.HTTPHandler())
+        opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+        opener.add_handler(urllib.request.HTTPErrorProcessor())
+        return await asyncio.to_thread(
+            self._open_json, "POST", url, headers,
+            {"operation": "check_owner_dm", "binding": condition}, timeout_sec, opener.open,
+            owner_dm=True,
+        )
+
     @staticmethod
     def _request_json(
         method: str,
@@ -206,6 +230,21 @@ class UrllibPresenceHostTransport:
         headers: Dict[str, str],
         payload: Optional[Dict[str, Any]],
         timeout_sec: float,
+    ) -> Dict[str, Any]:
+        return UrllibPresenceHostTransport._open_json(
+            method, url, headers, payload, timeout_sec, _open_host,
+        )
+
+    @staticmethod
+    def _open_json(
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        payload: Optional[Dict[str, Any]],
+        timeout_sec: float,
+        open_request: Callable[..., Any],
+        *,
+        owner_dm: bool = False,
     ) -> Dict[str, Any]:
         body = None
         request_headers = {**headers, "Accept": "application/json"}
@@ -218,19 +257,29 @@ class UrllibPresenceHostTransport:
             method=method,
             headers=request_headers,
         )
+        limit = 4096 if owner_dm else 2 * 1024 * 1024
         try:
-            with _open_host(request, timeout_sec) as response:  # noqa: S310 - fixed loopback URL
-                data = response.read(2 * 1024 * 1024 + 1)
+            with open_request(request, timeout=timeout_sec) as response:
+                if owner_dm and response.status != 200:
+                    raise PresenceHostError("owner DM check returned an unexpected HTTP status")
+                data = response.read(limit + 1)
                 whole = _whole(response, data)
         except urllib.error.HTTPError as exc:
             # A redirect arrives here too (it is not followed): neither its status nor its body answers this request.
             # An error body cut short or unreadable is no answer either; only its status stays.
             try:
                 with exc:
-                    body = exc.read(64 * 1024) if exc.code >= 400 else b""
-                body = body if _whole(exc, body) else b""
+                    if owner_dm:
+                        body = exc.read(limit + 1) if exc.code == 403 else b""
+                    else:
+                        body = exc.read(64 * 1024) if exc.code >= 400 else b""
+                body = body if _whole(exc, body) and (not owner_dm or len(body) <= limit) else b""
             except (OSError, ValueError, http.client.HTTPException):
                 body = b""
+            if owner_dm:
+                facts = ({"code": "presence_auth_blocked"}
+                         if exc.code == 403 and _error_payload(body).get("code") == "presence_auth_blocked" else {})
+                raise PresenceHostHTTPError(exc.code, "owner DM check not confirmed", facts) from None
             raise PresenceHostHTTPError(exc.code, _error_detail(body), _error_payload(body)) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, (socket.gaierror, ConnectionRefusedError)):
@@ -241,8 +290,10 @@ class UrllibPresenceHostTransport:
         except (TimeoutError, OSError, http.client.HTTPException) as exc:
             raise PresenceHostError(
                 f"presence Host request failed: {type(exc).__name__}"
-            ) from exc
-        if len(data) > 2 * 1024 * 1024:
+            ) from (None if owner_dm else exc)
+        if len(data) > limit:
+            if owner_dm:
+                raise PresenceHostError("owner DM Host reply exceeds 4 KiB")
             raise PresenceHostResponseTooLarge("presence Host response exceeds 2 MiB")
         if not whole:
             raise PresenceHostError("presence Host answer was cut short")
@@ -519,6 +570,42 @@ class PresenceHostClient:
         if not isinstance(place, dict):
             return PLACE_POLICY_UNREAD
         return _owner_place_hold_verdict(place)
+
+    async def owner_dm_hold(self, condition: Dict[str, Any]) -> str:
+        """The exact retained condition is current, held, or confirmed changed by the local Host."""
+        if not isinstance(condition, dict) or not condition:
+            return OWNER_DM_UNCONFIRMED
+        check = getattr(self.transport, "request_owner_dm", None)
+        if not callable(check):
+            return PLACE_POLICY_UNREAD
+        try:
+            answer = await check(
+                f"{self.host_base}/presence/place", headers=self._headers(),
+                condition=condition, timeout_sec=10.0,
+            )
+        except PresenceHostHTTPError as exc:
+            if exc.status_code == 403 and exc.payload.get("code") == "presence_auth_blocked":
+                return HoldNote(SKILL_ACCESS_REFUSED, HOLD_SKILL_ACCESS)
+            return OWNER_DM_UNCONFIRMED if exc.status_code in (400, 413) else PLACE_POLICY_UNREAD
+        except (PresenceHostError, OSError, asyncio.TimeoutError, http.client.HTTPException,
+                ValueError, TypeError, RecursionError):
+            return PLACE_POLICY_UNREAD
+        if not isinstance(answer, dict) or answer.keys() != {"ok", "allowed", "owner_dm_checked", "state", "code"}:
+            return PLACE_POLICY_UNREAD
+        if (all(answer[key] is True for key in ("ok", "allowed", "owner_dm_checked"))
+                and (answer["state"], answer["code"]) == ("active", "place_active")):
+            return ""
+        if answer["ok"] is True and answer["allowed"] is False and answer["owner_dm_checked"] is False:
+            state_code = (answer["state"], answer["code"])
+            if state_code == ("changed", "owner_dm_confirmation_changed"):
+                return HoldNote(
+                    "Not sent: the remaining reply's saved owner confirmation changed.", HOLD_BINDING_CHANGED,
+                )
+            if state_code == ("disconnected", "place_disconnected"):
+                return HoldNote(
+                    "Not sent: the remaining reply's saved place connection ended.", HOLD_BINDING_CHANGED,
+                )
+        return OWNER_DM_UNCONFIRMED
 
     async def report_delivery(self, payload: Dict[str, Any]) -> None:
         response = await self.transport.request_json(

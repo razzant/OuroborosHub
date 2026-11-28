@@ -25,7 +25,7 @@ from .telegram_bot.owner_feed import (
     SOURCE_STANDALONE,
     owner_state_dir,
 )
-from .telegram_bot.runtime import BOT_NOT_RUNNING, BOT_UNCONFIRMED, TelegramTransportRuntime
+from .telegram_bot.runtime import BOT_NOT_RUNNING, BOT_UNCONFIRMED, OWNER_DM, TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
 from .telegram_bot.status_summary import card_summary, link_state, summarize as summarize_status, summarize_owner
 from .telegram_bot.tools import (
@@ -286,6 +286,24 @@ def _make_telegram_send(
             payload["topic_id"] = clean_topic
         if reply_to_message_id not in (None, ""):
             payload["reply_to_message_id"] = str(reply_to_message_id).strip()
+        # Host-bound for this call, never a tool argument. The condition can verify the selected destination,
+        # but cannot select a bot or move the send to another store.
+        owner_dm = getattr(ctx, "owner_dm_condition", None)
+        if owner_dm is not None:
+            if not (
+                source.source == SOURCE_STANDALONE
+                and source.turn_bound
+                and source.account_id
+                and selected_kind == "message"
+                and not clean_topic
+                and isinstance(owner_dm, dict)
+                and (owner_dm.get("provider"), owner_dm.get("conversation_id"), owner_dm.get("thread_id"))
+                == ("telegram", target, "")
+                and owner_dm.get("account_id") == source.account_id
+            ):
+                return {"ok": False, "error": "this call's direct-chat condition does not match the message; "
+                                              "nothing was queued"}
+            payload[OWNER_DM] = dict(owner_dm)
         state_dir = source.state_dir
         try:
             if selected_kind == "message":
@@ -309,21 +327,41 @@ def _make_telegram_send(
         delivery_id, store = f"telegram-send:{receipt}", None
         try:
             store = CustodyStore.shared(source.store_path, owner_bot=source.source == SOURCE_OWNER_BOT)
-            inserted = store.enqueue_outbox(delivery_id, payload)
+            inserted = store.enqueue_outbox(delivery_id, payload, conditional=owner_dm is not None)
         except BaseException:
             # The row may be committed already: a copy goes only when no row is known to name it.
             discard_unqueued(payload.get("_frozen") or [], state_dir, store, delivery_id)
             raise
+        ack_payload = payload
         if not inserted:
-            # This request_id is already queued with the bytes it had then; this call's copy is not needed.
+            # The retained request won; this call's staged copy is not referenced.
             discard_files(payload.get("_frozen") or [], state_dir)
+            if source.source == SOURCE_STANDALONE:
+                try:
+                    record = store.outbox_request_record(delivery_id)
+                except (OSError, sqlite3.Error, ValueError):
+                    record = None
+                if record is None or not isinstance(record[0], dict):
+                    return {"ok": False, "code": "receipt_source_unavailable",
+                            "error": "Could not verify the saved request. No new send was queued."}
+                saved, direct_open = record
+                if owner_dm is not None or direct_open or OWNER_DM in saved:
+                    same = owner_dm is not None and saved.get(OWNER_DM) == payload[OWNER_DM] and all(
+                        saved.get(key) == payload.get(key) for key in (
+                            "account_id", "chat_id", "topic_id", "kind", "reply_to_message_id", "text", "markdown",
+                        )
+                    )
+                    if not same:
+                        return {"ok": False, "code": "request_id_conflict",
+                                "error": "This request ID belongs to a different saved send. No new send was queued."}
+                    ack_payload = saved
         return {
             "ok": True,
             "state": "queued" if inserted else "already_queued",
             "request_id": receipt,
-            "chat_id": target,
-            "kind": selected_kind,
-            **({"account_id": source.account_id} if source.expose_account else {}),
+            "chat_id": ack_payload["chat_id"],
+            "kind": ack_payload["kind"],
+            **({"account_id": ack_payload["account_id"]} if source.expose_account else {}),
         }
 
     return telegram_send

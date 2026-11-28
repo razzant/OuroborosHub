@@ -1110,8 +1110,9 @@ def test_a_copy_whose_row_was_committed_before_the_error_stays_and_is_sent(tmp_p
     module, tools = _plugin(tmp_path)
     real = module.CustodyStore.enqueue_outbox
 
-    def committed_then_failed(self, delivery_id, payload):
-        assert real(self, delivery_id, payload)
+    def committed_then_failed(self, delivery_id, payload, *, conditional: bool):
+        assert conditional is False
+        assert real(self, delivery_id, payload, conditional=conditional)
         raise failure("the answer was lost after the commit")
 
     with monkeypatch.context() as patch:
@@ -1134,7 +1135,8 @@ def test_a_copy_whose_row_was_committed_before_the_error_stays_and_is_sent(tmp_p
 def test_a_copy_whose_row_was_never_committed_is_removed(tmp_path, wire, monkeypatch, kind, failure):
     module, tools = _plugin(tmp_path)
 
-    def refused(self, delivery_id, payload):
+    def refused(self, delivery_id, payload, *, conditional: bool):
+        assert conditional is False
         raise failure("the store took nothing")
 
     with monkeypatch.context() as patch:
@@ -1149,8 +1151,9 @@ def test_a_copy_stays_when_the_store_cannot_say_whether_its_row_was_committed(tm
     module, tools = _plugin(tmp_path)
     real = module.CustodyStore.enqueue_outbox
 
-    def committed_then_failed(self, delivery_id, payload):
-        assert real(self, delivery_id, payload)
+    def committed_then_failed(self, delivery_id, payload, *, conditional: bool):
+        assert conditional is False
+        assert real(self, delivery_id, payload, conditional=conditional)
         raise sqlite3.OperationalError("disk I/O error")
 
     def unreadable(self, delivery_id):
@@ -1177,8 +1180,9 @@ def test_a_repeated_request_id_whose_queueing_raised_keeps_only_the_first_copy(t
     source.write_bytes(SECOND)
     real = module.CustodyStore.enqueue_outbox
 
-    def ignored_then_failed(self, delivery_id, payload):
-        assert not real(self, delivery_id, payload)  # already queued with the first bytes
+    def ignored_then_failed(self, delivery_id, payload, *, conditional: bool):
+        assert conditional is False
+        assert not real(self, delivery_id, payload, conditional=conditional)  # already queued with the first bytes
         raise sqlite3.OperationalError("database is locked")
 
     with monkeypatch.context() as patch:

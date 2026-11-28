@@ -243,7 +243,7 @@ def resolve_tool_source(
             if owner_turn and req == bot_a:
                 return _source_a()
             if not owner_turn and req == bot_b:
-                return _source_b(bot_b, explicit=True)
+                return _source_b(bot_b, explicit=True, turn_bound=True)
             raise _not_this_turns_route(req)
         if bot_a and req == bot_a and req != bot_b:
             return _source_a()
