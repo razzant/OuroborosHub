@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8e313ff4a08f6361bdbc6c57cb9f240d1cd00d63",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/c9d8213fa00d9b717e1343c2af2baa4b4bb23ee7",
   "schema_version": 1,
   "skills": [
     {
@@ -4117,8 +4117,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "ae78df60e52de8df80ee5bf7dfc5d2e64a545d616b90a950b196aaba4df30d2f",
-          "size": 32909
+          "sha256": "c7bf1d6d2ad81ce676f4a7c57a05a135905c9a8b90991cdcec79d1101d2e6def",
+          "size": 33196
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -4137,13 +4137,13 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "21ae0c1ee5a021f6379c3bd63f9cfec20e58d9af3f06f027fb1e62f8b4de98a0",
-          "size": 61017
+          "sha256": "90da092f3d1a69793602d8b3a8d90ab20954dfcebc9401c330809eeda5e7a2a8",
+          "size": 61553
         },
         {
           "path": "plugin.py",
-          "sha256": "109e6a237af7285a985d5bc309624920d41a340a1a36e95a5cadc816f4028437",
-          "size": 30460
+          "sha256": "ebfbb7a22a22409bd845b9ca62400e292716eee6e88bd790fa8eac8652841159",
+          "size": 32762
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -4152,13 +4152,13 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "d32edc4fd834186b13dc6ba09dd24a63bbbe147142d89cce868520bac4821937",
-          "size": 39676
+          "sha256": "7165b0015e498b1397bd3b2f33ebf299eb7f0fa15ba7ad958137ea8a5bd4a93b",
+          "size": 41014
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "b88d602dc55efa7483fd2b7dd161424e3dbd331b580c750766ef34cef8f9fc4a",
-          "size": 103804
+          "sha256": "b21be107fd66c5bedec0614a968aa431346eed0f3ae28f73d55737d4cded810a",
+          "size": 106500
         },
         {
           "path": "telegram_bot/delivery.py",
@@ -4182,8 +4182,8 @@
         },
         {
           "path": "telegram_bot/host.py",
-          "sha256": "293cbe2cd2071637e4163fa429df3b5308be90a6e6807533b2c7be1f6d888361",
-          "size": 37007
+          "sha256": "c66f7bc092087ebb3052ff10bf7447746e581379320b70a240b7aafdb174d959",
+          "size": 41437
         },
         {
           "path": "telegram_bot/outbox_files.py",
@@ -4197,8 +4197,8 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "ac6d5ce52c6c0be6c8125b3e6e13415d8319e80560f21ccbd2d6fb71251204c8",
-          "size": 141671
+          "sha256": "982f0bd2ac667a57d7a87b92304868220184bf5484ff50b344d7463708ddff4f",
+          "size": 148545
         },
         {
           "path": "telegram_bot/settings.py",
@@ -4212,8 +4212,8 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "3ab2510b8ed7e4fffc6398cb0e48e1c4a9fd317671bc7aca58393f892d388c28",
-          "size": 51369
+          "sha256": "199bad47749cd413665fc4e36636383ef994274e7398bfc9629041c79c9f2a5c",
+          "size": 51386
         },
         {
           "path": "tests/conftest.py",
@@ -4357,8 +4357,8 @@
         },
         {
           "path": "tests/test_unknown_outcomes.py",
-          "sha256": "0c8ebda3943b6007cbe4fba12d33a424659d6ef5f573ac6cd325b64e677411d7",
-          "size": 82607
+          "sha256": "1f865407d63743c74bc98acef031a0d00ee7c13935f46c9f5a23697b78697696",
+          "size": 82914
         },
         {
           "path": "tests/test_upload_transfer.py",
@@ -4400,7 +4400,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.14.0"
+      "version": "0.14.1"
     },
     {
       "connects": [
